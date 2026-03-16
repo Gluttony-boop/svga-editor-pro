@@ -20,7 +20,6 @@
   "build": {
     "appId": "com.svga.editor",
     "productName": "SVGA编辑器",
-    "publish": null,
     "directories": {
       "output": "dist"
     },
