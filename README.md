@@ -1,4 +1,4 @@
-博客地址：[https://www.cnblogs.com/yalong/p/19702246](https://www.cnblogs.com/yalong/p/19702246)
 
 ## 背景
-项目中有好几处需要对svga进行编辑的，索性这次做成一个小工具，方便后续使用
+基于这个修改博客地址：[https://www.cnblogs.com/yalong/p/19702246](https://www.cnblogs.com/yalong/p/19702246)
+增加可修改svga fps，时长，图片尺寸，智能压缩图片
