@@ -10,6 +10,12 @@
         <meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" name="viewport" />
         <script src="./assets/jquery-1.12.3.min.js"></script>
         <script type="text/javascript" src="./assets/svga.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+        <!-- Protobuf for SVGA encoding -->
+        <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.2.4/dist/protobuf.min.js"></script>
+        <!-- UPNG.js for lossless PNG compression -->
+        <script src="https://cdn.jsdelivr.net/npm/upng-js@2.1.0/UPNG.min.js"></script>
         <style>
             * {
                 box-sizing: border-box;
@@ -86,6 +92,25 @@
                 line-height: 1.5;
                 resize: vertical;
                 font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+            }
+
+            .header {
+                text-align: center;
+                padding: 20px 0 30px;
+                border-bottom: 1px solid #e8e8e8;
+                margin-bottom: 24px;
+            }
+
+            .app-title {
+                font-size: 28px;
+                font-weight: 600;
+                color: #333;
+                margin-bottom: 8px;
+            }
+
+            .app-info {
+                font-size: 13px;
+                color: #999;
             }
 
             .btn {
@@ -234,6 +259,10 @@
     </head>
     <body>
         <div id="app">
+            <div class="header">
+                <h1 class="app-title">SVGA 编辑工具</h1>
+                <div class="app-info">版本 1.0.0 | 作者 郑任光</div>
+            </div>
             <div class="block">
                 <div class="title">1. 载入 SVGA</div>
                 <div class="row">
@@ -248,7 +277,24 @@
             </div>
 
             <div class="block">
-                <div class="title">2. 配置插槽并实时预览（文本 / 图片）</div>
+                <div class="title">2. FPS 与时长设置</div>
+                <div class="row">
+                    <label style="font-size:14px; margin-right:8px;">FPS（帧率）：</label>
+                    <input id="fpsInput" class="input" type="number" min="1" max="60" value="24" style="width:80px;" />
+                    <label style="font-size:14px; margin-left:16px; margin-right:8px;">时长（秒）：</label>
+                    <input id="durationInput" class="input" type="number" min="0.1" step="0.1" value="1" style="width:80px;" />
+                    <label style="font-size:14px; margin-left:16px; margin-right:8px;">总帧数：</label>
+                    <span id="framesDisplay" style="font-size:14px; min-width:50px;">0</span>
+                </div>
+                <div class="row">
+                    <button id="applyFpsDuration" class="btn">应用设置并重新预览</button>
+                    <button id="resetFpsDuration" class="btn gray">重置为原始值</button>
+                    <span class="desc">修改 FPS 会改变动画播放速度；修改时长会自动调整总帧数。</span>
+                </div>
+            </div>
+
+            <div class="block">
+                <div class="title">3. 配置插槽并实时预览（文本 / 图片）</div>
                 <div class="row">
                     <select id="editType" class="input small">
                         <option value="text">文本 setText</option>
@@ -274,34 +320,83 @@
                     </div>
                     <div class="row">
                         <input id="imageFile" type="file" accept="image/*" />
-                        <span class="desc">可直接上传本地图片，点击“保存并应用”后会执行 setImage。</span>
+                        <span class="desc">可直接上传本地图片，点击"保存并应用"后会执行 setImage。</span>
                     </div>
                 </div>
-                <div id="editorDesc" class="desc">点击“保存并应用”后会重新渲染并立即看到动效效果。</div>
+                <div id="editorDesc" class="desc">点击"保存并应用"后会重新渲染并立即看到动效效果。</div>
             </div>
 
             <div class="block">
-                <div class="title">3. 当前已应用配置</div>
+                <div class="title">4. 当前已应用配置</div>
                 <div id="history">{}</div>
             </div>
 
             <div class="block">
-                <div class="title">4. SVGA 分解（videoItem.images 预览）</div>
+                <div class="title">5. SVGA 分解（videoItem.images 预览）</div>
                 <div class="row">
                     <button id="decomposeSvga" class="btn gray">SVGA 分解</button>
                     <span class="desc">从当前 SVGA 中提取内嵌图片资源，点击缩略图可快速选为图片插槽。</span>
                 </div>
-                <div id="imageAssets">请先加载 SVGA，然后点击上方的 “SVGA 分解” 按钮，图片资源会在这里以缩略图形式展示。</div>
+                <div id="imageAssets">请先加载 SVGA，然后点击上方的 "SVGA 分解" 按钮，图片资源会在这里以缩略图形式展示。</div>
             </div>
 
             <div class="block">
-                <div class="title">5. 插槽探测结果（候选 key，统一作为插槽名）</div>
-                <div id="slotCandidates">请先加载 SVGA，然后点击“查询插槽”。所有下方列出的 key 都可以直接作为插槽名使用（底层都是一张图，可 setText 也可 setImage）。</div>
+                <div class="title">6. 插槽探测结果（候选 key，统一作为插槽名）</div>
+                <div id="slotCandidates">请先加载 SVGA，然后点击"查询插槽"。所有下方列出的 key 都可以直接作为插槽名使用（底层都是一张图，可 setText 也可 setImage）。</div>
             </div>
 
             <div class="block">
-                <div class="title">6. 预览</div>
+                <div class="title">7. 预览</div>
                 <div id="svgaPreview" class="preview"></div>
+            </div>
+
+            <div class="block">
+                <div class="title">8. 图片处理设置</div>
+                <div class="row">
+                    <label style="font-size:14px; font-weight:600;">尺寸缩减：</label>
+                    <input id="scalePercent" class="input" type="number" min="10" max="100" value="100" style="width:70px;" />
+                    <span style="font-size:14px;">%</span>
+                    <label style="font-size:14px; margin-left:12px;">
+                        <input id="enableScale" type="checkbox" /> 启用尺寸缩减
+                    </label>
+                    <button id="previewScale" class="btn gray">预览缩减效果</button>
+                </div>
+                <div class="desc" style="margin-top:4px;">
+                    将所有图片按百分比缩小尺寸（如 50% 表示宽高各缩小一半），可显著减小文件体积。启用后会同步调整画布和动画位置。
+                </div>
+                <div id="scaleResult" style="display:none; margin-top:10px; padding:10px; border:1px solid #d9dde7; border-radius:6px; background:#f9fbff; font-size:13px; line-height:1.6;">
+                </div>
+                <div class="row" style="margin-top:12px;">
+                    <label style="font-size:14px; font-weight:600;">图片压缩：</label>
+                    <label style="font-size:14px; margin-left:8px;">
+                        <input id="enableCompression" type="checkbox" checked /> 启用压缩
+                    </label>
+                    <select id="compressionMode" class="input small">
+                        <option value="smart" selected>智能压缩（推荐）</option>
+                        <option value="webp">WebP压缩</option>
+                        <option value="png-256">PNG 256色</option>
+                        <option value="png-128">PNG 128色</option>
+                        <option value="png-64">PNG 64色</option>
+                    </select>
+                    <button id="previewCompression" class="btn gray">预览压缩效果</button>
+                </div>
+                <div class="desc" style="margin-top:4px;">
+                    • <b>智能压缩（推荐）</b>：自动尝试多种方式，选择最小的结果 • <b>WebP压缩</b>：转换为WebP格式，支持透明 • <b>PNG 256/128/64色</b>：索引色压缩，颜色越少文件越小
+                </div>
+                <div id="compressionResult" style="display:none; margin-top:10px; padding:10px; border:1px solid #d9dde7; border-radius:6px; background:#f9fbff; font-size:13px; line-height:1.6;">
+                </div>
+            </div>
+
+            <div class="block">
+                <div class="title">9. 导出 SVGA</div>
+                <div class="row">
+                    <button id="exportSvga" class="btn">导出修改后的 SVGA</button>
+                    <button id="exportImages" class="btn gray">导出图片资源包（ZIP）</button>
+                    <span class="desc">导出功能需要引入 JSZip 库用于打包文件。</span>
+                </div>
+                <div class="row">
+                    <input id="exportFileName" class="input slot" type="text" placeholder="导出文件名（不含扩展名）" value="edited_svga" />
+                </div>
             </div>
         </div>
 
@@ -318,6 +413,12 @@
                     objectUrl: "",
                     slotConfigMap: {},
                     imageObjectUrls: [],
+                    originalSvgaArrayBuffer: null, // 存储原始SVGA文件的ArrayBuffer
+                    // FPS 和时长相关
+                    originalFps: 24,
+                    originalFrames: 0,
+                    customFps: null,   // 用户自定义的 FPS（null 表示使用原始值）
+                    customFrames: null // 用户自定义的帧数（null 表示使用原始值）
                 };
 
                 function showTips(text) {
@@ -335,6 +436,85 @@
                     state.player = new SVGA.Player("#svgaPreview");
                     state.parser = new SVGA.Parser("#svgaPreview");
                     state.player.loops = 0;
+                }
+
+                // 更新 FPS 和时长显示
+                function updateFpsDurationDisplay() {
+                    var fps = state.customFps !== null ? state.customFps : state.originalFps;
+                    var frames = state.customFrames !== null ? state.customFrames : state.originalFrames;
+                    var duration = fps > 0 ? (frames / fps).toFixed(2) : 0;
+                    
+                    $("#fpsInput").val(fps);
+                    $("#durationInput").val(duration);
+                    $("#framesDisplay").text(frames);
+                }
+
+                // 应用 FPS 和时长设置
+                function applyFpsDuration() {
+                    if (!state.currentVideoItem) {
+                        showTips("请先加载 SVGA 文件");
+                        return;
+                    }
+                    
+                    var newFps = parseInt($("#fpsInput").val(), 10);
+                    var newDuration = parseFloat($("#durationInput").val());
+                    
+                    if (isNaN(newFps) || newFps < 1 || newFps > 60) {
+                        showTips("FPS 必须在 1-60 之间");
+                        return;
+                    }
+                    
+                    if (isNaN(newDuration) || newDuration <= 0) {
+                        showTips("时长必须大于 0");
+                        return;
+                    }
+                    
+                    // 计算新的帧数
+                    var newFrames = Math.round(newFps * newDuration);
+                    
+                    state.customFps = newFps;
+                    state.customFrames = newFrames;
+                    
+                    // 更新 videoItem
+                    state.currentVideoItem.fps = newFps;
+                    state.currentVideoItem.frames = newFrames;
+                    
+                    // 更新显示
+                    updateFpsDurationDisplay();
+                    
+                    // 重新应用配置并播放
+                    state.player.clear();
+                    state.player.setVideoItem(state.currentVideoItem);
+                    applyAllSlotConfigs(state.currentVideoItem);
+                    state.player.startAnimation();
+                    
+                    showTips("FPS 和时长已应用");
+                }
+
+                // 重置 FPS 和时长
+                function resetFpsDuration() {
+                    if (!state.currentVideoItem) {
+                        showTips("请先加载 SVGA 文件");
+                        return;
+                    }
+                    
+                    state.customFps = null;
+                    state.customFrames = null;
+                    
+                    // 恢复原始值
+                    state.currentVideoItem.fps = state.originalFps;
+                    state.currentVideoItem.frames = state.originalFrames;
+                    
+                    // 更新显示
+                    updateFpsDurationDisplay();
+                    
+                    // 重新应用配置并播放
+                    state.player.clear();
+                    state.player.setVideoItem(state.currentVideoItem);
+                    applyAllSlotConfigs(state.currentVideoItem);
+                    state.player.startAnimation();
+                    
+                    showTips("已重置为原始值");
                 }
 
                 function applyAllSlotConfigs(videoItem) {
@@ -381,12 +561,33 @@
                         return;
                     }
                     ensurePlayer();
+                    
+                    // 如果是文件URL，尝试获取ArrayBuffer用于导出
+                    if (state.currentSourceType === "file" && state.objectUrl) {
+                        fetch(state.objectUrl)
+                            .then(function(response) { return response.arrayBuffer(); })
+                            .then(function(buffer) {
+                                state.originalSvgaArrayBuffer = buffer;
+                            })
+                            .catch(function() {});
+                    }
+                    
                     state.parser.load(
                         source,
                         function (videoItem) {
                             console.log("videoItem--");
                             console.log(videoItem);
                             state.currentVideoItem = videoItem;
+                            
+                            // 更新原始 FPS 和帧数
+                            state.originalFps = videoItem.fps || 24;
+                            state.originalFrames = videoItem.frames || 0;
+                            state.customFps = null;
+                            state.customFrames = null;
+                            
+                            // 更新 FPS 和时长显示
+                            updateFpsDurationDisplay();
+                            
                             state.player.setVideoItem(videoItem);
                             try {
                                 renderImageAssets(videoItem);
@@ -501,7 +702,7 @@
                         return;
                     }
                     var result = collectSlotCandidates(state.currentVideoItem);
-                    // 汇总所有候选 key，统一当作“插槽名”来用
+                    // 汇总所有候选 key，统一当作"插槽名"来用
                     var allKeyMap = {};
                     $.each(result.spriteSlots, function (_, k) {
                         allKeyMap[k] = true;
@@ -617,7 +818,987 @@
                     return configObj;
                 }
 
+                // 导出图片资源为ZIP
+                function exportImagesAsZip() {
+                    if (!state.currentVideoItem || !state.currentVideoItem.images) {
+                        showTips("没有可导出的图片资源");
+                        return;
+                    }
+
+                    var images = state.currentVideoItem.images;
+                    var keys = Object.keys(images);
+                    if (!keys.length) {
+                        showTips("没有可导出的图片资源");
+                        return;
+                    }
+
+                    var zip = new JSZip();
+                    var modifiedImages = {}; // 记录被修改的图片
+                    var promises = [];
+                    var enableCompression = $("#enableCompression").is(":checked");
+                    var compressionMode = getCompressionMode();
+
+                    $.each(keys, function(_, imageKey) {
+                        var base64 = images[imageKey];
+                        if (!base64 || typeof base64 !== "string") return;
+
+                        // 检查是否有对应的插槽配置（图片替换）
+                        if (state.slotConfigMap[imageKey] && state.slotConfigMap[imageKey].type === "image") {
+                            modifiedImages[imageKey] = state.slotConfigMap[imageKey].source;
+                        } else {
+                            // 使用原始图片
+                            var imageData = base64;
+                            // 移除可能的data URL前缀
+                            if (imageData.indexOf("data:image") === 0) {
+                                imageData = imageData.split(",")[1] || imageData;
+                            }
+                            
+                            // 如果启用压缩，进行压缩
+                            if (enableCompression) {
+                                try {
+                                    var originalBytes = base64ToBytes(imageData);
+                                    var compressed = compressPng(originalBytes, compressionMode);
+                                    zip.file(imageKey + ".png", compressed);
+                                } catch (e) {
+                                    console.error("压缩失败:", imageKey, e);
+                                    zip.file(imageKey + ".png", imageData, { base64: true });
+                                }
+                            } else {
+                                zip.file(imageKey + ".png", imageData, { base64: true });
+                            }
+                        }
+                    });
+
+                    // 添加被修改的图片（需要从URL加载）
+                    $.each(modifiedImages, function(key, source) {
+                        var promise = fetch(source)
+                            .then(function(response) { return response.blob(); })
+                            .then(function(blob) {
+                                if (enableCompression) {
+                                    return new Promise(function(resolve) {
+                                        var reader = new FileReader();
+                                        reader.onloadend = function() {
+                                            try {
+                                                var arrayBuffer = reader.result;
+                                                var compressed = compressPng(new Uint8Array(arrayBuffer), compressionMode);
+                                                zip.file(key + ".png", compressed);
+                                            } catch (e) {
+                                                console.error("压缩失败:", key, e);
+                                                zip.file(key + ".png", blob);
+                                            }
+                                            resolve();
+                                        };
+                                        reader.readAsArrayBuffer(blob);
+                                    });
+                                } else {
+                                    zip.file(key + ".png", blob);
+                                }
+                            })
+                            .catch(function() {
+                                // 如果加载失败，尝试使用原始图片
+                                var originalBase64 = images[key];
+                                if (originalBase64) {
+                                    zip.file(key + ".png", originalBase64, { base64: true });
+                                }
+                            });
+                        promises.push(promise);
+                    });
+
+                    // 添加配置信息
+                    var configInfo = {
+                        exportTime: new Date().toISOString(),
+                        slotConfigs: state.slotConfigMap,
+                        imageCount: keys.length
+                    };
+                    zip.file("config.json", JSON.stringify(configInfo, null, 2));
+
+                    Promise.all(promises).then(function() {
+                        zip.generateAsync({ type: "blob" }).then(function(content) {
+                            var fileName = $.trim($("#exportFileName").val()) || "edited_svga_images";
+                            downloadBlob(content, fileName + ".zip");
+                            showTips("图片资源导出成功");
+                        });
+                    });
+                }
+
+                // 下载Blob
+                function downloadBlob(blob, fileName) {
+                    var url = URL.createObjectURL(blob);
+                    var a = document.createElement("a");
+                    a.href = url;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                }
+
+                // SVGA Protobuf JSON定义（基于 SVGA 2.0 格式）
+                var SVGA_PROTO_JSON = {
+                    "nested": {
+                        "svga": {
+                            "nested": {
+                                "MovieParams": {
+                                    "fields": {
+                                        "viewBoxWidth": { "type": "float", "id": 1 },
+                                        "viewBoxHeight": { "type": "float", "id": 2 },
+                                        "fps": { "type": "int32", "id": 3 },
+                                        "frames": { "type": "int32", "id": 4 }
+                                    }
+                                },
+                                "Layout": {
+                                    "fields": {
+                                        "x": { "type": "float", "id": 1 },
+                                        "y": { "type": "float", "id": 2 },
+                                        "width": { "type": "float", "id": 3 },
+                                        "height": { "type": "float", "id": 4 }
+                                    }
+                                },
+                                "Transform": {
+                                    "fields": {
+                                        "a": { "type": "float", "id": 1 },
+                                        "b": { "type": "float", "id": 2 },
+                                        "c": { "type": "float", "id": 3 },
+                                        "d": { "type": "float", "id": 4 },
+                                        "tx": { "type": "float", "id": 5 },
+                                        "ty": { "type": "float", "id": 6 }
+                                    }
+                                },
+                                "FrameObject": {
+                                    "fields": {
+                                        "alpha": { "type": "float", "id": 1 },
+                                        "layout": { "type": "Layout", "id": 2 },
+                                        "transform": { "type": "Transform", "id": 3 },
+                                        "clipPath": { "type": "string", "id": 4 }
+                                    }
+                                },
+                                "Sprite": {
+                                    "fields": {
+                                        "imageKey": { "type": "string", "id": 1 },
+                                        "frames": { "rule": "repeated", "type": "FrameObject", "id": 2 }
+                                    }
+                                },
+                                "AudioDefine": {
+                                    "fields": {
+                                        "audioKey": { "type": "string", "id": 1 },
+                                        "startFrame": { "type": "int32", "id": 2 },
+                                        "endFrame": { "type": "int32", "id": 3 },
+                                        "startTime": { "type": "int32", "id": 4 },
+                                        "totalTime": { "type": "int32", "id": 5 }
+                                    }
+                                },
+                                "MovieEntity": {
+                                    "fields": {
+                                        "version": { "type": "string", "id": 1 },
+                                        "params": { "type": "MovieParams", "id": 2 },
+                                        "images": { "keyType": "string", "type": "bytes", "id": 3 },
+                                        "sprites": { "rule": "repeated", "type": "Sprite", "id": 4 },
+                                        "audios": { "rule": "repeated", "type": "AudioDefine", "id": 5 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+
+                var protoRoot = null;
+
+                // 初始化Protobuf
+                async function initProtobuf() {
+                    if (protoRoot) return protoRoot;
+                    try {
+                        protoRoot = protobuf.Root.fromJSON(SVGA_PROTO_JSON);
+                        return protoRoot;
+                    } catch (e) {
+                        console.error("Protobuf初始化失败:", e);
+                        throw e;
+                    }
+                }
+
+                // 将base64字符串转换为Uint8Array
+                function base64ToBytes(base64) {
+                    var binaryString = atob(base64);
+                    var bytes = new Uint8Array(binaryString.length);
+                    for (var i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    return bytes;
+                }
+
+                // 压缩PNG图片（使用UPNG.js）- 同步版本供PNG模式使用
+                // mode: "lossless"(无损), "high"(高效), "max"(极限)
+                function compressPng(imageData, mode) {
+                    try {
+                        // 确保 imageData 是 Uint8Array
+                        var inputBytes = imageData;
+                        if (imageData instanceof ArrayBuffer) {
+                            inputBytes = new Uint8Array(imageData);
+                        }
+                        
+                        // 解码PNG
+                        var buffer = inputBytes.buffer ? inputBytes.buffer : inputBytes;
+                        var img = UPNG.decode(buffer);
+                        var rgba = UPNG.toRGBA8(img);
+                        
+                        // 根据模式选择颜色数量
+                        // cnum: 0=真彩色无损, 256=索引色(轻微有损), 64=更多压缩
+                        var cnum = 0;
+                        if (mode === "lossless") {
+                            cnum = 0; // 无损，真彩色
+                        } else if (mode === "high") {
+                            cnum = 256; // 索引色256，视觉几乎无损
+                        } else if (mode === "max") {
+                            cnum = 64; // 极限压缩，可接受质量损失
+                        }
+                        
+                        // 编码PNG
+                        var compressed = UPNG.encode(rgba, img.width, img.height, cnum);
+                        
+                        // 返回 Uint8Array
+                        return new Uint8Array(compressed);
+                    } catch (e) {
+                        console.warn("PNG压缩失败，使用原图:", e);
+                        if (imageData instanceof Uint8Array) {
+                            return imageData;
+                        }
+                        return new Uint8Array(imageData);
+                    }
+                }
+
+                // 将图片数据转换为WebP格式（异步）
+                // imageData: Uint8Array 或 ArrayBuffer (PNG数据)
+                // quality: 质量 (0-1)，1表示无损
+                function convertToWebP(imageData, quality) {
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            var inputBytes = imageData instanceof Uint8Array ? imageData : new Uint8Array(imageData);
+                            var buffer = inputBytes.buffer ? inputBytes.buffer : inputBytes;
+                            
+                            // 解码PNG获取尺寸和像素数据
+                            var img = UPNG.decode(buffer);
+                            var rgba = UPNG.toRGBA8(img)[0]; // 获取第一帧的RGBA数据
+                            
+                            // 创建Canvas
+                            var canvas = document.createElement('canvas');
+                            canvas.width = img.width;
+                            canvas.height = img.height;
+                            var ctx = canvas.getContext('2d');
+                            
+                            // 创建ImageData并填充像素
+                            var imageDataObj = new ImageData(new Uint8ClampedArray(rgba), img.width, img.height);
+                            ctx.putImageData(imageDataObj, 0, 0);
+                            
+                            // 转换为WebP
+                            canvas.toBlob(function(blob) {
+                                if (!blob) {
+                                    reject(new Error("WebP转换失败"));
+                                    return;
+                                }
+                                var reader = new FileReader();
+                                reader.onload = function() {
+                                    resolve(new Uint8Array(reader.result));
+                                };
+                                reader.onerror = function() {
+                                    reject(new Error("读取WebP失败"));
+                                };
+                                reader.readAsArrayBuffer(blob);
+                            }, 'image/webp', quality);
+                        } catch (e) {
+                            reject(e);
+                        }
+                    });
+                }
+
+                // 压缩图片（支持智能压缩和多种模式）- 异步版本
+                // mode: "smart", "webp", "png-256", "png-128", "png-64"
+                async function compressImage(imageData, mode) {
+                    var inputBytes = imageData instanceof Uint8Array ? imageData : new Uint8Array(imageData);
+                    var originalSize = inputBytes.length;
+                    
+                    try {
+                        if (mode === "smart") {
+                            // 智能压缩：尝试多种方式，选择最小的
+                            return await smartCompress(inputBytes);
+                        }
+                        
+                        if (mode === "webp") {
+                            var webpResult = await convertToWebP(inputBytes, 0.85);
+                            // 只有更小才使用
+                            if (webpResult.length < originalSize) {
+                                return webpResult;
+                            }
+                            return inputBytes;
+                        }
+                        
+                        // PNG模式
+                        var cnum = parseInt(mode.split('-')[1]) || 256;
+                        var pngResult = compressPngToNColors(inputBytes, cnum);
+                        // 只有更小才使用
+                        if (pngResult.length < originalSize) {
+                            return pngResult;
+                        }
+                        return inputBytes;
+                        
+                    } catch (e) {
+                        console.warn("图片压缩失败，使用原图:", e);
+                        return inputBytes;
+                    }
+                }
+
+                // 智能压缩：尝试多种方式，选择最小的结果
+                async function smartCompress(inputBytes) {
+                    var originalSize = inputBytes.length;
+                    var results = [{ data: inputBytes, size: originalSize, method: '原图' }];
+                    
+                    console.log("=== 智能压缩开始，原始大小:", originalSize, "bytes ===");
+                    
+                    // 尝试WebP压缩
+                    try {
+                        var webpData = await convertToWebP(inputBytes, 0.85);
+                        if (webpData && webpData.length > 0) {
+                            var webpRatio = ((1 - webpData.length / originalSize) * 100).toFixed(1);
+                            console.log("WebP压缩:", webpData.length, "bytes, 节省", webpRatio + "%");
+                            results.push({ data: webpData, size: webpData.length, method: 'WebP' });
+                        }
+                    } catch (e) {
+                        console.warn("WebP压缩跳过:", e.message);
+                    }
+                    
+                    // 尝试PNG不同色深
+                    var colorCounts = [256, 128, 64];
+                    for (var i = 0; i < colorCounts.length; i++) {
+                        try {
+                            var pngData = compressPngToNColors(inputBytes, colorCounts[i]);
+                            if (pngData && pngData.length > 0) {
+                                var pngRatio = ((1 - pngData.length / originalSize) * 100).toFixed(1);
+                                console.log("PNG-" + colorCounts[i] + "压缩:", pngData.length, "bytes, 节省", pngRatio + "%");
+                                results.push({ 
+                                    data: pngData, 
+                                    size: pngData.length, 
+                                    method: 'PNG-' + colorCounts[i] 
+                                });
+                            }
+                        } catch (e) {
+                            console.warn("PNG-" + colorCounts[i] + "压缩跳过:", e.message);
+                        }
+                    }
+                    
+                    // 选择最小的结果
+                    results.sort(function(a, b) { return a.size - b.size; });
+                    console.log("选择:", results[0].method, results[0].size, "bytes");
+                    return results[0].data;
+                }
+
+                // PNG索引色压缩
+                function compressPngToNColors(inputBytes, cnum) {
+                    var buffer = inputBytes.buffer ? inputBytes.buffer : inputBytes;
+                    var img = UPNG.decode(buffer);
+                    var rgba = UPNG.toRGBA8(img);
+                    var compressed = UPNG.encode(rgba, img.width, img.height, cnum);
+                    return new Uint8Array(compressed);
+                }
+
+                // 检测图片格式
+                function detectImageFormat(bytes) {
+                    if (!bytes || bytes.length < 8) return '未知';
+                    
+                    // 检查WebP: RIFF....WEBP
+                    if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+                        if (bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+                            return 'WebP';
+                        }
+                    }
+                    
+                    // 检查PNG: \x89PNG
+                    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) {
+                        return 'PNG';
+                    }
+                    
+                    // 检查JPEG: \xFF\xD8\xFF
+                    if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+                        return 'JPEG';
+                    }
+                    
+                    return 'PNG'; // 默认返回PNG
+                }
+
+                // 获取当前压缩模式
+                function getCompressionMode() {
+                    return $("#compressionMode").val() || "smart";
+                }
+
+                // 缩放图片（按百分比缩减尺寸）
+                function scaleImage(imageData, scalePercent) {
+                    return new Promise(function(resolve, reject) {
+                        try {
+                            var inputBytes = imageData instanceof Uint8Array ? imageData : new Uint8Array(imageData);
+                            var buffer = inputBytes.buffer ? inputBytes.buffer : inputBytes;
+                            
+                            var img = UPNG.decode(buffer);
+                            var rgba = UPNG.toRGBA8(img)[0];
+                            
+                            var newWidth = Math.round(img.width * scalePercent / 100);
+                            var newHeight = Math.round(img.height * scalePercent / 100);
+                            
+                            if (scalePercent >= 100 || newWidth <= 0 || newHeight <= 0) {
+                                resolve(inputBytes);
+                                return;
+                            }
+                            
+                            var srcCanvas = document.createElement('canvas');
+                            srcCanvas.width = img.width;
+                            srcCanvas.height = img.height;
+                            var srcCtx = srcCanvas.getContext('2d');
+                            
+                            var imageDataObj = new ImageData(new Uint8ClampedArray(rgba), img.width, img.height);
+                            srcCtx.putImageData(imageDataObj, 0, 0);
+                            
+                            var dstCanvas = document.createElement('canvas');
+                            dstCanvas.width = newWidth;
+                            dstCanvas.height = newHeight;
+                            var dstCtx = dstCanvas.getContext('2d');
+                            
+                            dstCtx.imageSmoothingEnabled = true;
+                            dstCtx.imageSmoothingQuality = 'high';
+                            dstCtx.drawImage(srcCanvas, 0, 0, newWidth, newHeight);
+                            
+                            var scaledImageData = dstCtx.getImageData(0, 0, newWidth, newHeight);
+                            var pngData = UPNG.encode([scaledImageData.data.buffer], newWidth, newHeight, 0);
+                            resolve(new Uint8Array(pngData));
+                        } catch (e) {
+                            console.warn("图片缩放失败:", e);
+                            reject(e);
+                        }
+                    });
+                }
+
+                // 预览缩放效果
+                async function previewScaleEffect() {
+                    if (!state.currentVideoItem || !state.currentVideoItem.images) {
+                        showTips("请先加载 SVGA 文件");
+                        return;
+                    }
+
+                    var images = state.currentVideoItem.images;
+                    var keys = Object.keys(images);
+                    if (!keys.length) {
+                        showTips("没有图片资源可缩放");
+                        return;
+                    }
+
+                    var scalePercent = parseInt($("#scalePercent").val(), 10);
+                    if (isNaN(scalePercent) || scalePercent < 10 || scalePercent > 100) {
+                        showTips("缩放百分比必须在 10-100 之间");
+                        return;
+                    }
+
+                    showTips("正在分析缩放效果...");
+                    var $result = $("#scaleResult");
+                    var results = [];
+                    var totalOriginal = 0;
+                    var totalScaled = 0;
+                    var promises = [];
+
+                    $.each(keys, function(_, imageKey) {
+                        var base64 = images[imageKey];
+                        if (!base64 || typeof base64 !== "string") return;
+
+                        var imageData = base64;
+                        if (imageData.indexOf('data:image') === 0) {
+                            imageData = imageData.split(',')[1] || imageData;
+                        }
+                        var originalBytes = base64ToBytes(imageData);
+                        var originalSize = originalBytes.length;
+                        var originalDims = getImageDimensions(originalBytes.buffer || originalBytes);
+                        totalOriginal += originalSize;
+
+                        (function(key, size, origBytes, dims) {
+                            var promise = scaleImage(origBytes, scalePercent).then(function(scaled) {
+                                var scaledSize = scaled.length || scaled.byteLength || 0;
+                                totalScaled += scaledSize;
+                                var ratio = size > 0 ? ((1 - scaledSize / size) * 100).toFixed(1) : "0.0";
+                                var scaledDims = getImageDimensions(scaled.buffer || scaled);
+                                
+                                results.push({
+                                    key: key,
+                                    original: size,
+                                    scaled: scaledSize,
+                                    ratio: ratio,
+                                    origWidth: dims.width,
+                                    origHeight: dims.height,
+                                    newWidth: scaledDims.width,
+                                    newHeight: scaledDims.height
+                                });
+                            }).catch(function(e) {
+                                console.error("缩放失败:", key, e);
+                                results.push({
+                                    key: key,
+                                    original: size,
+                                    scaled: size,
+                                    ratio: "0.0",
+                                    origWidth: dims.width,
+                                    origHeight: dims.height,
+                                    newWidth: dims.width,
+                                    newHeight: dims.height,
+                                    error: true
+                                });
+                                totalScaled += size;
+                            });
+                            promises.push(promise);
+                        })(imageKey, originalSize, originalBytes, originalDims);
+                    });
+
+                    Promise.all(promises).then(function() {
+                        var html = '<div style="margin-bottom:8px;"><strong>尺寸缩减效果预览（' + scalePercent + '%）：</strong></div>';
+                        html += '<table style="width:100%; border-collapse:collapse;">';
+                        html += '<tr style="border-bottom:1px solid #d9dde7;"><th style="text-align:left; padding:4px 8px;">图片名</th><th style="text-align:center; padding:4px 8px;">原始尺寸</th><th style="text-align:center; padding:4px 8px;">新尺寸</th><th style="text-align:right; padding:4px 8px;">原始大小</th><th style="text-align:right; padding:4px 8px;">缩减后</th><th style="text-align:right; padding:4px 8px;">节省</th></tr>';
+                        
+                        results.sort(function(a, b) { return a.key.localeCompare(b.key); });
+                        
+                        $.each(results, function(_, r) {
+                            var ratioClass = parseFloat(r.ratio) > 0 ? 'color:#52c41a;' : 'color:#999;';
+                            var errorTag = r.error ? ' <span style="color:#ff4d4f;">[失败]</span>' : '';
+                            html += '<tr style="border-bottom:1px solid #eee;">';
+                            html += '<td style="padding:4px 8px; word-break:break-all;">' + r.key + errorTag + '</td>';
+                            html += '<td style="text-align:center; padding:4px 8px;">' + r.origWidth + 'x' + r.origHeight + '</td>';
+                            html += '<td style="text-align:center; padding:4px 8px;">' + r.newWidth + 'x' + r.newHeight + '</td>';
+                            html += '<td style="text-align:right; padding:4px 8px;">' + formatFileSize(r.original) + '</td>';
+                            html += '<td style="text-align:right; padding:4px 8px;">' + formatFileSize(r.scaled) + '</td>';
+                            html += '<td style="text-align:right; padding:4px 8px; ' + ratioClass + '">-' + r.ratio + '%</td>';
+                            html += '</tr>';
+                        });
+                        
+                        var totalRatio = totalOriginal > 0 ? ((1 - totalScaled / totalOriginal) * 100).toFixed(1) : 0;
+                        html += '<tr style="border-top:2px solid #d9dde7; font-weight:bold;">';
+                        html += '<td style="padding:8px;">合计（' + results.length + ' 张图片）</td>';
+                        html += '<td style="text-align:center; padding:8px;">-</td>';
+                        html += '<td style="text-align:center; padding:8px;">-</td>';
+                        html += '<td style="text-align:right; padding:8px;">' + formatFileSize(totalOriginal) + '</td>';
+                        html += '<td style="text-align:right; padding:8px;">' + formatFileSize(totalScaled) + '</td>';
+                        html += '<td style="text-align:right; padding:8px; color:#52c41a;">-' + totalRatio + '%</td>';
+                        html += '</tr></table>';
+                        
+                        $result.html(html).show();
+                        showTips("缩放分析完成");
+                    });
+                }
+
+                // 获取图片尺寸
+                function getImageDimensions(imageData) {
+                    try {
+                        var img = UPNG.decode(imageData);
+                        return { width: img.width, height: img.height };
+                    } catch (e) {
+                        return { width: 0, height: 0 };
+                    }
+                }
+
+                // 格式化文件大小
+                function formatFileSize(bytes) {
+                    if (!bytes || isNaN(bytes)) return "未知";
+                    if (bytes < 1024) return bytes + " B";
+                    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + " KB";
+                    return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+                }
+
+                // 预览压缩效果
+                async function previewCompressionEffect() {
+                    if (!state.currentVideoItem || !state.currentVideoItem.images) {
+                        showTips("请先加载 SVGA 文件");
+                        return;
+                    }
+
+                    var images = state.currentVideoItem.images;
+                    var keys = Object.keys(images);
+                    if (!keys.length) {
+                        showTips("没有图片资源可压缩");
+                        return;
+                    }
+
+                    var mode = getCompressionMode();
+                    var modeText = getModeText(mode);
+                    
+                    showTips("正在分析" + modeText + "效果...");
+                    var $result = $("#compressionResult");
+                    var results = [];
+                    var totalOriginal = 0;
+                    var totalCompressed = 0;
+                    var promises = [];
+
+                    for (var i = 0; i < keys.length; i++) {
+                        var imageKey = keys[i];
+                        var base64 = images[imageKey];
+                        if (!base64 || typeof base64 !== "string") continue;
+
+                        // 获取原始大小
+                        var imageData = base64;
+                        if (imageData.indexOf('data:image') === 0) {
+                            imageData = imageData.split(',')[1] || imageData;
+                        }
+                        var originalBytes = base64ToBytes(imageData);
+                        var originalSize = originalBytes.length;
+                        totalOriginal += originalSize;
+
+                        // 使用闭包捕获当前值
+                        (function(key, size, origBytes) {
+                            var promise = compressImage(origBytes, mode).then(function(compressed) {
+                                var compressedSize = compressed.length || compressed.byteLength || 0;
+                                totalCompressed += compressedSize;
+                                var ratio = size > 0 ? ((1 - compressedSize / size) * 100).toFixed(1) : "0.0";
+                                
+                                // 检测压缩后的格式
+                                var format = detectImageFormat(compressed);
+                                var isCompressed = compressedSize < size;
+                                
+                                results.push({
+                                    key: key,
+                                    original: size,
+                                    compressed: compressedSize,
+                                    ratio: ratio,
+                                    format: format,
+                                    isCompressed: isCompressed
+                                });
+                            }).catch(function(e) {
+                                console.error("压缩失败:", key, e);
+                                results.push({
+                                    key: key,
+                                    original: size,
+                                    compressed: size,
+                                    ratio: "0.0",
+                                    format: "失败",
+                                    error: true
+                                });
+                                totalCompressed += size;
+                            });
+                            promises.push(promise);
+                        })(imageKey, originalSize, originalBytes);
+                    }
+
+                    await Promise.all(promises);
+                    
+                    var html = '<div style="margin-bottom:8px;"><strong>压缩效果预览（' + modeText + '）：</strong></div>';
+                    html += '<table style="width:100%; border-collapse:collapse;">';
+                    html += '<tr style="border-bottom:1px solid #d9dde7;"><th style="text-align:left; padding:4px 8px;">图片名</th><th style="text-align:right; padding:4px 8px;">原始大小</th><th style="text-align:right; padding:4px 8px;">压缩后</th><th style="text-align:right; padding:4px 8px;">压缩率</th></tr>';
+                    
+                    results.sort(function(a, b) { return a.key.localeCompare(b.key); });
+                    
+                    for (var j = 0; j < results.length; j++) {
+                        var r = results[j];
+                        var ratioClass = parseFloat(r.ratio) > 0 ? 'color:#52c41a;' : 'color:#999;';
+                        var errorTag = r.error ? ' <span style="color:#ff4d4f;">[失败]</span>' : '';
+                        var formatTag = r.format ? ' <span style="color:#398eff;">[' + r.format + ']</span>' : '';
+                        var noCompressTag = !r.isCompressed && !r.error ? ' <span style="color:#faad14;">[原图最优]</span>' : '';
+                        var compressTag = r.isCompressed ? ' <span style="color:#52c41a;">[已压缩]</span>' : '';
+                        html += '<tr style="border-bottom:1px solid #eee;">';
+                        html += '<td style="padding:4px 8px; word-break:break-all;">' + r.key + formatTag + noCompressTag + compressTag + errorTag + '</td>';
+                        html += '<td style="text-align:right; padding:4px 8px;">' + formatFileSize(r.original) + '</td>';
+                        html += '<td style="text-align:right; padding:4px 8px;">' + formatFileSize(r.compressed) + '</td>';
+                        html += '<td style="text-align:right; padding:4px 8px; ' + ratioClass + '">-' + r.ratio + '%</td>';
+                        html += '</tr>';
+                    }
+                    
+                    var totalRatio = totalOriginal > 0 ? ((1 - totalCompressed / totalOriginal) * 100).toFixed(1) : 0;
+                    html += '<tr style="border-top:2px solid #d9dde7; font-weight:bold;">';
+                    html += '<td style="padding:8px;">合计（' + results.length + ' 张图片）</td>';
+                    html += '<td style="text-align:right; padding:8px;">' + formatFileSize(totalOriginal) + '</td>';
+                    html += '<td style="text-align:right; padding:8px;">' + formatFileSize(totalCompressed) + '</td>';
+                    html += '<td style="text-align:right; padding:8px; color:#52c41a;">-' + totalRatio + '%</td>';
+                    html += '</tr></table>';
+                    
+                    // 添加提示信息
+                    if (parseFloat(totalRatio) < 5) {
+                        html += '<div style="margin-top:10px; padding:8px; background:#fffbe6; border:1px solid #ffe58f; border-radius:4px; font-size:12px;">';
+                        html += '<strong>💡 压缩效果不明显可能的原因：</strong><br>';
+                        html += '1. 图片已经过优化，无法进一步压缩<br>';
+                        html += '2. 图片是简单的矢量图形，本身很小<br>';
+                        html += '3. 图片颜色丰富，索引色压缩效果有限<br>';
+                        html += '建议：尝试使用"WebP压缩"或"PNG 64色"模式';
+                        html += '</div>';
+                    }
+                    
+                    $result.html(html).show();
+                    showTips("压缩分析完成（请按F12查看控制台详细日志）");
+                }
+
+                // 获取模式文本
+                function getModeText(mode) {
+                    var modeTexts = {
+                        'smart': '智能压缩',
+                        'webp': 'WebP压缩',
+                        'png-256': 'PNG 256色',
+                        'png-128': 'PNG 128色',
+                        'png-64': 'PNG 64色'
+                    };
+                    return modeTexts[mode] || mode;
+                }
+
+                // 将图片URL转换为Uint8Array
+                async function imageToBytes(url) {
+                    if (url.startsWith('data:')) {
+                        var parts = url.split(',');
+                        return base64ToBytes(parts[1] || parts[0]);
+                    }
+                    
+                    var response = await fetch(url);
+                    var blob = await response.blob();
+                    
+                    return new Promise(function(resolve, reject) {
+                        var reader = new FileReader();
+                        reader.onloadend = function() {
+                            var base64 = reader.result;
+                            if (base64.indexOf('data:') === 0) {
+                                base64 = base64.split(',')[1];
+                            }
+                            resolve(base64ToBytes(base64));
+                        };
+                        reader.onerror = reject;
+                        reader.readAsDataURL(blob);
+                    });
+                }
+
+                // 构建MovieEntity数据（支持尺寸缩减和压缩）
+                async function buildMovieEntity(videoItem, modifiedImages) {
+                    var enableScale = $("#enableScale").is(":checked");
+                    var scalePercent = parseInt($("#scalePercent").val(), 10) || 100;
+                    var scaleFactor = (enableScale && scalePercent < 100 && scalePercent >= 10) ? (scalePercent / 100) : 1;
+                    
+                    var entity = {
+                        version: "2.0",
+                        params: {
+                            viewBoxWidth: (videoItem.videoSize ? videoItem.videoSize.width : 0) * scaleFactor,
+                            viewBoxHeight: (videoItem.videoSize ? videoItem.videoSize.height : 0) * scaleFactor,
+                            fps: videoItem.fps || 24,
+                            frames: videoItem.frames || 0
+                        },
+                        images: {},
+                        sprites: [],
+                        audios: []
+                    };
+
+                    // 处理图片资源
+                    var enableCompression = $("#enableCompression").is(":checked");
+                    var compressionMode = getCompressionMode();
+                    
+                    if (videoItem.images) {
+                        var imagePromises = [];
+                        var imageKeys = Object.keys(videoItem.images);
+                        
+                        for (var i = 0; i < imageKeys.length; i++) {
+                            var key = imageKeys[i];
+                            var base64 = videoItem.images[key];
+                            
+                            (function(imageKey, imageData) {
+                                var promise = (async function() {
+                                    var bytes;
+                                    if (modifiedImages[imageKey]) {
+                                        bytes = modifiedImages[imageKey];
+                                    } else {
+                                        var cleanData = imageData;
+                                        if (cleanData.indexOf('data:image') === 0) {
+                                            cleanData = cleanData.split(',')[1] || cleanData;
+                                        }
+                                        bytes = base64ToBytes(cleanData);
+                                    }
+                                    
+                                    // 如果启用了尺寸缩减，先进行缩放
+                                    if (enableScale && scalePercent < 100 && scalePercent >= 10) {
+                                        try {
+                                            bytes = await scaleImage(bytes, scalePercent);
+                                        } catch (e) {
+                                            console.warn("图片缩放失败，使用原图:", imageKey, e);
+                                        }
+                                    }
+                                    
+                                    // 如果启用了压缩，进行压缩
+                                    if (enableCompression) {
+                                        try {
+                                            bytes = await compressImage(bytes, compressionMode);
+                                        } catch (e) {
+                                            console.warn("图片压缩失败，使用原图:", imageKey, e);
+                                        }
+                                    }
+                                    
+                                    entity.images[imageKey] = bytes;
+                                })();
+                                imagePromises.push(promise);
+                            })(key, base64);
+                        }
+                        
+                        await Promise.all(imagePromises);
+                    }
+
+                    // 处理sprites（如果启用了尺寸缩减，同步调整layout和transform）
+                    if (videoItem.sprites && videoItem.sprites.length) {
+                        $.each(videoItem.sprites, function(_, sprite) {
+                            var frames = [];
+                            if (sprite.frames && sprite.frames.length) {
+                                $.each(sprite.frames, function(_, frame) {
+                                    var frameObj = {
+                                        alpha: frame.alpha !== undefined ? frame.alpha : 1,
+                                        layout: null,
+                                        transform: null,
+                                        clipPath: frame.clipPath || ''
+                                    };
+
+                                    if (frame.layout) {
+                                        frameObj.layout = {
+                                            x: frame.layout.x || 0,
+                                            y: frame.layout.y || 0,
+                                            width: (frame.layout.width || 0) * scaleFactor,
+                                            height: (frame.layout.height || 0) * scaleFactor
+                                        };
+                                    }
+
+                                    if (frame.transform) {
+                                        frameObj.transform = {
+                                            a: frame.transform.a !== undefined ? frame.transform.a : 1,
+                                            b: frame.transform.b !== undefined ? frame.transform.b : 0,
+                                            c: frame.transform.c !== undefined ? frame.transform.c : 0,
+                                            d: frame.transform.d !== undefined ? frame.transform.d : 1,
+                                            tx: (frame.transform.tx !== undefined ? frame.transform.tx : 0) * scaleFactor,
+                                            ty: (frame.transform.ty !== undefined ? frame.transform.ty : 0) * scaleFactor
+                                        };
+                                    }
+
+                                    frames.push(frameObj);
+                                });
+                            }
+
+                            entity.sprites.push({
+                                imageKey: sprite.imageKey || '',
+                                frames: frames
+                            });
+                        });
+                    }
+
+                    return entity;
+                }
+
+                // 导出修改后的SVGA文件
+                async function exportSvga() {
+                    if (!state.currentVideoItem) {
+                        showTips("请先加载 SVGA 文件");
+                        return;
+                    }
+
+                    var fileName = $.trim($("#exportFileName").val()) || "edited_svga";
+                    var hasModifications = Object.keys(state.slotConfigMap).length > 0;
+                    var enableCompression = $("#enableCompression").is(":checked");
+                    var enableScale = $("#enableScale").is(":checked");
+                    var scalePercent = parseInt($("#scalePercent").val(), 10) || 100;
+
+                    showTips("正在导出，请稍候...");
+
+                    try {
+                        // 只有在没有修改、没有启用压缩和缩放、且原始文件可用时，才直接导出原始文件
+                        if (!hasModifications && !enableCompression && !enableScale && state.originalSvgaArrayBuffer) {
+                            var blob = new Blob([state.originalSvgaArrayBuffer], { type: "application/octet-stream" });
+                            downloadBlob(blob, fileName + ".svga");
+                            showTips("已导出原始SVGA文件");
+                            return;
+                        }
+
+                        // 收集需要修改的图片
+                        var modifiedImages = {};
+                        var imagePromises = [];
+                        
+                        $.each(state.slotConfigMap, function(slotName, slotItem) {
+                            if (slotItem && slotItem.type === "image" && slotItem.source) {
+                                var promise = imageToBytes(slotItem.source).then(function(bytes) {
+                                    modifiedImages[slotName] = bytes;
+                                }).catch(function(err) {
+                                    console.warn("图片加载失败:", slotName, err);
+                                });
+                                imagePromises.push(promise);
+                            }
+                        });
+
+                        await Promise.all(imagePromises);
+
+                        // 初始化protobuf
+                        await initProtobuf();
+
+                        // 构建MovieEntity（会应用缩放和压缩，异步）
+                        var movieEntity = await buildMovieEntity(state.currentVideoItem, modifiedImages);
+
+                        // 获取MovieEntity消息类型
+                        var MovieEntity = protoRoot.lookupType('svga.MovieEntity');
+
+                        // 编码为protobuf
+                        var encoded = MovieEntity.encode(movieEntity).finish();
+
+                        // SVGA 2.0 格式：zlib 压缩的 protobuf 数据（标准zlib格式，带头部）
+                        // 使用标准 deflate（带zlib头部和校验）
+                        var compressed = pako.deflate(encoded);
+
+                        // 创建Blob并下载
+                        var blob = new Blob([compressed], { type: "application/octet-stream" });
+                        
+                        // 显示导出信息
+                        var originalSize = state.originalSvgaArrayBuffer ? state.originalSvgaArrayBuffer.byteLength : 0;
+                        var newSize = blob.size;
+                        var sizeInfo = "";
+                        if (originalSize > 0) {
+                            var savedRatio = ((1 - newSize / originalSize) * 100).toFixed(1);
+                            sizeInfo = "\n原始: " + formatFileSize(originalSize) + " → 导出: " + formatFileSize(newSize) + " (节省 " + savedRatio + "%)";
+                        }
+                        
+                        downloadBlob(blob, fileName + ".svga");
+
+                        var message = "SVGA导出成功";
+                        if (hasModifications) {
+                            message += "（已应用修改）";
+                        }
+                        if (enableScale && scalePercent < 100) {
+                            message += "（已缩减尺寸" + scalePercent + "%）";
+                        }
+                        if (enableCompression) {
+                            message += "（已压缩图片）";
+                        }
+                        if (sizeInfo) {
+                            console.log("导出信息:" + sizeInfo);
+                        }
+                        showTips(message + (sizeInfo ? " " + sizeInfo.replace("\n", "") : ""));
+                    } catch (err) {
+                        console.error("导出失败:", err);
+                        
+                        // 如果导出失败，尝试直接导出原始文件
+                        if (state.originalSvgaArrayBuffer) {
+                            var blob = new Blob([state.originalSvgaArrayBuffer], { type: "application/octet-stream" });
+                            downloadBlob(blob, fileName + ".svga");
+                            showTips("已导出原始SVGA文件（编码失败，请查看控制台）");
+                        } else {
+                            showTips("导出失败: " + (err.message || "未知错误，请查看控制台"));
+                        }
+                    }
+                }
+
                 function bindEvents() {
+                    // FPS 和时长相关事件
+                    $("#applyFpsDuration").on("click", function() {
+                        applyFpsDuration();
+                    });
+
+                    $("#resetFpsDuration").on("click", function() {
+                        resetFpsDuration();
+                    });
+
+                    // 时长变化时自动计算帧数
+                    $("#durationInput").on("input", function() {
+                        var fps = parseInt($("#fpsInput").val(), 10) || 24;
+                        var duration = parseFloat($(this).val()) || 0;
+                        var frames = Math.round(fps * duration);
+                        $("#framesDisplay").text(frames);
+                    });
+
+                    // FPS 变化时自动更新帧数和时长
+                    $("#fpsInput").on("input", function() {
+                        var fps = parseInt($(this).val(), 10) || 24;
+                        var duration = parseFloat($("#durationInput").val()) || 0;
+                        var frames = Math.round(fps * duration);
+                        $("#framesDisplay").text(frames);
+                    });
+
                     $("#editType").on("change", function () {
                         updateEditorByType();
                     });
@@ -630,6 +1811,17 @@
                         }
                         state.currentSource = url;
                         state.currentSourceType = "url";
+                        
+                        // 尝试获取ArrayBuffer用于导出
+                        fetch(url)
+                            .then(function(response) { return response.arrayBuffer(); })
+                            .then(function(buffer) {
+                                state.originalSvgaArrayBuffer = buffer;
+                            })
+                            .catch(function() {
+                                // 跨域或其他错误，忽略
+                            });
+                        
                         renderSvgaFromSource(url);
                     });
 
@@ -712,6 +1904,22 @@
                         } else {
                             showTips("已分解 SVGA，但未发现任何图片资源");
                         }
+                    });
+
+                    $("#exportSvga").on("click", function () {
+                        exportSvga();
+                    });
+
+                    $("#exportImages").on("click", function () {
+                        exportImagesAsZip();
+                    });
+
+                    $("#previewCompression").on("click", function () {
+                        previewCompressionEffect();
+                    });
+
+                    $("#previewScale").on("click", function () {
+                        previewScaleEffect();
                     });
                 }
 
