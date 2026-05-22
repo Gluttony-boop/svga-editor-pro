@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SVGA在线预览和导出工具 - 免费的SVGA动画处理工具</title>
+    <meta name="description" content="免费的SVGA动画预览和处理工具，支持在线预览播放、PNG序列帧导出打包、多分辨率适配、ImageKey资源查看、自定义背景设置等功能。完全本地运行不上传文件，保护隐私安全，支持拖拽操作，操作简单快捷高效。">
+    <meta name="keywords" content="svga,svga工具,svga预览,svga在线预览,svga转换序列帧,svga序列帧导出,svga动画预览,svga播放,svga Tool">
+    <link rel="stylesheet" href="tools/styles.css?v=1.0.117">
+    <link rel="stylesheet" href="font-awesome/5.15.4/css/all.min.css">
+    <script>
+        var _hmt = _hmt || [];
+        (function() {
+          var hm = document.createElement("script");
+          hm.src = "https://hm.baidu.com/hm.js?5f2e7df46ce6dcd4f3210a54a619229e";
+          var s = document.getElementsByTagName("script")[0]; 
+          s.parentNode.insertBefore(hm, s);
+        })();
+    </script>        
+</head>
+<body>
+    <div class="container">
+        <div class="title-section">
+            <span>SVGA_Tool</span>
+        </div>
+        
+        
+        <!-- 添加提示信息和链接 -->
+        <div class="info-banner">
+            <div class="security-info">
+                <i class="fas fa-shield-alt"></i>
+                <span>工具完全本地运行，不会上传文件数据，请放心使用！  <span style="color: #ff6b6b;">  成品礼物，/定制礼物，/设计师入驻，/问题反馈，/联系客服，请点击  <i class="fas fa-arrow-right"></i></span> </span>
+            </div>
+            <div class="external-link gift-store-banner">
+                <a href="https://52gifts.cn" target="_blank" class="gift-store-link">
+                    <div class="gift-store-content">
+                        <img src="images/logo.ico" alt="我爱礼物网" class="gift-store-logo">
+                        <div class="gift-store-text">
+                            <span class="store-title">成品礼物商城-定制礼物</span>
+                            <span class="store-subtitle">我爱礼物网 | 52gifts.cn</span>
+                        </div>
+                        <i class="fas fa-shopping-cart gift-store-icon"></i>
+                    </div>
+                </a>
+            </div>
+            <div class="external-link github-link">
+                <a href="https://github.com/svga" target="_blank">
+                    <i class="fab fa-github"></i> 开源代码
+                </a>
+            </div>
+        </div>
+        
+        <div class="main-content loading loading-transition">
+            <!-- 左侧：分辨率功能面板 -->
+            <div class="resolution-functions-panel panel-section">
+                <!-- 分辨率设置 -->
+                <div class="resolution-panel panel-section">
+                    <h3>分辨率设置</h3>
+                    <div class="resolution-inputs">
+                        <div class="input-group">
+                            <label for="width-input">宽度:</label>
+                            <input type="number" id="width-input" min="100" max="4096" placeholder="宽度" value="750">
+                        </div>
+                        <div class="input-group">
+                            <label for="height-input">高度:</label>
+                            <input type="number" id="height-input" min="100" max="4096" placeholder="高度" value="1624">
+                        </div>
+                    </div>
+                    <div class="resolution-presets">
+                        <button class="preset-btn" data-width="1284" data-height="2778">iPhone 15 Max</button>
+                        <button class="preset-btn" data-width="1170" data-height="2532">iPhone 12</button>
+                        <button class="preset-btn" data-width="828" data-height="1792">iPhone 11</button>
+                        <button class="preset-btn" data-width="1125" data-height="2436">iPhone X</button>
+                        <button class="preset-btn" data-width="750" data-height="1334">iPhone 8</button>
+                        <button class="preset-btn" data-width="750" data-height="1334">iPhone 6</button>
+                        <button class="preset-btn" data-width="1080" data-height="2400">三星 S20</button>
+                        <button class="preset-btn" data-width="1344" data-height="2772">华为Mate40 pro</button>
+                        <button class="preset-btn" data-width="1200" data-height="2640">华为 P40 pro</button>
+                        <button class="preset-btn" data-width="1080" data-height="2400">OPPO R17</button>
+                        <button class="preset-btn" data-width="1080" data-height="2340">小米10</button>
+                        <button class="preset-btn" data-width="1080" data-height="1920">小米6</button>
+                        <button class="preset-btn" data-width="1080" data-height="2256">VIVO NEX 3S</button>
+                        <button class="preset-btn" data-width="1080" data-height="2376">VIVO X50</button>
+                        <button class="preset-btn" data-width="1080" data-height="2400">一加8T</button>
+                        <button class="preset-btn" data-width="720" data-height="1280">720P</button>
+                        <button class="preset-btn" data-width="1080" data-height="1920">1080P</button>
+                        <button class="preset-btn" data-width="600" data-height="800">800*600</button>
+                        <button class="preset-btn" data-width="750" data-height="1624">750*1624</button>
+                    </div>
+                    <div class="resolution-actions">
+                        <button id="swap-dimensions" class="swap-btn" title="交换宽高">
+                            <i class="fas fa-exchange-alt"></i>
+                        </button>
+                        <button id="apply-resolution" class="apply-btn">应用</button>
+                    </div>
+                    <p class="resolution-note">Tip：</p>
+                    <p class="resolution-note">1.实际分辨率尺寸会根据屏幕大小按比例等比缩放</p>
+                    <p class="resolution-note">2.可以输入自定分辨率点击“应用”按钮进行调整</p>
+                </div>
+                
+                <!-- 导出功能 -->
+                <div class="export-panel panel-section">
+                    <h3>导出功能</h3>
+                    <div class="export-options">
+                        <p class="export-description">将当前SVGA动画导出为PNG序列帧并打包为ZIP文件下载，同时可导出SVGA文件中包含的音频资源。如果您替换了图像素材，可以点击"生成SVGA文件"将替换后的素材重新打包为新的SVGA文件。</p>
+                        <div class="export-buttons">
+                            <button id="export-frames-btn" class="export-btn export-btn-compact" disabled>
+                                <i class="fas fa-file-export"></i> 导出PNG序列帧
+                            </button>
+                            <button id="export-audio-btn" class="export-btn export-btn-compact audio-export-btn" disabled>
+                                <i class="fas fa-music"></i> 导出音频文件
+                            </button>
+                            <button id="generate-svga-btn" class="export-btn export-btn-compact generate-svga-btn" disabled>
+                                <i class="fas fa-file-code"></i> 生成SVGA文件
+                            </button>
+                            <button class="export-btn export-btn-compact placeholder-btn" style="visibility: hidden;" disabled>
+                                <i class="fas fa-placeholder"></i> 占位按钮
+                            </button>
+                        </div>
+                        <div class="export-notice">
+                            <i class="fas fa-info-circle"></i>
+                            <p>提示：导出速度受计算机硬件性能限制，过程中可能出现卡顿，请耐心等待。如长时间无反应，请刷新页面重试。</p>
+                        </div>
+                    </div>
+                    
+                    <!-- 导出进度显示 -->
+                    <div id="export-progress-container" class="export-progress-container hidden">
+                        <h4>导出进度</h4>
+                        <div class="export-progress-bar-container">
+                            <div id="export-progress-bar" class="export-progress-bar"></div>
+                        </div>
+                        <div class="export-progress-info">
+                            <span id="export-current-frame">0</span> / <span id="export-total-frames">0</span>
+                        </div>
+                        <p id="export-status">准备导出...</p>
+                        <div id="export-performance-notice" class="export-performance-notice">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <p>正在处理中，请勿关闭页面。导出过程可能较慢，这取决于您的计算机性能和动画复杂度。</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 左中：ImageKey 列表模块 -->
+            <div id="image-key-container" class="image-key-container panel-section">
+                <h3>ImageKey 列表</h3>
+                <!-- 添加搜索框 -->
+                <div class="image-search-container">
+                    <div class="search-input-wrapper">
+                        <i class="fas fa-search search-icon"></i>
+                        <input type="text" id="image-search-input" class="image-search-input" placeholder="搜索图片文件名...">
+                        <button id="clear-search-btn" class="clear-search-btn" title="清空搜索">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </div>
+                </div>
+                <p class="no-images-message">请上传 SVGA 文件查看图像资源</p>
+            </div>
+            
+            <!-- 中间：预览播放区域 -->
+            <div class="player-section">
+                <div id="player-container" class="drop-zone">
+                    <canvas id="svga-canvas"></canvas>
+                    <div id="drop-message">
+                        <p>体验预览svga动画，请将文件拖拽到此区域</p>
+                        <p class="small">或点击此处选择文件</p>
+                    </div>
+                    <input type="file" id="svga-file" accept=".svga" class="hidden-input">
+                </div>
+                
+                <div class="playback-container">
+                    <div class="controls">
+                        <button id="play-pause-btn" class="play-btn">
+                            <i class="fas fa-play"></i>
+                        </button>
+                        <button id="stop-btn">
+                            <i class="fas fa-stop"></i>
+                        </button>
+                        <button id="clear-btn" title="清空画布">
+                            <i class="fas fa-trash-alt"></i>
+                        </button>
+                        <button id="fullscreen-btn" title="全屏播放">
+                            <i class="fas fa-expand"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div id="progress-current"></div>
+                        </div>
+                        <div class="progress-info">
+                            <span id="current-frame">0</span> / <span id="total-frames">0</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 播放控制功能提示 -->
+                <div class="playback-tips">
+                    <div class="tip-item">
+                        <i class="fas fa-play"></i>
+                        <span>播放/暂停：控制动画的播放和暂停状态</span>
+                    </div>
+                    <div class="tip-item">
+                        <i class="fas fa-stop"></i>
+                        <span>停止：停止动画播放并回到第一帧</span>
+                    </div>
+                    <div class="tip-item">
+                        <i class="fas fa-trash-alt"></i>
+                        <span>清空：清除当前加载的动画内容</span>
+                    </div>
+                    <div class="tip-item">
+                        <i class="fas fa-expand"></i>
+                        <span>全屏：进入全屏模式观看动画，再次点击退出全屏</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 右侧：功能面板区域 -->
+            <div class="functions-panel panel-section">
+                <!-- 背景设置 -->
+                <div class="bg-control-panel panel-section">
+                    <h3>背景设置</h3>
+                    <div class="bg-options">
+                        <div class="bg-option">
+                            <input type="radio" id="color-bg" name="bg-type" value="color" checked>
+                            <label for="color-bg">颜色背景</label>
+                            <input type="color" id="bg-color" value="#f0f0f0">
+                        </div>
+                        <div class="bg-option">
+                            <input type="radio" id="transparent-bg" name="bg-type" value="transparent">
+                            <label for="transparent-bg">透明背景</label>
+                            <div class="transparent-preview"></div>
+                        </div>
+                        <div class="bg-option">
+                            <input type="radio" id="image-bg" name="bg-type" value="image">
+                            <label for="image-bg">图片背景</label>
+                            <div class="image-bg-controls">
+                                <button type="button" id="select-bg-image" class="select-image-btn">
+                                    <i class="fas fa-image"></i> 选择图片
+                                </button>
+                                <input type="file" id="bg-image-input" accept="image/*" style="display: none;">
+                                <div id="bg-image-preview" class="bg-image-preview hidden">
+                                    <img id="bg-preview-img" alt="背景预览">
+                                    <button type="button" id="remove-bg-image" class="remove-image-btn" title="移除背景图片">
+                                        <i class="fas fa-times"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 添加预设颜色选项 -->
+                    <div class="bg-presets">
+                        <span class="preset-label">预设:</span>
+                        <div class="color-preset" style="background-color: #FFFFFF;" data-color="#FFFFFF" title="白色"></div>
+                        <div class="color-preset" style="background-color: #F0F0F0;" data-color="#F0F0F0" title="浅灰"></div>
+                        <div class="color-preset" style="background-color: #000000;" data-color="#000000" title="黑色"></div>
+                        <div class="color-preset" style="background-color: #FF5252;" data-color="#FF5252" title="红色"></div>
+                        <div class="color-preset" style="background-color: #4CAF50;" data-color="#4CAF50" title="绿色"></div>
+                        <div class="color-preset" style="background-color: #2196F3;" data-color="#2196F3" title="蓝色"></div>
+                        <div class="image-preset" data-image="images/zhibobg_vertical.webp" title="直播背景">
+                            <img src="images/zhibobg_vertical.webp" alt="直播背景">
+                        </div>
+                    </div>
+                    
+                    <button id="apply-bg" class="apply-btn">
+                        <i class="fas fa-paint-brush"></i> 应用背景
+                    </button>
+                </div>
+                
+                <!-- 动画信息 -->
+                <div class="info-panel panel-section">
+                    <h3>动画信息</h3>
+                    <div id="animation-info">
+                        <p>请选择或拖拽 SVGA 文件...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 全屏覆盖层 -->
+    <div id="fullscreen-overlay" class="fullscreen-overlay">
+        <div class="fullscreen-container">
+            <canvas id="fullscreen-canvas" class="fullscreen-canvas"></canvas>
+            <div class="fullscreen-controls">
+                <button id="fullscreen-play-btn" title="播放/暂停">
+                    <i class="fas fa-play"></i>
+                </button>
+                <button id="fullscreen-stop-btn" title="停止">
+                    <i class="fas fa-stop"></i>
+                </button>
+                <button id="fullscreen-close-btn" class="fullscreen-close-btn" title="退出全屏">
+                    <i class="fas fa-compress"></i>
+                </button>
+                <div class="fullscreen-progress">
+                    <div id="fullscreen-progress-current" class="fullscreen-progress-current"></div>
+                </div>
+                <div class="fullscreen-progress-info">
+                    <span id="fullscreen-current-frame">0</span> / <span id="fullscreen-total-frames">0</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="tools/howler.min.js"></script>
+    <script src="tools/jszip.min.js"></script>
+    <script src="tools/FileSaver.min.js"></script>
+    <script src="tools/pako.min.js"></script>
+    <script src="tools/svga.min.js"></script>
+    <script src="tools/svga.protohelper.js"></script>
+    <script src="tools/browser-image-compression.js"></script>
+    <script src="tools/svga-generator.js?v=1.0.123"></script>
+    <script src="tools/script.js?v=1.0.123"></script>
+    <script src="tools/export.js?v=1.0.123"></script>
+    <script src="tools/scale.js?v=1.0.123"></script>
+</body>
+</html>

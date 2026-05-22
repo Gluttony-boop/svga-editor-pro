@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>SVGA 帧数据对比</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    h1, h2, h3 { margin-top: 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 12px;
+    }
+    th, td {
+      border: 1px solid #e0e0e0;
+      padding: 6px 10px;
+      text-align: left;
+    }
+    th { background: #f5f5f5; font-weight: 600; }
+    .diff { color: #f44336; background: #fff3e0; }
+    .same { color: #4caf50; }
+    .json-view {
+      background: #f5f5f5;
+      padding: 10px;
+      border-radius: 4px;
+      font-family: 'Consolas', monospace;
+      font-size: 11px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-right: 10px;
+    }
+    button.primary { background: #1976d2; color: white; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    input[type="file"] { display: none; }
+    label {
+      display: inline-block;
+      padding: 10px 20px;
+      background: #4caf50;
+      color: white;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔍 SVGA 帧数据对比工具</h1>
+    <p>对比原始文件和导出文件的第一帧数据，找出精灵位置问题的原因</p>
+    
+    <div style="margin-top: 20px;">
+      <label for="file-input">📁 选择原始 SVGA 文件</label>
+      <input type="file" id="file-input" accept=".svga">
+      <button class="primary" id="export-btn" disabled>📤 导出并对比</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <h2>📊 第一帧精灵数据对比</h2>
+    <div id="comparison-table"></div>
+  </div>
+
+  <div class="container">
+    <h2>🔍 详细JSON数据</h2>
+    <div class="grid">
+      <div>
+        <h3>原始文件 - 第一帧</h3>
+        <div class="json-view" id="original-json"></div>
+      </div>
+      <div>
+        <h3>导出文件 - 第一帧</h3>
+        <div class="json-view" id="exported-json"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.2.5/dist/protobuf.min.js"></script>
+  <script>
+    // 标准 Proto 定义
+    const SVGA_PROTO = {
+      nested: {
+        com: {
+          nested: {
+            opensource: {
+              nested: {
+                svga: {
+                  nested: {
+                    MovieParams: {
+                      fields: {
+                        viewBoxWidth: { type: 'float', id: 1 },
+                        viewBoxHeight: { type: 'float', id: 2 },
+                        fps: { type: 'int32', id: 3 },
+                        frames: { type: 'int32', id: 4 }
+                      }
+                    },
+                    SpriteEntity: {
+                      fields: {
+                        imageKey: { type: 'string', id: 1 },
+                        frames: { rule: 'repeated', type: 'FrameEntity', id: 2 }
+                      }
+                    },
+                    Layout: {
+                      fields: {
+                        x: { type: 'float', id: 1 },
+                        y: { type: 'float', id: 2 },
+                        width: { type: 'float', id: 3 },
+                        height: { type: 'float', id: 4 }
+                      }
+                    },
+                    Transform: {
+                      fields: {
+                        a: { type: 'float', id: 1 },
+                        b: { type: 'float', id: 2 },
+                        c: { type: 'float', id: 3 },
+                        d: { type: 'float', id: 4 },
+                        tx: { type: 'float', id: 5 },
+                        ty: { type: 'float', id: 6 }
+                      }
+                    },
+                    FrameEntity: {
+                      fields: {
+                        alpha: { type: 'float', id: 1 },
+                        layout: { type: 'Layout', id: 2 },
+                        transform: { type: 'Transform', id: 3 },
+                        clipPath: { type: 'string', id: 4 },
+                        shapes: { rule: 'repeated', type: 'ShapeEntity', id: 5 }
+                      }
+                    },
+                    MovieEntity: {
+                      fields: {
+                        version: { type: 'string', id: 1 },
+                        params: { type: 'MovieParams', id: 2 },
+                        images: { rule: 'map', keyType: 'string', type: 'bytes', id: 3 },
+                        sprites: { rule: 'repeated', type: 'SpriteEntity', id: 4 }
+                      }
+                    },
+                    ShapeEntity: {
+                      fields: {
+                        type: { type: 'ShapeType', id: 1 },
+                        shape: { type: 'ShapeArgs', id: 2 },
+                        rect: { type: 'RectArgs', id: 3 },
+                        ellipse: { type: 'EllipseArgs', id: 4 },
+                        styles: { type: 'ShapeStyle', id: 10 },
+                        transform: { type: 'Transform', id: 11 }
+                      },
+                      nested: {
+                        ShapeType: { values: { SHAPE: 0, RECT: 1, ELLIPSE: 2, KEEP: 3 } },
+                        ShapeArgs: { fields: { d: { type: 'string', id: 1 } } },
+                        RectArgs: {
+                          fields: {
+                            x: { type: 'float', id: 1 },
+                            y: { type: 'float', id: 2 },
+                            width: { type: 'float', id: 3 },
+                            height: { type: 'float', id: 4 },
+                            cornerRadius: { type: 'float', id: 5 }
+                          }
+                        },
+                        EllipseArgs: {
+                          fields: {
+                            x: { type: 'float', id: 1 },
+                            y: { type: 'float', id: 2 },
+                            radiusX: { type: 'float', id: 3 },
+                            radiusY: { type: 'float', id: 4 }
+                          }
+                        },
+                        ShapeStyle: {
+                          fields: {
+                            fill: { type: 'RGBAColor', id: 1 },
+                            stroke: { type: 'RGBAColor', id: 2 },
+                            strokeWidth: { type: 'float', id: 3 }
+                          },
+                          nested: {
+                            RGBAColor: {
+                              fields: {
+                                r: { type: 'float', id: 1 },
+                                g: { type: 'float', id: 2 },
+                                b: { type: 'float', id: 3 },
+                                a: { type: 'float', id: 4 }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+
+    // Lite Proto 定义
+    const SVGA_PROTO_LITE = {
+      nested: {
+        svga: {
+          nested: {
+            MovieParams: {
+              fields: {
+                viewBoxWidth: { type: 'float', id: 1 },
+                viewBoxHeight: { type: 'float', id: 2 },
+                fps: { type: 'int32', id: 3 },
+                frames: { type: 'int32', id: 4 }
+              }
+            },
+            Sprite: {
+              fields: {
+                imageKey: { type: 'string', id: 1 },
+                frames: { rule: 'repeated', type: 'Frame', id: 2 }
+              }
+            },
+            Layout: {
+              fields: {
+                x: { type: 'float', id: 1 },
+                y: { type: 'float', id: 2 },
+                width: { type: 'float', id: 3 },
+                height: { type: 'float', id: 4 }
+              }
+            },
+            Transform: {
+              fields: {
+                a: { type: 'float', id: 1 },
+                b: { type: 'float', id: 2 },
+                c: { type: 'float', id: 3 },
+                d: { type: 'float', id: 4 },
+                tx: { type: 'float', id: 5 },
+                ty: { type: 'float', id: 6 }
+              }
+            },
+            Frame: {
+              fields: {
+                alpha: { type: 'float', id: 1 },
+                layout: { type: 'Layout', id: 2 },
+                transform: { type: 'Transform', id: 3 },
+                clipPath: { type: 'string', id: 4 },
+                shapes: { rule: 'repeated', type: 'Shape', id: 5 }
+              }
+            },
+            Shape: {
+              fields: {
+                type: { type: 'ShapeType', id: 1 },
+                shapeArgs: { type: 'ShapeArgs', id: 2 },
+                rectArgs: { type: 'RectArgs', id: 3 },
+                ellipseArgs: { type: 'EllipseArgs', id: 4 },
+                styles: { type: 'ShapeStyle', id: 10 },
+                transform: { type: 'Transform', id: 11 }
+              },
+              nested: {
+                ShapeType: { values: { SHAPE: 0, RECT: 1, ELLIPSE: 2, KEEP: 3 } },
+                ShapeArgs: { fields: { d: { type: 'string', id: 1 } } },
+                RectArgs: {
+                  fields: {
+                    x: { type: 'float', id: 1 },
+                    y: { type: 'float', id: 2 },
+                    width: { type: 'float', id: 3 },
+                    height: { type: 'float', id: 4 },
+                    cornerRadius: { type: 'float', id: 5 }
+                  }
+                },
+                EllipseArgs: {
+                  fields: {
+                    x: { type: 'float', id: 1 },
+                    y: { type: 'float', id: 2 },
+                    radiusX: { type: 'float', id: 3 },
+                    radiusY: { type: 'float', id: 4 }
+                  }
+                },
+                ShapeStyle: {
+                  fields: {
+                    fill: { type: 'RGBAColor', id: 1 },
+                    stroke: { type: 'RGBAColor', id: 2 },
+                    strokeWidth: { type: 'float', id: 3 }
+                  },
+                  nested: {
+                    RGBAColor: {
+                      fields: {
+                        r: { type: 'float', id: 1 },
+                        g: { type: 'float', id: 2 },
+                        b: { type: 'float', id: 3 },
+                        a: { type: 'float', id: 4 }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            MovieEntity: {
+              fields: {
+                version: { type: 'string', id: 1 },
+                params: { type: 'MovieParams', id: 2 },
+                images: { keyType: 'string', type: 'bytes', id: 3 },
+                sprites: { rule: 'repeated', type: 'Sprite', id: 4 }
+              }
+            }
+          }
+        }
+      }
+    };
+
+    let MovieEntity = null;
+    let MovieEntityLite = null;
+    let originalBuffer = null;
+
+    async function initProtobuf() {
+      const root = protobuf.Root.fromJSON(SVGA_PROTO);
+      MovieEntity = root.lookupType('com.opensource.svga.MovieEntity');
+      
+      const rootLite = protobuf.Root.fromJSON(SVGA_PROTO_LITE);
+      MovieEntityLite = rootLite.lookupType('svga.MovieEntity');
+    }
+
+    function parseSVGA(buffer, useLite = false) {
+      const data = new Uint8Array(buffer);
+      const magic = String.fromCharCode(...data.slice(0, 4));
+      let decompressed;
+      
+      if (magic === 'SVGA') {
+        decompressed = pako.inflate(data.slice(8));
+      } else {
+        try {
+          decompressed = pako.inflate(data);
+        } catch {
+          decompressed = data;
+        }
+      }
+      
+      const MovieEntityType = useLite ? MovieEntityLite : MovieEntity;
+      const message = MovieEntityType.decode(decompressed);
+      const movieObj = MovieEntityType.toObject(message, {
+        bytes: Uint8Array,
+        arrays: true,
+        objects: true
+      });
+      
+      return movieObj;
+    }
+
+    function exportSVGA(movieObj) {
+      // 转换为 lite 格式，保留 undefined 值
+      const movieEntityLite = {
+        version: movieObj.version || '2.0',
+        params: movieObj.params ? {
+          viewBoxWidth: movieObj.params.viewBoxWidth || 0,
+          viewBoxHeight: movieObj.params.viewBoxHeight || 0,
+          fps: movieObj.params.fps || 24,
+          frames: movieObj.params.frames || 0
+        } : null,
+        images: movieObj.images || {},
+        sprites: (movieObj.sprites || []).map(sprite => {
+          const spriteData = {
+            imageKey: sprite.imageKey || '',
+            frames: (sprite.frames || []).map(frame => {
+              const frameData = {
+                alpha: frame.alpha !== undefined ? frame.alpha : 1
+              };
+              
+              // Layout - 只添加存在的字段
+              if (frame.layout) {
+                frameData.layout = {};
+                if (frame.layout.x !== undefined) frameData.layout.x = frame.layout.x;
+                if (frame.layout.y !== undefined) frameData.layout.y = frame.layout.y;
+                if (frame.layout.width !== undefined) frameData.layout.width = frame.layout.width;
+                if (frame.layout.height !== undefined) frameData.layout.height = frame.layout.height;
+              }
+              
+              // Transform - 只添加存在的字段
+              if (frame.transform) {
+                frameData.transform = {};
+                if (frame.transform.a !== undefined) frameData.transform.a = frame.transform.a;
+                if (frame.transform.b !== undefined) frameData.transform.b = frame.transform.b;
+                if (frame.transform.c !== undefined) frameData.transform.c = frame.transform.c;
+                if (frame.transform.d !== undefined) frameData.transform.d = frame.transform.d;
+                if (frame.transform.tx !== undefined) frameData.transform.tx = frame.transform.tx;
+                if (frame.transform.ty !== undefined) frameData.transform.ty = frame.transform.ty;
+              }
+              
+              if (frame.clipPath) frameData.clipPath = frame.clipPath;
+              if (frame.shapes && frame.shapes.length > 0) frameData.shapes = frame.shapes;
+              
+              return frameData;
+            })
+          };
+          
+          return spriteData;
+        })
+      };
+      
+      const encoded = MovieEntityLite.encode(movieEntityLite).finish();
+      return pako.deflate(encoded);
+    }
+
+    function compareSpriteData(original, exported) {
+      let html = '<table><thead><tr><th>精灵索引</th><th>字段</th><th>原始值</th><th>导出值</th><th>状态</th></tr></thead><tbody>';
+      
+      const origSprites = original.sprites || [];
+      const expSprites = exported.sprites || [];
+      
+      // 只比较前3个精灵的第一帧
+      const spriteCount = Math.min(origSprites.length, expSprites.length, 5);
+      
+      for (let i = 0; i < spriteCount; i++) {
+        const origSprite = origSprites[i];
+        const expSprite = expSprites[i];
+        
+        if (!origSprite.frames || !expSprite.frames) continue;
+        
+        const origFrame = origSprite.frames[0];
+        const expFrame = expSprite.frames[0];
+        
+        if (!origFrame || !expFrame) continue;
+        
+        // 比较 imageKey
+        html += createRow(i, 'imageKey', origSprite.imageKey, expSprite.imageKey);
+        
+        // 比较 alpha
+        html += createRow(i, 'alpha', origFrame.alpha, expFrame.alpha);
+        
+        // 比较 layout
+        if (origFrame.layout && expFrame.layout) {
+          html += createRow(i, 'layout.x', origFrame.layout.x, expFrame.layout.x);
+          html += createRow(i, 'layout.y', origFrame.layout.y, expFrame.layout.y);
+          html += createRow(i, 'layout.width', origFrame.layout.width, expFrame.layout.width);
+          html += createRow(i, 'layout.height', origFrame.layout.height, expFrame.layout.height);
+        }
+        
+        // 比较 transform
+        if (origFrame.transform && expFrame.transform) {
+          html += createRow(i, 'transform.a', origFrame.transform.a, expFrame.transform.a);
+          html += createRow(i, 'transform.b', origFrame.transform.b, expFrame.transform.b);
+          html += createRow(i, 'transform.c', origFrame.transform.c, expFrame.transform.c);
+          html += createRow(i, 'transform.d', origFrame.transform.d, expFrame.transform.d);
+          html += createRow(i, 'transform.tx', origFrame.transform.tx, expFrame.transform.tx);
+          html += createRow(i, 'transform.ty', origFrame.transform.ty, expFrame.transform.ty);
+        }
+      }
+      
+      html += '</tbody></table>';
+      return html;
+    }
+
+    function createRow(spriteIndex, field, origValue, expValue) {
+      const diff = origValue !== expValue;
+      return `
+        <tr>
+          <td>${spriteIndex}</td>
+          <td>${field}</td>
+          <td>${origValue}</td>
+          <td class="${diff ? 'diff' : 'same'}">${expValue}</td>
+          <td>${diff ? '❌' : '✅'}</td>
+        </tr>
+      `;
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      await initProtobuf();
+      
+      const fileInput = document.getElementById('file-input');
+      const exportBtn = document.getElementById('export-btn');
+      
+      fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        originalBuffer = await file.arrayBuffer();
+        exportBtn.disabled = false;
+        console.log('File loaded:', file.name);
+      });
+      
+      exportBtn.addEventListener('click', async () => {
+        if (!originalBuffer) return;
+        
+        // 解析原始文件
+        const original = parseSVGA(originalBuffer, false);
+        
+        // 导出
+        const exportedData = exportSVGA(original);
+        
+        // 解析导出文件
+        const exported = parseSVGA(exportedData.buffer, true);
+        
+        // 显示对比
+        document.getElementById('comparison-table').innerHTML = compareSpriteData(original, exported);
+        
+        // 显示详细JSON（只显示前2个精灵）
+        const originalJson = {
+          version: original.version,
+          params: original.params,
+          sprites: original.sprites.slice(0, 2).map(s => ({
+            imageKey: s.imageKey,
+            firstFrame: s.frames[0]
+          }))
+        };
+        
+        const exportedJson = {
+          version: exported.version,
+          params: exported.params,
+          sprites: exported.sprites.slice(0, 2).map(s => ({
+            imageKey: s.imageKey,
+            firstFrame: s.frames[0]
+          }))
+        };
+        
+        document.getElementById('original-json').textContent = JSON.stringify(originalJson, null, 2);
+        document.getElementById('exported-json').textContent = JSON.stringify(exportedJson, null, 2);
+        
+        // 自动下载
+        const blob = new Blob([exportedData], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'exported-debug.svga';
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    });
+  </script>
+</body>
+</html>

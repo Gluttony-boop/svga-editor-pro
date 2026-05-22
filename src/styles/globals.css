@@ -1,0 +1,228 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 自定义样式 */
+:root {
+  --color-bg-primary: #1a1a2e;
+  --color-bg-secondary: #16213e;
+  --color-accent: #e94560;
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #a0a0a0;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3d3d5c;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4d4d6c;
+}
+
+/* 按钮基础样式 */
+.btn {
+  @apply px-4 py-2 rounded-lg font-medium transition-all duration-200 
+         flex items-center justify-center gap-2
+         disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-primary {
+  @apply btn bg-accent hover:bg-accent-hover text-white shadow-glow;
+}
+
+.btn-secondary {
+  @apply btn bg-bg-secondary hover:bg-border text-text-primary border border-border;
+}
+
+.btn-ghost {
+  @apply btn bg-transparent hover:bg-bg-secondary text-text-secondary hover:text-text-primary;
+}
+
+.btn-sm {
+  @apply px-3 py-1.5 text-sm;
+}
+
+.btn-lg {
+  @apply px-6 py-3 text-lg;
+}
+
+/* 输入框样式 */
+.input {
+  @apply w-full px-3 py-2 rounded-lg bg-bg-tertiary border border-border
+         text-text-primary placeholder-text-muted
+         focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent
+         transition-all duration-200;
+}
+
+/* 面板样式 */
+.panel {
+  @apply bg-bg-secondary border border-border rounded-lg overflow-hidden;
+}
+
+.panel-header {
+  @apply px-4 py-3 border-b border-border flex items-center justify-between
+         bg-bg-tertiary/50;
+}
+
+.panel-title {
+  @apply text-sm font-medium text-text-primary flex items-center gap-2;
+}
+
+.panel-content {
+  @apply p-4;
+}
+
+/* 标签样式 */
+.label {
+  @apply text-xs text-text-secondary font-medium uppercase tracking-wide;
+}
+
+/* 分隔线 */
+.divider {
+  @apply border-t border-border my-2;
+}
+
+/* 图标按钮 */
+.icon-btn {
+  @apply p-2 rounded-lg hover:bg-bg-secondary text-text-secondary 
+         hover:text-text-primary transition-colors duration-200;
+}
+
+.icon-btn.active {
+  @apply bg-accent/20 text-accent;
+}
+
+/* 工具提示 */
+.tooltip {
+  @apply absolute z-50 px-2 py-1 text-xs bg-bg-tertiary text-text-primary 
+         rounded shadow-lg border border-border whitespace-nowrap;
+}
+
+/* 拖拽区域 */
+.drop-zone {
+  @apply border-2 border-dashed border-border rounded-lg p-8
+         flex flex-col items-center justify-center gap-4
+         transition-colors duration-200 cursor-pointer
+         hover:border-accent hover:bg-accent/5;
+}
+
+.drop-zone.active {
+  @apply border-accent bg-accent/10;
+}
+
+/* 范围滑块 */
+input[type="range"] {
+  @apply w-full h-1 bg-border rounded-lg appearance-none cursor-pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  @apply appearance-none w-3 h-3 bg-accent rounded-full cursor-pointer;
+  box-shadow: 0 0 10px rgba(233, 69, 96, 0.5);
+}
+
+/* 动画 */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+/* 时间轴轨道 */
+.timeline-track {
+  @apply h-8 bg-bg-tertiary border-b border-border relative;
+}
+
+.timeline-frame {
+  @apply absolute top-0 h-full border-r border-border/50;
+}
+
+.timeline-keyframe {
+  @apply absolute top-1/2 -translate-y-1/2 w-2 h-2 bg-accent 
+         rounded-full cursor-pointer hover:scale-150 transition-transform;
+}
+
+/* 图层项 */
+.layer-item {
+  @apply flex items-center gap-2 px-3 py-2 cursor-pointer
+         hover:bg-bg-tertiary/50 transition-colors;
+}
+
+.layer-item.selected {
+  @apply bg-accent/20 border-l-2 border-accent;
+}
+
+/* 缩略图 */
+.thumbnail {
+  @apply w-12 h-12 rounded bg-bg-tertiary overflow-hidden flex-shrink-0;
+}
+
+.thumbnail img {
+  @apply w-full h-full object-contain;
+}
+
+/* 加载动画 */
+.loader {
+  @apply w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin;
+}
+
+/* 模态框 */
+.modal-overlay {
+  @apply fixed inset-0 bg-black/50 z-50 flex items-center justify-center;
+}
+
+.modal {
+  @apply bg-bg-secondary border border-border rounded-xl shadow-2xl
+         max-w-lg w-full mx-4 animate-fade-in;
+}
+
+.modal-header {
+  @apply px-6 py-4 border-b border-border flex items-center justify-between;
+}
+
+.modal-body {
+  @apply px-6 py-4;
+}
+
+.modal-footer {
+  @apply px-6 py-4 border-t border-border flex justify-end gap-3;
+}
+
+/* 状态栏 */
+.status-bar {
+  @apply h-6 px-4 flex items-center justify-between text-xs
+         bg-bg-tertiary border-t border-border text-text-secondary;
+}
+
+/* 窗口控制按钮 (Windows) */
+.window-controls {
+  @apply flex items-center gap-0;
+}
+
+.window-btn {
+  @apply w-11 h-8 flex items-center justify-center
+         hover:bg-white/10 transition-colors;
+}
+
+.window-btn.close:hover {
+  @apply bg-red-500;
+}
