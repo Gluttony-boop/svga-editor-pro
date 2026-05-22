@@ -45,11 +45,11 @@ npm run build:mac
 
 | 命令 | 说明 |
 |------|------|
-| `npm start` | 开发模式运行，可调试 |
+| `npm run dev` | 开发模式运行，支持热更新 |
+| `npm run build:web` | 仅构建 Web 版本 |
 | `npm run build` | 打包当前平台 |
 | `npm run build:win` | 仅打包 Windows 版本 |
 | `npm run build:mac` | 仅打包 macOS 版本 |
-| `npm run build:all` | 打包 Windows 和 macOS |
 
 ## 输出文件
 
