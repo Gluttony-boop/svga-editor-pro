@@ -4,3 +4,16 @@ out/
 .DS_Store
 *.log
 npm-debug.log*
+release/
+src-tauri/target/
+src-tauri/gen/
+*.tsbuildinfo
+$null
+.arts/
+.claude/
+.workbuddy/
+debug-*.png
+test-*.png
+test*.svga
+codex-*.log
+vite-dev.*.log
