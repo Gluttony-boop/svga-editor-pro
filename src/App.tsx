@@ -435,6 +435,7 @@ export const App: React.FC = () => {
   const devAutoLoadRef = useRef(false)
   const launchFileAutoLoadRef = useRef(false)
   const unsavedResolverRef = useRef<((choice: UnsavedChoice) => void) | null>(null)
+  const allowNextCloseRef = useRef(false)
   const handleSaveRef = useRef<(() => Promise<boolean>) | null>(null)
   const svgaFileInputRef = useRef<HTMLInputElement>(null)
   
@@ -782,6 +783,11 @@ export const App: React.FC = () => {
       try {
         const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
         unlisten = await getCurrentWebviewWindow().onCloseRequested(async (event) => {
+          if (allowNextCloseRef.current) {
+            allowNextCloseRef.current = false
+            return
+          }
+
           if (!useEditorStore.getState().isDirty) return
 
           event.preventDefault()
@@ -791,7 +797,13 @@ export const App: React.FC = () => {
             const saved = await handleSaveRef.current?.()
             if (!saved) return
           }
-          await tauriAPI.window.close()
+          allowNextCloseRef.current = true
+          try {
+            await tauriAPI.window.close()
+          } catch (err) {
+            allowNextCloseRef.current = false
+            throw err
+          }
         })
 
         if (disposed) {

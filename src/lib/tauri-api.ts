@@ -174,15 +174,15 @@ export const tauriAPI = {
   window: {
     minimize: async (): Promise<void> => {
       const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
-      getCurrentWebviewWindow().minimize()
+      await getCurrentWebviewWindow().minimize()
     },
     maximize: async (): Promise<void> => {
       const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
-      getCurrentWebviewWindow().toggleMaximize()
+      await getCurrentWebviewWindow().toggleMaximize()
     },
     close: async (): Promise<void> => {
       const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
-      getCurrentWebviewWindow().close()
+      await getCurrentWebviewWindow().close()
     }
   }
 }
