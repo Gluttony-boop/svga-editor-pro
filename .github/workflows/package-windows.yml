@@ -3,7 +3,7 @@ name: Package Windows Installer
 on:
   push:
     branches:
-      - 'codex/**'
+      - master
   workflow_dispatch:
 
 jobs:
