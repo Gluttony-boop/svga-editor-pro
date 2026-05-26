@@ -1,7 +1,7 @@
 import React from 'react'
 import { Panel, Button, Icon, Slider, Select } from '@/components/ui'
 import { useEditorStore, useCanExport, useCurrentParams } from '@/stores'
-import { ExportEngine, saveGeneratedFile, svgaBuilder, OPTIMIZATION_PRESETS, getPreset } from '@/core'
+import { ExportEngine, saveGeneratedFile, svgaBuilder, svgaOptimizer, OPTIMIZATION_PRESETS, getPreset } from '@/core'
 import { cn } from '@/utils/cn'
 
 interface ExportPanelProps {
@@ -18,6 +18,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   const slotConfigs = useEditorStore((s) => s.slotConfigs)
   const layers = useEditorStore((s) => s.layers)
   const imageResources = useEditorStore((s) => s.imageResources)
+  const currentFrame = useEditorStore((s) => s.playback.currentFrame)
   const params = useCurrentParams()
   
   // 优化相关状态
@@ -32,8 +33,13 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   const [exportStatus, setExportStatus] = React.useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = React.useState(false)
 
-  // 检查是否有新增内容
+  // 检查是否存在需要重建合并的编辑内容
   const hasNewContent = React.useMemo(() => {
+    const originalLayerCount = videoItem?.movie.sprites?.length ?? 0
+    const activeOriginalLayerCount = layers.filter(
+      (layer) => !layer.isNew && layer.editableIndex !== undefined
+    ).length
+    const hasDeletedOriginalLayers = activeOriginalLayerCount < originalLayerCount
     const hasNewLayers = layers.some(l => l.isNew)
     const hasNewImages = Array.from(imageResources.values()).some(r => r.isNew)
     const hasAnimations = layers.some(l => 
@@ -43,8 +49,53 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
       const nextName = l.name.trim()
       return l.imageKey && nextName.length > 0 && nextName !== l.imageKey
     })
-    return hasNewLayers || hasNewImages || hasAnimations || hasLayerNameChanges
-  }, [layers, imageResources])
+    return hasDeletedOriginalLayers || hasNewLayers || hasNewImages || hasAnimations || hasLayerNameChanges
+  }, [videoItem, layers, imageResources])
+
+  const buildSvgaBlob = async (exportCompression = compressionConfig): Promise<Blob> => {
+    if (!videoItem || !params || !originalBuffer) {
+      throw new Error('没有原始 SVGA 数据')
+    }
+
+    const canvas = document.createElement('canvas')
+    canvas.width = params.viewBoxWidth
+    canvas.height = params.viewBoxHeight
+    const engine = new ExportEngine(canvas)
+    engine.setVideoItem(videoItem)
+
+    if (hasNewContent) {
+      const imageSizes = new Map<string, { width: number; height: number }>()
+      imageResources.forEach((resource, key) => {
+        if (resource.width > 0 && resource.height > 0) {
+          imageSizes.set(key, { width: resource.width, height: resource.height })
+        }
+      })
+
+      const originalImages: Record<string, Uint8Array> = {}
+      if (videoItem.buffers) {
+        Object.entries(videoItem.buffers).forEach(([key, buffer]) => {
+          originalImages[key] = new Uint8Array(buffer)
+        })
+      }
+
+      return svgaBuilder.mergeWithOriginal(originalBuffer, {
+        params,
+        layers,
+        imageResources,
+        originalImages,
+        slotConfigs,
+        imageSizes
+      })
+    }
+
+    return engine.exportSVGALite(originalBuffer, {
+      fps: params.fps,
+      frames: params.frames,
+      compression: exportCompression,
+      slotConfigs,
+      layers
+    })
+  }
 
   // 当预设改变时更新配置
   const handlePresetChange = (presetId: string) => {
@@ -69,34 +120,11 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
 
     try {
 
-      // 直接使用原始导出流程，不经过优化器
-      const canvas = document.createElement('canvas')
-      canvas.width = params.viewBoxWidth
-      canvas.height = params.viewBoxHeight
-      const engine = new ExportEngine(canvas)
-      engine.setVideoItem(videoItem)
-      
-      const blob = await engine.exportSVGALite(originalBuffer, {
-        fps: params.fps,
-        frames: params.frames,
-        compression: compressionConfig,
-        slotConfigs: slotConfigs,
-        layers
-      })
-      
-      const stats = {
-        originalSize: originalBuffer.byteLength,
-        optimizedSize: blob.size,
-        reductionPercent: Math.round((1 - blob.size / originalBuffer.byteLength) * 100),
-        imagesOptimized: 0,
-        imagesSkipped: 0,
-        imagesDeduplicated: 0,
-        framesSimplified: 0,
-        framesRemoved: 0,
-        processingTime: 0
-      }
+      const baseBlob = await buildSvgaBlob({ ...compressionConfig, enabled: false })
+      const optimizedBlob = await svgaOptimizer.quickOptimize(await baseBlob.arrayBuffer())
+      const stats = svgaOptimizer.getStats()
 
-      const saved = await saveGeneratedFile(blob, 'export.svga')
+      const saved = await saveGeneratedFile(optimizedBlob, 'export.svga')
       if (!saved) {
         setExportStatus('已取消导出')
         return
@@ -125,42 +153,9 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
     setOptimizationStats(null)
 
     try {
-      // 创建合并的压缩配置
-      const mergedCompression: typeof compressionConfig = {
-        ...compressionConfig,
-        enabled: optimizationConfig.enabled,
-        quality: optimizationConfig.image.quality,
-        resizeEnabled: optimizationConfig.image.resizeEnabled,
-        resizePercent: optimizationConfig.image.resizePercent,
-        mode: optimizationConfig.image.format === 'webp' ? 'webp' : 'smart'
-      }
-      
-      // 使用标准导出流程
-      const canvas = document.createElement('canvas')
-      canvas.width = params.viewBoxWidth
-      canvas.height = params.viewBoxHeight
-      const engine = new ExportEngine(canvas)
-      engine.setVideoItem(videoItem)
-      
-      const blob = await engine.exportSVGALite(originalBuffer, {
-        fps: params.fps,
-        frames: params.frames,
-        compression: mergedCompression,
-        slotConfigs: slotConfigs,
-        layers
-      })
-      
-      const stats = {
-        originalSize: originalBuffer.byteLength,
-        optimizedSize: blob.size,
-        reductionPercent: Math.round((1 - blob.size / originalBuffer.byteLength) * 100),
-        imagesOptimized: 0,
-        imagesSkipped: 0,
-        imagesDeduplicated: 0,
-        framesSimplified: 0,
-        framesRemoved: 0,
-        processingTime: 0
-      }
+      const baseBlob = await buildSvgaBlob({ ...compressionConfig, enabled: false })
+      const blob = await svgaOptimizer.optimize(await baseBlob.arrayBuffer(), optimizationConfig)
+      const stats = svgaOptimizer.getStats()
       
       const saved = await saveGeneratedFile(blob, 'export.svga')
       if (!saved) {
@@ -177,8 +172,6 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
       setIsExporting(false)
     }
   }
-
-  // 带优化配置的导出 (not used?)
 
   const handleExport = async (format: 'svga' | 'png-sequence' | 'webp') => {
     if (!videoItem || !params) return
@@ -211,54 +204,24 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
         case 'svga':
           if (!originalBuffer) throw new Error('没有原始数据')
 
-          // 检查是否有新增内容需要合并
-          if (hasNewContent) {
-            
-            // 构建图片尺寸映射
-            const imageSizes = new Map<string, { width: number; height: number }>()
-            imageResources.forEach((resource, key) => {
-              if (resource.width > 0 && resource.height > 0) {
-                imageSizes.set(key, { width: resource.width, height: resource.height })
-              }
-            })
-            
-            // 转换 buffers 格式
-            const originalImages: Record<string, Uint8Array> = {}
-            if (videoItem.buffers) {
-              Object.entries(videoItem.buffers).forEach(([key, buffer]) => {
-                originalImages[key] = new Uint8Array(buffer)
-              })
-            }
-            
-            blob = await svgaBuilder.mergeWithOriginal(originalBuffer, {
-              params,
-              layers,
-              imageResources,
-              originalImages,
-              imageSizes
-            })
-          } else {
-            // 使用标准导出流程
-            blob = await engine.exportSVGALite(originalBuffer, {
-              fps: params.fps,
-              frames: params.frames,
-              compression: compressionConfig,
-              slotConfigs: slotConfigs,
-              layers
-            })
-          }
+          blob = await buildSvgaBlob(compressionConfig)
           break
 
         case 'png-sequence':
           blob = await engine.exportPNGSequence({ 
-            scale: 1
+            scale: 1,
+            slotConfigs,
+            layers
           })
           break
 
         case 'webp':
           blob = await engine.exportWebP({ 
             quality: compressionConfig.enabled ? compressionConfig.quality : 90, 
-            scale: 1 
+            scale: 1,
+            frameIndex: currentFrame,
+            slotConfigs,
+            layers
           })
           break
 

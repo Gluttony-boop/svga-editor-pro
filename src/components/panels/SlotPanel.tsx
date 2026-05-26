@@ -79,6 +79,10 @@ const SlotItem: React.FC<SlotItemProps> = ({ name, config, onChange, onRemove })
   const [type, setType] = React.useState<'text' | 'image'>(config?.type || 'text')
   const fileInputRef = React.useRef<HTMLInputElement>(null)
 
+  React.useEffect(() => {
+    setType(config?.type || 'text')
+  }, [config?.type])
+
   const handleTextChange = (updates: Partial<{
     text: string
     fontSize: number
@@ -114,6 +118,7 @@ const SlotItem: React.FC<SlotItemProps> = ({ name, config, onChange, onRemove })
         }
       })
     }
+    e.target.value = ''
   }
 
   return (

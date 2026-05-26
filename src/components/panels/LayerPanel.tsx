@@ -1,5 +1,5 @@
 import React from 'react'
-import { Panel, Icon } from '@/components/ui'
+import { Button, Modal, Panel, Icon } from '@/components/ui'
 import { useEditorStore } from '@/stores'
 import { LayerUtils } from '@/core'
 import type { AnimationPreset, ImageResource, Layer, VideoItem } from '@/types'
@@ -193,6 +193,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   const [editingName, setEditingName] = React.useState('')
   const [scrollTop, setScrollTop] = React.useState(0)
   const [viewportHeight, setViewportHeight] = React.useState(0)
+  const [pendingDeleteLayerId, setPendingDeleteLayerId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     const handleFrameUpdate = (e: CustomEvent<{ frameIndex: number }>) => {
@@ -234,6 +235,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   )
   const visibleLayers = layers.slice(visibleStart, visibleEnd)
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId)
+  const pendingDeleteLayer = layers.find((layer) => layer.id === pendingDeleteLayerId)
   const renamedCount = layers.filter((layer) => {
     const nextName = layer.name.trim()
     return layer.imageKey && nextName.length > 0 && nextName !== layer.imageKey
@@ -248,9 +250,14 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   }
 
   const handleDeleteLayer = (layerId: string) => {
-    if (confirm('确定要删除这个图层吗？')) {
-      deleteLayer(layerId)
+    setPendingDeleteLayerId(layerId)
+  }
+
+  const handleConfirmDeleteLayer = () => {
+    if (pendingDeleteLayerId) {
+      deleteLayer(pendingDeleteLayerId)
     }
+    setPendingDeleteLayerId(null)
   }
 
   const handleApplyAnimation = (layerId: string, preset: AnimationPreset) => {
@@ -313,121 +320,143 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   }
 
   return (
-    <Panel
-      title="图层"
-      icon={<Icon name="layer" size={16} />}
-      className={className}
-      contentClassName="p-0 overflow-hidden"
-      headerAction={
-        <div className="flex items-center gap-2 text-[10px] text-text-muted">
-          {renamedCount > 0 && (
-            <span className="rounded bg-accent/15 px-1.5 py-0.5 text-accent">
-              已改名 {renamedCount}
-            </span>
-          )}
-          <span>{layers.length} 层</span>
-        </div>
-      }
-    >
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="flex h-10 flex-shrink-0 items-center justify-between border-b border-border/70 px-3 text-xs">
-          <div className="min-w-0 text-text-muted">
-            {selectedLayer ? (
-              <span className="block truncate text-text-secondary">
-                当前：{selectedLayer.name}
+    <>
+      <Panel
+        title="图层"
+        icon={<Icon name="layer" size={16} />}
+        className={className}
+        contentClassName="p-0 overflow-hidden"
+        headerAction={
+          <div className="flex items-center gap-2 text-[10px] text-text-muted">
+            {renamedCount > 0 && (
+              <span className="rounded bg-accent/15 px-1.5 py-0.5 text-accent">
+                已改名 {renamedCount}
               </span>
+            )}
+            <span>{layers.length} 层</span>
+          </div>
+        }
+      >
+        <div className="flex h-full min-h-0 flex-col">
+          <div className="flex h-10 flex-shrink-0 items-center justify-between border-b border-border/70 px-3 text-xs">
+            <div className="min-w-0 text-text-muted">
+              {selectedLayer ? (
+                <span className="block truncate text-text-secondary">
+                  当前：{selectedLayer.name}
+                </span>
+              ) : (
+                <span>未选择图层</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
+              <span>帧 {currentFrame + 1}</span>
+            </div>
+          </div>
+
+          <div
+            ref={listRef}
+            className="min-h-0 flex-1 overflow-y-auto px-2 py-2"
+            onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+          >
+            {layers.length === 0 ? (
+              <div className="flex h-full min-h-[160px] flex-col items-center justify-center px-6 text-center text-sm text-text-muted">
+                <div className="mb-3 grid h-12 w-12 place-items-center rounded border border-border bg-bg-tertiary">
+                  <Icon name="layer" size={24} className="opacity-60" />
+                </div>
+                <p className="text-text-secondary">打开 SVGA 文件或添加图片</p>
+                <p className="mt-1 text-xs">图层会显示在这里</p>
+              </div>
             ) : (
-              <span>未选择图层</span>
+              <div
+                className="relative"
+                style={{ height: layers.length * LAYER_ROW_HEIGHT }}
+              >
+                {visibleLayers.map((layer, offset) => {
+                  const index = visibleStart + offset
+                  const { inRange, hasAnimation } = getLayerStatus(layer)
+                  const thumbnailUrl = getLayerThumbnail(
+                    layer,
+                    imageResources,
+                    videoItem,
+                    objectUrlCacheRef.current
+                  )
+
+                  return (
+                    <div
+                      key={layer.id}
+                      className="absolute left-0 right-0 px-0.5 py-1"
+                      style={{ top: index * LAYER_ROW_HEIGHT, height: LAYER_ROW_HEIGHT }}
+                    >
+                      <LayerItem
+                        layer={layer}
+                        index={index}
+                        selected={selectedLayerId === layer.id}
+                        inRange={inRange}
+                        hasAnimation={hasAnimation}
+                        showAnimationMenu={showAnimationMenu === layer.id}
+                        showActionMenu={showActionMenu === layer.id}
+                        thumbnailUrl={thumbnailUrl}
+                        isEditing={editingLayerId === layer.id}
+                        editingName={editingName}
+                        onClick={() => {
+                          selectLayer(layer.id)
+                          setShowActionMenu(null)
+                        }}
+                        onToggleVisibility={() => handleToggleVisibility(layer.id, layer.visible)}
+                        onToggleLock={() => handleToggleLock(layer.id, layer.locked)}
+                        onDelete={() => handleDeleteLayer(layer.id)}
+                        onDuplicate={() => duplicateLayer(layer.id)}
+                        onShowAnimationMenu={() => {
+                          setShowActionMenu(null)
+                          setShowAnimationMenu(showAnimationMenu === layer.id ? null : layer.id)
+                        }}
+                        onShowActionMenu={() => {
+                          setShowAnimationMenu(null)
+                          setShowActionMenu(showActionMenu === layer.id ? null : layer.id)
+                        }}
+                        onApplyAnimation={(preset) => handleApplyAnimation(layer.id, preset)}
+                        onCloseAnimationMenu={() => setShowAnimationMenu(null)}
+                        onCloseActionMenu={() => setShowActionMenu(null)}
+                        onStartRename={() => handleStartRename(layer)}
+                        onChangeEditingName={setEditingName}
+                        onCommitRename={() => handleCommitRename(layer.id)}
+                        onCancelRename={handleCancelRename}
+                        onDragStart={() => handleDragStart(index)}
+                        onDragOver={handleDragOver}
+                        onDrop={(e) => handleDrop(e, index)}
+                        onDragEnd={() => setDraggedIndex(null)}
+                        isDragging={draggedIndex === index}
+                        isNew={layer.isNew}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
             )}
           </div>
-          <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
-            <span>帧 {currentFrame + 1}</span>
-          </div>
         </div>
+      </Panel>
 
-        <div
-          ref={listRef}
-          className="min-h-0 flex-1 overflow-y-auto px-2 py-2"
-          onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-        >
-          {layers.length === 0 ? (
-            <div className="flex h-full min-h-[160px] flex-col items-center justify-center px-6 text-center text-sm text-text-muted">
-              <div className="mb-3 grid h-12 w-12 place-items-center rounded border border-border bg-bg-tertiary">
-                <Icon name="layer" size={24} className="opacity-60" />
-              </div>
-              <p className="text-text-secondary">打开 SVGA 文件或添加图片</p>
-              <p className="mt-1 text-xs">图层会显示在这里</p>
-            </div>
-          ) : (
-            <div
-              className="relative"
-              style={{ height: layers.length * LAYER_ROW_HEIGHT }}
-            >
-              {visibleLayers.map((layer, offset) => {
-                const index = visibleStart + offset
-                const { inRange, hasAnimation } = getLayerStatus(layer)
-                const thumbnailUrl = getLayerThumbnail(
-                  layer,
-                  imageResources,
-                  videoItem,
-                  objectUrlCacheRef.current
-                )
-
-                return (
-                  <div
-                    key={layer.id}
-                    className="absolute left-0 right-0 px-0.5 py-1"
-                    style={{ top: index * LAYER_ROW_HEIGHT, height: LAYER_ROW_HEIGHT }}
-                  >
-                    <LayerItem
-                      layer={layer}
-                      index={index}
-                      selected={selectedLayerId === layer.id}
-                      inRange={inRange}
-                      hasAnimation={hasAnimation}
-                      showAnimationMenu={showAnimationMenu === layer.id}
-                      showActionMenu={showActionMenu === layer.id}
-                      thumbnailUrl={thumbnailUrl}
-                      isEditing={editingLayerId === layer.id}
-                      editingName={editingName}
-                      onClick={() => {
-                        selectLayer(layer.id)
-                        setShowActionMenu(null)
-                      }}
-                      onToggleVisibility={() => handleToggleVisibility(layer.id, layer.visible)}
-                      onToggleLock={() => handleToggleLock(layer.id, layer.locked)}
-                      onDelete={() => handleDeleteLayer(layer.id)}
-                      onDuplicate={() => duplicateLayer(layer.id)}
-                      onShowAnimationMenu={() => {
-                        setShowActionMenu(null)
-                        setShowAnimationMenu(showAnimationMenu === layer.id ? null : layer.id)
-                      }}
-                      onShowActionMenu={() => {
-                        setShowAnimationMenu(null)
-                        setShowActionMenu(showActionMenu === layer.id ? null : layer.id)
-                      }}
-                      onApplyAnimation={(preset) => handleApplyAnimation(layer.id, preset)}
-                      onCloseAnimationMenu={() => setShowAnimationMenu(null)}
-                      onCloseActionMenu={() => setShowActionMenu(null)}
-                      onStartRename={() => handleStartRename(layer)}
-                      onChangeEditingName={setEditingName}
-                      onCommitRename={() => handleCommitRename(layer.id)}
-                      onCancelRename={handleCancelRename}
-                      onDragStart={() => handleDragStart(index)}
-                      onDragOver={handleDragOver}
-                      onDrop={(e) => handleDrop(e, index)}
-                      onDragEnd={() => setDraggedIndex(null)}
-                      isDragging={draggedIndex === index}
-                      isNew={layer.isNew}
-                    />
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-    </Panel>
+      <Modal
+        isOpen={Boolean(pendingDeleteLayer)}
+        onClose={() => setPendingDeleteLayerId(null)}
+        title="删除图层"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setPendingDeleteLayerId(null)}>
+              取消
+            </Button>
+            <Button variant="danger" onClick={handleConfirmDeleteLayer}>
+              删除
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-text-secondary">
+          确定要删除图层“{pendingDeleteLayer?.name}”吗？此操作会从当前编辑内容中移除该图层。
+        </p>
+      </Modal>
+    </>
   )
 }
 
@@ -668,20 +697,16 @@ const LayerItem: React.FC<LayerItemProps> = ({
               onDuplicate()
             }}
           />
-          {layer.isNew && (
-            <>
-              <div className="my-1 border-t border-border/70" />
-              <MenuActionButton
-                icon="trash"
-                label="删除图层"
-                danger
-                onClick={() => {
-                  onCloseActionMenu()
-                  onDelete()
-                }}
-              />
-            </>
-          )}
+          <div className="my-1 border-t border-border/70" />
+          <MenuActionButton
+            icon="trash"
+            label="删除图层"
+            danger
+            onClick={() => {
+              onCloseActionMenu()
+              onDelete()
+            }}
+          />
         </div>
       )}
 

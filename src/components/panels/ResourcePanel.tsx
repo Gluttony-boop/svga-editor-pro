@@ -49,8 +49,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   const slotConfigs = useEditorStore((s) => s.slotConfigs)
   const setSlotConfig = useEditorStore((s) => s.setSlotConfig)
   const removeSlotConfig = useEditorStore((s) => s.removeSlotConfig)
-  const renameImageKey = useEditorStore((s) => s.renameImageKey)
-  const layers = useEditorStore((s) => s.layers)
+  const renameImageResourceKey = useEditorStore((s) => s.renameImageResourceKey)
 
   const [isLoading, setIsLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
@@ -223,6 +222,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
+    e.stopPropagation()
     setDragOver(false)
 
     const files = e.dataTransfer.files
@@ -233,6 +233,10 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
 
   // 导出单张图片
   const handleExportImage = (key: string, url: string) => {
+    if (!url) {
+      setError('当前图片没有可导出的预览地址')
+      return
+    }
     const a = document.createElement('a')
     a.href = url
     a.download = `${key}.png`
@@ -283,10 +287,9 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     if (!renamingKey) return
     const newKey = renameValue.trim()
     if (newKey && newKey !== renamingKey) {
-      // 找到使用此 key 的图层，调用 renameImageKey
-      const layer = layers.find((l) => l.imageKey === renamingKey)
-      if (layer) {
-        renameImageKey(layer.id, newKey)
+      const renamed = renameImageResourceKey(renamingKey, newKey)
+      if (!renamed) {
+        setError(`无法将资源 Key 修改为 "${newKey}"，请检查是否重名`)
       }
     }
     setRenamingKey(null)

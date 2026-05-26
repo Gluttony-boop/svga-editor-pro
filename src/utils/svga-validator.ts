@@ -53,33 +53,29 @@ export class SVGAValidator {
 
       const data = new Uint8Array(buffer)
 
-      // 1. 验证文件头
-      if (data.length < 8) {
+      // 1. 解压数据。官方 SVGA 2.0 是 zlib-compressed protobuf；
+      // 这里同时兼容历史导出的自定义 "SVGA" 文件头。
+      if (data.length < 2) {
         result.errors.push('文件太小，不是有效的 SVGA 文件')
         result.isValid = false
         return result
       }
 
       const magic = String.fromCharCode(...data.slice(0, 4))
-      if (magic !== 'SVGA') {
-        result.errors.push(`无效的文件头: ${magic}，应该是 'SVGA'`)
-        result.isValid = false
-        return result
-      }
-
-      const version = data[4]
-      result.info.version = `2.0`
-
-      // 2. 解压数据
       let decompressed: Uint8Array
       try {
-        if (version === 0x02) {
-          decompressed = pako.inflate(data.slice(8))
-        } else if (version === 0x01) {
-          decompressed = data.slice(8)
+        if (magic === 'SVGA') {
+          const fileHeaderVersion = data[4]
+          if (fileHeaderVersion === 0x02) {
+            decompressed = pako.inflate(data.slice(8))
+          } else if (fileHeaderVersion === 0x01) {
+            decompressed = data.slice(8)
+          } else {
+            result.warnings.push(`未知的历史文件头版本号: ${fileHeaderVersion}，尝试按 2.0 解压`)
+            decompressed = pako.inflate(data.slice(8))
+          }
         } else {
-          result.warnings.push(`未知的版本号: ${version}，尝试作为 2.0 解压`)
-          decompressed = pako.inflate(data.slice(8))
+          decompressed = pako.inflate(data)
         }
       } catch (e) {
         result.errors.push(`解压失败: ${(e as Error).message}`)
@@ -108,6 +104,11 @@ export class SVGAValidator {
       // 版本
       if (!movieObj.version) {
         result.warnings.push('缺少 version 字段')
+      } else {
+        result.info.version = movieObj.version
+        if (movieObj.version !== '2.0.0') {
+          result.warnings.push(`version 字段为 ${movieObj.version}，导出目标应为 2.0.0`)
+        }
       }
 
       // 参数

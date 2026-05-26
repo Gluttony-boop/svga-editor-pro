@@ -9,6 +9,7 @@ import type {
   Layer, 
   MovieParams, 
   ImageResource,
+  SlotConfig,
   Sprite,
   FrameData,
   Transform,
@@ -17,7 +18,8 @@ import type {
 import { AnimationEngine } from './animation-engine'
 import {
   createLayerImageAliases,
-  findLayerForSpriteIndex
+  findLayerForSpriteIndex,
+  normalizeMovieImageReferences
 } from './layer-name-sync'
 import SVGA_PROTO_JSON from './svga-proto'
 
@@ -26,6 +28,7 @@ export interface SVGABuildConfig {
   layers: Layer[]
   imageResources: Map<string, ImageResource>
   originalImages?: Record<string, Uint8Array>
+  slotConfigs?: Record<string, SlotConfig>
   /** 新增图片的尺寸信息 */
   imageSizes?: Map<string, { width: number; height: number }>
 }
@@ -52,16 +55,12 @@ export class SVGABuilder {
     // 2. 编码为 protobuf
     const encoded = this.MovieEntity.encode(movie).finish()
 
-    // 3. 压缩
+    // 3. 官方 SVGA 2.0 是 zlib 压缩后的 protobuf MovieEntity。
     const compressed = pako.deflate(encoded, { level: 6 })
 
-    // 4. 构建 SVGA 文件（带文件头）
-    const header = new Uint8Array([0x53, 0x56, 0x47, 0x41, 0x02, 0x00, 0x00, 0x00])
-    const result = new Uint8Array(header.length + compressed.length)
-    result.set(header, 0)
-    result.set(compressed, header.length)
-
-    return new Blob([result], { type: 'application/octet-stream' })
+    return new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer], {
+      type: 'application/octet-stream'
+    })
   }
 
   /**
@@ -80,7 +79,9 @@ export class SVGABuilder {
 
     // 添加新增图片
     imageResources.forEach((resource, key) => {
-      images[key] = resource.data
+      if (resource.data.byteLength > 0) {
+        images[key] = resource.data
+      }
     })
 
     const imageAliases = createLayerImageAliases(images, layers)
@@ -227,6 +228,36 @@ export class SVGABuilder {
     }
   }
 
+  private async convertToPng(url: string): Promise<ArrayBuffer> {
+    return new Promise((resolve, reject) => {
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+
+      img.onload = () => {
+        const canvas = document.createElement('canvas')
+        canvas.width = img.width
+        canvas.height = img.height
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          reject(new Error('Failed to get canvas context'))
+          return
+        }
+
+        ctx.drawImage(img, 0, 0)
+        canvas.toBlob(async (blob) => {
+          if (!blob) {
+            reject(new Error('Failed to convert image to PNG'))
+            return
+          }
+          resolve(await blob.arrayBuffer())
+        }, 'image/png')
+      }
+
+      img.onerror = () => reject(new Error(`Failed to load image: ${url}`))
+      img.src = url
+    })
+  }
+
   /**
    * 合并原始 SVGA 和新增内容
    */
@@ -270,8 +301,21 @@ export class SVGABuilder {
     // 合并图片
     const mergedImages = { ...(originalObj.images || {}) }
     config.imageResources.forEach((resource, key) => {
-      mergedImages[key] = resource.data
+      if (resource.data.byteLength > 0) {
+        mergedImages[key] = resource.data
+      }
     })
+
+    const slotConfigs = config.slotConfigs || {}
+    const replacementKeys = Object.keys(slotConfigs).filter(
+      key => slotConfigs[key]?.type === 'image' && slotConfigs[key]?.value
+    )
+
+    for (const key of replacementKeys) {
+      const slotConfig = slotConfigs[key]
+      if (!slotConfig?.value) continue
+      mergedImages[key] = new Uint8Array(await this.convertToPng(slotConfig.value as string))
+    }
 
     // 构建图片尺寸映射
     const imageSizes = new Map<string, { width: number; height: number }>()
@@ -305,10 +349,10 @@ export class SVGABuilder {
       imageAliases
     )
 
-    // 更新现有图层的动画
-    const updatedOriginalSprites = originalSprites.map((sprite: Sprite, index: number) => {
+    // 更新现有图层的动画；缺失的原始图层视为已删除
+    const updatedOriginalSprites = originalSprites.flatMap((sprite: Sprite, index: number) => {
       const layer = findLayerForSpriteIndex(config.layers, index)
-      if (!layer) return sprite
+      if (!layer) return []
 
       // 检查图层是否有新的动画关键帧
       const hasNewAnimation = Object.values(layer.tracks).some(
@@ -318,11 +362,11 @@ export class SVGABuilder {
       const hasRenamed = Boolean(exportImageKey && exportImageKey !== sprite.imageKey)
 
       if (!hasNewAnimation) {
-        return hasRenamed ? { ...sprite, imageKey: exportImageKey } : sprite
+        return [hasRenamed ? { ...sprite, imageKey: exportImageKey } : sprite]
       }
 
       // 重新计算帧数据
-      return this.buildSprite(layer, config.params, undefined, exportImageKey)
+      return [this.buildSprite(layer, config.params, undefined, exportImageKey)]
     })
 
     const sourceToExportKey = new Map<string, string>()
@@ -350,21 +394,25 @@ export class SVGABuilder {
         frames: config.params.frames
       },
       images: mergedImages,
-      sprites: mergedSprites
+      sprites: mergedSprites,
+      audios: originalObj.audios || []
+    }
+
+    const normalizedReferences = normalizeMovieImageReferences(mergedMovie)
+    if (normalizedReferences.missingImageKeys.length > 0) {
+      console.warn(
+        '[SVGABuilder] Missing image data for sprite references:',
+        normalizedReferences.missingImageKeys
+      )
     }
 
     // 编码并压缩
     const encoded = this.MovieEntity.encode(mergedMovie).finish()
     const compressed = pako.deflate(encoded, { level: 6 })
 
-    // 添加文件头
-    const header = new Uint8Array([0x53, 0x56, 0x47, 0x41, 0x02, 0x00, 0x00, 0x00])
-    const result = new Uint8Array(header.length + compressed.length)
-    result.set(header, 0)
-    result.set(compressed, header.length)
-
-
-    return new Blob([result], { type: 'application/octet-stream' })
+    return new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer], {
+      type: 'application/octet-stream'
+    })
   }
 }
 

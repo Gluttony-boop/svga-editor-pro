@@ -350,6 +350,7 @@ export class SVGAOptimizer {
 
     // 2. 解码 protobuf - 关键：不使用 toObject，直接操作 decodedMessage
     const decodedMessage = this.MovieEntity.decode(decompressed)
+    decodedMessage.version = '2.0.0'
 
     // 3. 图片优化（包含去重和更新引用）
     // 直接修改 decodedMessage，不创建新对象
@@ -357,10 +358,10 @@ export class SVGAOptimizer {
       await this.optimizeImages(decodedMessage, config.image)
     }
 
-    // 4. 帧数据优化（暂时禁用，可能导致播放问题）
-    // if (config.frames) {
-    //   this.optimizeFrames(decodedMessage, config.frames)
-    // }
+    // 4. 帧数据优化
+    if (config.frames) {
+      this.optimizeFrames(decodedMessage, config.frames)
+    }
 
     // 5. 编码 - 直接编码 decodedMessage（已被修改）
     const encoded = this.MovieEntity.encode(decodedMessage).finish()
@@ -378,11 +379,8 @@ export class SVGAOptimizer {
     const compressionLevel = config.compression.level
     const compressed = pako.deflate(encoded, { level: compressionLevel as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 })
 
-    // 7. 构建输出
-    const header = new Uint8Array([0x53, 0x56, 0x47, 0x41, svgaVersion, 0x00, 0x00, 0x00])
-    const result = new Uint8Array(header.length + compressed.length)
-    result.set(header, 0)
-    result.set(compressed, header.length)
+    // 7. 构建官方 SVGA 2.0 输出：zlib-compressed protobuf MovieEntity
+    const result = compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer
 
     // 更新统计
     this.stats.optimizedSize = result.byteLength
@@ -924,6 +922,7 @@ export class SVGAOptimizer {
 
     // 2. 解码 protobuf
     const decodedMessage = this.MovieEntity.decode(decompressed)
+    decodedMessage.version = '2.0.0'
 
     // 3. 只处理图片
     if (decodedMessage.images) {
@@ -936,11 +935,8 @@ export class SVGAOptimizer {
     // 5. 压缩
     const compressed = pako.deflate(encoded, { level: 9 })
     
-    // 6. 构建输出
-    const header = new Uint8Array([0x53, 0x56, 0x47, 0x41, svgaVersion, 0x00, 0x00, 0x00])
-    const result = new Uint8Array(header.length + compressed.length)
-    result.set(header, 0)
-    result.set(compressed, header.length)
+    // 6. 构建官方 SVGA 2.0 输出：zlib-compressed protobuf MovieEntity
+    const result = compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer
 
     this.stats.optimizedSize = result.byteLength
     this.stats.reductionPercent = Math.round((1 - this.stats.optimizedSize / this.stats.originalSize) * 100)
