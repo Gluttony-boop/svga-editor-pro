@@ -1,0 +1,16 @@
+name: Actions Smoke Test
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print context
+        run: |
+          echo "Actions queue is working"
+          echo "Ref: $GITHUB_REF"
