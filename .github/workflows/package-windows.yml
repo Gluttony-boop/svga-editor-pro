@@ -2,9 +2,10 @@ name: Package Windows Installer
 
 on:
   push:
-    branches:
-      - master
   workflow_dispatch:
+  repository_dispatch:
+    types:
+      - package-windows
 
 jobs:
   package-win:

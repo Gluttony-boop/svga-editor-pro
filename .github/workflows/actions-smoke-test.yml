@@ -2,9 +2,10 @@ name: Actions Smoke Test
 
 on:
   push:
-    branches:
-      - master
   workflow_dispatch:
+  repository_dispatch:
+    types:
+      - actions-smoke-test
 
 jobs:
   smoke:
