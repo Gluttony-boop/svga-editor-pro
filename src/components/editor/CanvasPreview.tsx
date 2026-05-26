@@ -2,30 +2,34 @@ import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react'
 import { Icon, Button } from '@/components/ui'
 import { useEditorStore } from '@/stores'
 import { HighPerformanceRenderer, OfficialSvgRenderer } from '@/core'
-import { SVGAPixiRenderer } from '@/rendering/svga-pixi-renderer'
+import type { SVGAPixiRenderer as SVGAPixiRendererType } from '@/rendering/svga-pixi-renderer'
 import { cn } from '@/utils/cn'
 
 interface CanvasPreviewProps {
   className?: string
   enableWorker?: boolean // 是否启用Worker渲染
   usePixiRenderer?: boolean // 是否使用 PixiJS 渲染器
+  onOpenFile?: () => void
+  onSvgaDrop?: (file: File) => void | Promise<void>
 }
 
 export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ 
   className,
   enableWorker = true,
-  usePixiRenderer = false
+  usePixiRenderer = false,
+  onOpenFile,
+  onSvgaDrop
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const rendererRef = useRef<HighPerformanceRenderer | OfficialSvgRenderer | SVGAPixiRenderer | null>(null)
+  const rendererRef = useRef<HighPerformanceRenderer | OfficialSvgRenderer | SVGAPixiRendererType | null>(null)
+  const rendererKindRef = useRef<'high-performance' | 'official' | 'pixi' | null>(null)
   
   // 渲染器模式：从 store 读取，支持用户切换
   const rendererMode = useEditorStore((s) => s.rendererMode || 'high-performance')
   const setRendererMode = useEditorStore((s) => s.setRendererMode)
-  const effectiveRendererMode = rendererMode === 'high-performance' ? 'pixi' : rendererMode
-  const useOfficialRenderer = effectiveRendererMode === 'official'
-  const usePixi = usePixiRenderer || effectiveRendererMode === 'pixi'
+  const useOfficialRenderer = rendererMode === 'official'
+  const usePixi = usePixiRenderer || rendererMode === 'pixi'
   
   // 拖动状态
   const [isDragging, setIsDragging] = useState(false)
@@ -33,6 +37,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   
   // 渲染器是否已初始化
   const [rendererReady, setRendererReady] = useState(false)
+  const [pixiLoading, setPixiLoading] = useState(false)
   
   // 性能指标显示
   const [showMetrics, setShowMetrics] = useState(false)
@@ -56,6 +61,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   const setZoom = useEditorStore((s) => s.setZoom)
   const canvasOffset = useEditorStore((s) => s.canvasOffset)
   const setCanvasOffset = useEditorStore((s) => s.setCanvasOffset)
+  const showGrid = useEditorStore((s) => s.showGrid)
   
   // 播放循环内部直接读取 store，避免每帧触发 React 更新
   // 手动帧索引 - 使用本地状态，不订阅 store，避免动画时重渲染
@@ -89,56 +95,65 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   }, [])
 
   // 初始化渲染器 - 使用 ref 回调确保在 DOM 元素创建时立即执行
-  const canvasRefCallback = useCallback((canvas: HTMLCanvasElement | null) => {
-    canvasRef.current = canvas
+  const canvasRefCallback = useCallback((canvas: HTMLElement | null) => {
+    canvasRef.current = canvas instanceof HTMLCanvasElement ? canvas : null
     
     // 如果 canvas 被卸载，不做任何事
     if (!canvas) return
+
+    const initializeRenderer = async () => {
+      const nextKind = usePixi ? 'pixi' : useOfficialRenderer ? 'official' : 'high-performance'
     
-    // 如果渲染器模式变了，需要重建
-    if (rendererRef.current) {
-      const isModeMatch = (usePixi && rendererRef.current instanceof SVGAPixiRenderer) ||
-                          (useOfficialRenderer && rendererRef.current instanceof OfficialSvgRenderer) ||
-                          (!usePixi && !useOfficialRenderer && rendererRef.current instanceof HighPerformanceRenderer)
-      // 模式没变，不需要重建
-      if (isModeMatch) return
-      // 模式变了，销毁旧的
-      rendererRef.current.destroy()
-      rendererRef.current = null
-    }
-    
-    // 创建新渲染器
-    if (usePixi) {
-      // PixiJS 渲染器使用容器 div，不需要 canvas
-      const container = canvas.parentElement
-      if (container) {
-        rendererRef.current = new SVGAPixiRenderer(container)
+      // 如果渲染器模式变了，需要重建
+      if (rendererRef.current) {
+        if (rendererKindRef.current === nextKind) return
+        rendererRef.current.destroy()
+        rendererRef.current = null
+        rendererKindRef.current = null
       }
-    } else if (useOfficialRenderer) {
-      rendererRef.current = new OfficialSvgRenderer(canvas)
-    } else {
-      rendererRef.current = new HighPerformanceRenderer(canvas, enableWorker)
-    }
-    ;(canvas as any).__renderer = rendererRef.current
-    ;(window as any).__SVGA_RENDERER__ = rendererRef.current
-    
-    // 如果已经有 videoItem，立即初始化
-    const state = useEditorStore.getState()
-    if (state.videoItem && state.params) {
-      setRendererReady(false)
-      rendererRef.current!.setVideoItem(state.videoItem, { waitForImages: true }).then(() => {
+      
+      // 创建新渲染器
+      if (usePixi) {
+        const container = canvas
+        if (container) {
+          setPixiLoading(true)
+          const { SVGAPixiRenderer } = await import('@/rendering/svga-pixi-renderer')
+          rendererRef.current = new SVGAPixiRenderer(container)
+          setPixiLoading(false)
+        }
+      } else if (useOfficialRenderer && canvas instanceof HTMLCanvasElement) {
+        rendererRef.current = new OfficialSvgRenderer(canvas)
+      } else if (canvas instanceof HTMLCanvasElement) {
+        rendererRef.current = new HighPerformanceRenderer(canvas, enableWorker)
+      }
+      if (!rendererRef.current) return
+      rendererKindRef.current = nextKind
+      ;(canvas as any).__renderer = rendererRef.current
+      ;(window as any).__SVGA_RENDERER__ = rendererRef.current
+      
+      // 如果已经有 videoItem，立即初始化
+      const state = useEditorStore.getState()
+      if (state.videoItem && state.params && rendererRef.current) {
+        setRendererReady(false)
+        await rendererRef.current.setVideoItem(state.videoItem, { waitForImages: true })
         if (rendererRef.current) {
           const s = useEditorStore.getState()
-          rendererRef.current!.renderFrameAsync(0, {
+          await rendererRef.current.renderFrameAsync(0, {
             slotConfigs: s.slotConfigs,
             layers: s.layers,
             applySlots: true
-          }).finally(() => setRendererReady(true))
+          })
+          setRendererReady(true)
         }
-      })
-    } else {
-      setRendererReady(true)
+      } else {
+        setRendererReady(true)
+      }
     }
+
+    void initializeRenderer().catch((err) => {
+      setPixiLoading(false)
+      console.error('[CanvasPreview] Renderer init failed:', err)
+    })
   }, [enableWorker, useOfficialRenderer, usePixi])
 
   // 当 videoItem 变化时，初始化渲染器
@@ -160,7 +175,6 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
       }
       initRenderer()
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [videoItem, params])
 
   // 更新性能指标（使用 requestIdleCallback 避免阻塞渲染）
@@ -294,6 +308,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
         
         // 定期更新 UI（时间轴、进度条、FPS 指示）
         if (currentTime - lastUiUpdate >= 250) {
+          useEditorStore.getState().setCurrentFrame(frameToRender)
           updateTimelineIndicators(frameToRender)
           lastUiUpdate = currentTime
           
@@ -462,16 +477,18 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
       onWheel={handleWheel}
     >
       {/* 网格背景 */}
-      <div 
-        className="absolute inset-0 opacity-10 pointer-events-none"
-        style={{
-          backgroundImage: `
-            linear-gradient(to right, #ffffff 1px, transparent 1px),
-            linear-gradient(to bottom, #ffffff 1px, transparent 1px)
-          `,
-          backgroundSize: '20px 20px'
-        }}
-      />
+      {showGrid && (
+        <div
+          className="absolute inset-0 opacity-10 pointer-events-none"
+          style={{
+            backgroundImage: `
+              linear-gradient(to right, #ffffff 1px, transparent 1px),
+              linear-gradient(to bottom, #ffffff 1px, transparent 1px)
+            `,
+            backgroundSize: '20px 20px'
+          }}
+        />
+      )}
 
       {/* 画布容器 */}
       {videoItem && params ? (
@@ -480,37 +497,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           style={canvasContainerStyle}
         >
           {usePixi ? (
-            // PixiJS 渲染器会自动创建 canvas
-            <div ref={(el) => {
-              if (!el) return
-
-              if (rendererRef.current && !(rendererRef.current instanceof SVGAPixiRenderer)) {
-                rendererRef.current.destroy()
-                rendererRef.current = null
-                setRendererReady(false)
-              }
-
-              if (!rendererRef.current) {
-                rendererRef.current = new SVGAPixiRenderer(el)
-                setRendererReady(false)
-                ;(window as any).__SVGA_RENDERER__ = rendererRef.current
-                const state = useEditorStore.getState()
-                if (state.videoItem && state.params) {
-                  rendererRef.current.setVideoItem(state.videoItem, { waitForImages: true }).then(() => {
-                    if (rendererRef.current) {
-                      const s = useEditorStore.getState()
-                      rendererRef.current!.renderFrameAsync(0, {
-                        slotConfigs: s.slotConfigs,
-                        layers: s.layers,
-                        applySlots: true
-                      }).finally(() => setRendererReady(true))
-                    }
-                  })
-                } else {
-                  setRendererReady(true)
-                }
-              }
-            }} style={canvasStyle} />
+            <div ref={canvasRefCallback} style={canvasStyle} />
           ) : (
             <canvas
               ref={canvasRefCallback}
@@ -519,7 +506,13 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           )}
         </div>
       ) : (
-        <DropZone />
+        <DropZone onOpenFile={onOpenFile} onSvgaDrop={onSvgaDrop} />
+      )}
+
+      {pixiLoading && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-bg-primary/50 text-sm text-text-secondary">
+          正在加载 WebGL 渲染器...
+        </div>
       )}
 
       {/* 缩放控制 */}
@@ -562,10 +555,18 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
         <Button 
           variant="ghost" 
           size="sm"
-          aria-label={useOfficialRenderer ? '当前：官方兼容渲染器（点击切换为 WebGL 极速）' : '当前：WebGL 极速渲染器（点击切换为官方兼容）'}
+          aria-label={
+            usePixi ? '当前：WebGL 极速渲染器（点击切换为官方兼容）' :
+            useOfficialRenderer ? '当前：官方兼容渲染器（点击切换为 Canvas 高性能）' :
+            '当前：Canvas 高性能渲染器（点击切换为 WebGL 极速）'
+          }
           onClick={() => {
-            // 循环切换：pixi -> high-performance -> official -> pixi
-            setRendererMode(useOfficialRenderer ? 'pixi' : 'official')
+            const nextMode = rendererMode === 'pixi'
+              ? 'official'
+              : rendererMode === 'official'
+                ? 'high-performance'
+                : 'pixi'
+            setRendererMode(nextMode)
           }}
           title={
             usePixi ? '当前：WebGL 极速渲染器（点击切换为 Canvas 高性能）' :
@@ -623,7 +624,10 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
 }
 
 // 拖放区域组件
-const DropZone: React.FC = () => {
+const DropZone: React.FC<{
+  onOpenFile?: () => void
+  onSvgaDrop?: (file: File) => void | Promise<void>
+}> = ({ onOpenFile, onSvgaDrop }) => {
   const [isDragOver, setIsDragOver] = React.useState(false)
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -635,9 +639,15 @@ const DropZone: React.FC = () => {
     setIsDragOver(false)
   }
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
+    e.stopPropagation()
     setIsDragOver(false)
+
+    const file = e.dataTransfer.files[0]
+    if (file) {
+      await onSvgaDrop?.(file)
+    }
   }
 
   return (
@@ -651,6 +661,7 @@ const DropZone: React.FC = () => {
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
+      onClick={onOpenFile}
     >
       <div className="text-center">
         <Icon 

@@ -4,9 +4,11 @@ import { CanvasPreview, PlaybackControls, Timeline } from '@/components/editor'
 import { LayerPanel, ResourcePanel, SlotPanel, PropertyPanel, ExportPanel } from '@/components/panels'
 import type { ImageSelectInfo } from '@/components/panels'
 import { useEditorStore } from '@/stores'
-import { svgaParser, LayerFactory, ExportEngine, saveGeneratedFile } from '@/core'
+import { svgaParser, LayerFactory, ExportEngine, saveGeneratedFile, svgaBuilder } from '@/core'
 import { tauriAPI, createNativeAPI } from '@/lib/tauri-api'
 import type { SvgaData } from '@/lib/tauri-api'
+import { cn } from '@/utils/cn'
+import type { ImageResource, Layer, VideoItem } from '@/types'
 
 function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -113,8 +115,45 @@ function base64ToArrayBuffer(data: string): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
 }
 
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer())
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  return btoa(binary)
+}
+
 function isSvgaFileName(fileName: string): boolean {
   return fileName.toLowerCase().endsWith('.svga')
+}
+
+function getDefaultSvgaName(source: string | null): string {
+  if (!source) return 'export.svga'
+  const normalized = source.replace(/\\/g, '/')
+  const fileName = normalized.split('/').pop() || 'export.svga'
+  return isSvgaFileName(fileName) ? fileName : `${fileName}.svga`
+}
+
+function hasExportableLayerEdits(
+  videoItem: VideoItem,
+  layers: Layer[],
+  imageResources: Map<string, ImageResource>
+): boolean {
+  const originalLayerCount = videoItem.movie.sprites?.length ?? 0
+  const activeOriginalLayerCount = layers.filter((layer) => !layer.isNew && layer.editableIndex !== undefined).length
+  const hasDeletedOriginalLayers = activeOriginalLayerCount < originalLayerCount
+  const hasNewLayers = layers.some((layer) => layer.isNew)
+  const hasNewImages = Array.from(imageResources.values()).some((resource) => resource.isNew)
+  const hasAnimations = layers.some((layer) =>
+    Object.values(layer.tracks).some((track) => track.keyframes.length > 0)
+  )
+  const hasLayerNameChanges = layers.some((layer) => {
+    const nextName = layer.name.trim()
+    return layer.imageKey && nextName.length > 0 && nextName !== layer.imageKey
+  })
+
+  return hasDeletedOriginalLayers || hasNewLayers || hasNewImages || hasAnimations || hasLayerNameChanges
 }
 
 // Windows 窗口控制组件 - 使用 Tauri API
@@ -157,19 +196,143 @@ const WindowControls: React.FC = () => {
   )
 }
 
+type MenuId = 'file' | 'edit' | 'view' | 'help'
+type UnsavedChoice = 'save' | 'discard' | 'cancel'
+
+interface MenuAction {
+  label: string
+  shortcut?: string
+  disabled?: boolean
+  onSelect?: () => void
+}
+
+interface MenuBarProps {
+  onOpenFile: () => void
+  onOpenUrl: () => void
+  onSave: () => void
+  onSaveAs: () => void
+  onExport: () => void
+  onUndo: () => void
+  onRedo: () => void
+  onShowAbout: () => void
+}
+
 // 菜单栏组件
-const MenuBar: React.FC = () => {
+const MenuBar: React.FC<MenuBarProps> = ({
+  onOpenFile,
+  onOpenUrl,
+  onSave,
+  onSaveAs,
+  onExport,
+  onUndo,
+  onRedo,
+  onShowAbout
+}) => {
   const videoItem = useEditorStore((s) => s.videoItem)
   const isDirty = useEditorStore((s) => s.isDirty)
+  const canUndo = useEditorStore((s) => s.canUndo)
+  const canRedo = useEditorStore((s) => s.canRedo)
+  const showGrid = useEditorStore((s) => s.showGrid)
+  const rendererMode = useEditorStore((s) => s.rendererMode)
+  const toggleGrid = useEditorStore((s) => s.toggleGrid)
+  const setRendererMode = useEditorStore((s) => s.setRendererMode)
+  const [activeMenu, setActiveMenu] = useState<MenuId | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!activeMenu) return
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        setActiveMenu(null)
+      }
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActiveMenu(null)
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [activeMenu])
+
+  const runAction = (action?: () => void) => {
+    setActiveMenu(null)
+    action?.()
+  }
+
+  const menus: Record<MenuId, MenuAction[]> = {
+    file: [
+      { label: '打开文件', shortcut: 'Ctrl+O', onSelect: onOpenFile },
+      { label: '打开 URL', shortcut: 'Ctrl+Shift+O', onSelect: onOpenUrl },
+      { label: '保存', shortcut: 'Ctrl+S', disabled: !videoItem, onSelect: onSave },
+      { label: '另存为...', shortcut: 'Ctrl+Shift+S', disabled: !videoItem, onSelect: onSaveAs },
+      { label: '导出', shortcut: 'Ctrl+E', disabled: !videoItem, onSelect: onExport }
+    ],
+    edit: [
+      { label: '撤销', shortcut: 'Ctrl+Z', disabled: !canUndo, onSelect: onUndo },
+      { label: '重做', shortcut: 'Ctrl+Shift+Z / Ctrl+Y', disabled: !canRedo, onSelect: onRedo },
+      { label: videoItem ? '请选择图层后使用图层面板编辑' : '打开文件后可编辑图层', disabled: true }
+    ],
+    view: [
+      { label: `${showGrid ? '隐藏' : '显示'}网格`, onSelect: toggleGrid },
+      {
+        label: `渲染器：${rendererMode === 'pixi' ? 'WebGL 极速' : rendererMode === 'official' ? '官方兼容' : 'Canvas 高性能'}`,
+        onSelect: () => {
+          const nextMode = rendererMode === 'pixi'
+            ? 'official'
+            : rendererMode === 'official'
+              ? 'high-performance'
+              : 'pixi'
+          setRendererMode(nextMode)
+        }
+      }
+    ],
+    help: [
+      { label: '关于 SVGA Editor Pro', onSelect: onShowAbout }
+    ]
+  }
+
+  const menuLabels: Array<{ id: MenuId; label: string }> = [
+    { id: 'file', label: '文件' },
+    { id: 'edit', label: '编辑' },
+    { id: 'view', label: '视图' },
+    { id: 'help', label: '帮助' }
+  ]
 
   return (
     <div className="h-8 bg-bg-tertiary border-b border-border flex items-center justify-between px-4">
       {/* 左侧菜单 */}
-      <div className="flex items-center gap-1">
-        <MenuButton>文件</MenuButton>
-        <MenuButton>编辑</MenuButton>
-        <MenuButton>视图</MenuButton>
-        <MenuButton>帮助</MenuButton>
+      <div ref={menuRef} className="relative flex items-center gap-1">
+        {menuLabels.map((menu) => (
+          <div key={menu.id} className="relative">
+            <MenuButton
+              active={activeMenu === menu.id}
+              onClick={() => setActiveMenu(activeMenu === menu.id ? null : menu.id)}
+            >
+              {menu.label}
+            </MenuButton>
+            {activeMenu === menu.id && (
+              <div className="absolute left-0 top-full z-40 mt-1 w-52 rounded border border-border bg-bg-secondary py-1 shadow-xl">
+                {menus[menu.id].map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    disabled={item.disabled}
+                    className="flex h-8 w-full items-center justify-between gap-3 px-3 text-left text-xs text-text-secondary transition-colors hover:bg-accent/15 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-text-secondary"
+                    onClick={() => runAction(item.onSelect)}
+                  >
+                    <span className="truncate">{item.label}</span>
+                    {item.shortcut && <span className="flex-shrink-0 text-[10px] text-text-muted">{item.shortcut}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
       </div>
 
       {/* 中间标题 */}
@@ -186,9 +349,20 @@ const MenuBar: React.FC = () => {
   )
 }
 
-const MenuButton: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+const MenuButton: React.FC<{
+  children: React.ReactNode
+  active?: boolean
+  onClick: () => void
+}> = ({ children, active = false, onClick }) => {
   return (
-    <button className="px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-white/5 rounded transition-colors">
+    <button
+      type="button"
+      className={cn(
+        'px-3 py-1 text-sm text-text-secondary hover:text-text-primary hover:bg-white/5 rounded transition-colors',
+        active && 'bg-white/10 text-text-primary'
+      )}
+      onClick={onClick}
+    >
       {children}
     </button>
   )
@@ -197,6 +371,7 @@ const MenuButton: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 // 状态栏组件
 const StatusBar: React.FC = () => {
   const videoItem = useEditorStore((s) => s.videoItem)
+  const isDirty = useEditorStore((s) => s.isDirty)
   const fps = useEditorStore((s) => s.playback.fps)
   const totalFrames = useEditorStore((s) => s.playback.totalFrames)
   const [currentFrame, setCurrentFrame] = useState(0)
@@ -230,7 +405,7 @@ const StatusBar: React.FC = () => {
   return (
     <div className="h-6 bg-bg-tertiary border-t border-border flex items-center justify-between px-4 text-xs text-text-muted">
       <div className="flex items-center gap-4">
-        <span>{videoItem ? '就绪' : '等待文件'}</span>
+        <span>{videoItem ? (isDirty ? '未保存' : '已保存') : '等待文件'}</span>
         {videoItem && (
           <span>内存: {memory}</span>
         )}
@@ -251,16 +426,22 @@ const StatusBar: React.FC = () => {
 // 主应用组件
 export const App: React.FC = () => {
   const [showUrlModal, setShowUrlModal] = useState(false)
+  const [showAboutModal, setShowAboutModal] = useState(false)
+  const [showUnsavedModal, setShowUnsavedModal] = useState(false)
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [launchFileChecked, setLaunchFileChecked] = useState(false)
   const devAutoLoadRef = useRef(false)
   const launchFileAutoLoadRef = useRef(false)
+  const unsavedResolverRef = useRef<((choice: UnsavedChoice) => void) | null>(null)
+  const handleSaveRef = useRef<(() => Promise<boolean>) | null>(null)
+  const svgaFileInputRef = useRef<HTMLInputElement>(null)
   
   // 面板宽度状态
   const [leftPanelWidth, setLeftPanelWidth] = useState(260)
   const [rightPanelWidth, setRightPanelWidth] = useState(300)
+  const [layerPanelHeight, setLayerPanelHeight] = useState(300)
 
   const setVideoItem = useEditorStore((s) => s.setVideoItem)
   const setSource = useEditorStore((s) => s.setSource)
@@ -268,6 +449,11 @@ export const App: React.FC = () => {
   const setDetectedSlots = useEditorStore((s) => s.setDetectedSlots)
   const setAudioResources = useEditorStore((s) => s.setAudioResources)
   const reset = useEditorStore((s) => s.reset)
+  const undo = useEditorStore((s) => s.undo)
+  const redo = useEditorStore((s) => s.redo)
+  const canUndo = useEditorStore((s) => s.canUndo)
+  const canRedo = useEditorStore((s) => s.canRedo)
+  const videoItem = useEditorStore((s) => s.videoItem)
   
   // 图层操作
   const addLayer = useEditorStore((s) => s.addLayer)
@@ -311,6 +497,31 @@ export const App: React.FC = () => {
     const layerId = addLayer(newLayer)
     selectLayer(layerId)
   }, [addLayer, selectLayer, params, addImageResource])
+
+  const resolveUnsavedChoice = useCallback((choice: UnsavedChoice) => {
+    unsavedResolverRef.current?.(choice)
+    unsavedResolverRef.current = null
+    setShowUnsavedModal(false)
+  }, [])
+
+  const confirmDiscardUnsavedChanges = useCallback(async (): Promise<UnsavedChoice> => {
+    if (!useEditorStore.getState().isDirty) return 'discard'
+
+    return new Promise((resolve) => {
+      unsavedResolverRef.current = resolve
+      setShowUnsavedModal(true)
+    })
+  }, [])
+
+  const runWithUnsavedProtection = useCallback(async (operation: () => Promise<void> | void) => {
+    const choice = await confirmDiscardUnsavedChanges()
+    if (choice === 'cancel') return
+    if (choice === 'save') {
+      const saved = await handleSaveRef.current?.()
+      if (!saved) return
+    }
+    await operation()
+  }, [confirmDiscardUnsavedChanges])
 
   // 加载 SVGA 文件
   const loadSVGA = useCallback(async (buffer: ArrayBuffer, source: string, type: 'url' | 'file') => {
@@ -437,27 +648,67 @@ export const App: React.FC = () => {
     })()
   }, [loadSVGA])
 
-  // 打开文件 - 使用 Tauri API
-  const handleOpenFile = useCallback(async () => {
+  const handleSvgaFile = useCallback(async (file: File) => {
+    if (!isSvgaFileName(file.name)) {
+      setError('请选择 .svga 文件')
+      return
+    }
+
+    const buffer = await file.arrayBuffer()
+    await loadSVGA(buffer, file.name, 'file')
+  }, [loadSVGA])
+
+  const handleSvgaFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+
     try {
-      const filePath = await tauriAPI.dialog.openFile()
-      if (!filePath) return
-      await loadSVGAFromFilePath(filePath)
+      await runWithUnsavedProtection(() => handleSvgaFile(file))
     } catch (err) {
       setError(`打开文件失败: ${(err as Error).message}`)
     }
-  }, [loadSVGAFromFilePath])
+  }, [handleSvgaFile, runWithUnsavedProtection])
+
+  // 打开文件 - Tauri 使用系统对话框，Web 使用隐藏 input
+  const handleOpenFile = useCallback(async () => {
+    if (!isTauriRuntime()) {
+      const choice = await confirmDiscardUnsavedChanges()
+      if (choice === 'cancel') return
+      if (choice === 'save') {
+        const saved = await handleSaveRef.current?.()
+        if (!saved) return
+      }
+      svgaFileInputRef.current?.click()
+      return
+    }
+
+    try {
+      const filePath = await tauriAPI.dialog.openFile({
+        filters: [
+          { name: 'SVGA Files', extensions: ['svga'] },
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      })
+      if (!filePath) return
+      await runWithUnsavedProtection(() => loadSVGAFromFilePath(filePath))
+    } catch (err) {
+      setError(`打开文件失败: ${(err as Error).message}`)
+    }
+  }, [confirmDiscardUnsavedChanges, loadSVGAFromFilePath, runWithUnsavedProtection])
 
   // 打开 URL
   const handleOpenUrl = async () => {
     if (!url) return
 
     try {
-      const response = await fetch(url)
-      const buffer = await response.arrayBuffer()
-      await loadSVGA(buffer, url, 'url')
-      setShowUrlModal(false)
-      setUrl('')
+      await runWithUnsavedProtection(async () => {
+        const response = await fetch(url)
+        const buffer = await response.arrayBuffer()
+        await loadSVGA(buffer, url, 'url')
+        setShowUrlModal(false)
+        setUrl('')
+      })
     } catch (err) {
       setError(`加载 URL 失败: ${(err as Error).message}`)
     }
@@ -465,13 +716,17 @@ export const App: React.FC = () => {
 
   // 拖放文件
   const handleDrop = useCallback(async (e: DragEvent) => {
+    if (e.defaultPrevented) return
     e.preventDefault()
     const file = e.dataTransfer?.files[0]
-    if (file && isSvgaFileName(file.name)) {
-      const buffer = await file.arrayBuffer()
-      await loadSVGA(buffer, file.name, 'file')
+    if (file) {
+      try {
+        await runWithUnsavedProtection(() => handleSvgaFile(file))
+      } catch (err) {
+        setError(`拖放文件失败: ${(err as Error).message}`)
+      }
     }
-  }, [loadSVGA])
+  }, [handleSvgaFile, runWithUnsavedProtection])
 
   useEffect(() => {
     const handleDragOver = (e: DragEvent) => e.preventDefault()
@@ -498,7 +753,7 @@ export const App: React.FC = () => {
 
           const filePath = event.payload.paths.find(isSvgaFileName)
           if (filePath) {
-            await loadSVGAFromFilePath(filePath)
+            await runWithUnsavedProtection(() => loadSVGAFromFilePath(filePath))
           }
         })
 
@@ -515,7 +770,44 @@ export const App: React.FC = () => {
       disposed = true
       unlisten?.()
     }
-  }, [loadSVGAFromFilePath])
+  }, [loadSVGAFromFilePath, runWithUnsavedProtection])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+
+    let disposed = false
+    let unlisten: (() => void) | null = null
+
+    ;(async () => {
+      try {
+        const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+        unlisten = await getCurrentWebviewWindow().onCloseRequested(async (event) => {
+          if (!useEditorStore.getState().isDirty) return
+
+          event.preventDefault()
+          const choice = await confirmDiscardUnsavedChanges()
+          if (choice === 'cancel') return
+          if (choice === 'save') {
+            const saved = await handleSaveRef.current?.()
+            if (!saved) return
+          }
+          await tauriAPI.window.close()
+        })
+
+        if (disposed) {
+          unlisten()
+          unlisten = null
+        }
+      } catch (err) {
+        console.warn('[App] Tauri close listener unavailable:', err)
+      }
+    })()
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [confirmDiscardUnsavedChanges])
 
   // 开发模式：自动加载测试文件
   useEffect(() => {
@@ -540,97 +832,131 @@ export const App: React.FC = () => {
   }, [loadSVGA, launchFileChecked])
 
   // 保存文件（覆盖原文件或另存为）
-  const handleSave = useCallback(async () => {
-    const { videoItem, originalBuffer, currentSource, sourceType, compressionConfig, slotConfigs, layers, imageResources } = useEditorStore.getState()
+  const buildCurrentSvgaBlob = useCallback(async (): Promise<Blob> => {
+    const { videoItem, originalBuffer, compressionConfig, slotConfigs, layers, imageResources } = useEditorStore.getState()
     const params = getCurrentParamsSnapshot()
-    if (!videoItem || !params) return
-    const shouldOverwriteSource = isTauriRuntime() && sourceType === 'file' && currentSource
+    if (!videoItem || !params || !originalBuffer) {
+      throw new Error('没有可保存的 SVGA 数据')
+    }
+
+    const canvas = document.createElement('canvas')
+    canvas.width = params.viewBoxWidth
+    canvas.height = params.viewBoxHeight
+    const engine = new ExportEngine(canvas)
+    engine.setVideoItem(videoItem)
+
+    const hasEditableContent = hasExportableLayerEdits(videoItem, layers, imageResources)
+    if (hasEditableContent) {
+      const imageSizes = new Map<string, { width: number; height: number }>()
+      imageResources.forEach((resource, key) => {
+        if (resource.width > 0 && resource.height > 0) {
+          imageSizes.set(key, { width: resource.width, height: resource.height })
+        }
+      })
+
+      const originalImages: Record<string, Uint8Array> = {}
+      if (videoItem.buffers) {
+        Object.entries(videoItem.buffers).forEach(([key, buffer]) => {
+          originalImages[key] = new Uint8Array(buffer)
+        })
+      }
+
+      return svgaBuilder.mergeWithOriginal(originalBuffer, {
+        params,
+        layers,
+        imageResources,
+        originalImages,
+        slotConfigs,
+        imageSizes
+      })
+    }
+
+    return engine.exportSVGALite(originalBuffer, {
+      fps: params.fps,
+      frames: params.frames,
+      compression: compressionConfig,
+      slotConfigs,
+      layers
+    })
+  }, [])
+
+  const handleSaveAs = useCallback(async () => {
+    const { videoItem, currentSource } = useEditorStore.getState()
+    if (!videoItem) return false
 
     setLoading(true)
     setError(null)
     try {
-      const canvas = document.createElement('canvas')
-      canvas.width = params.viewBoxWidth
-      canvas.height = params.viewBoxHeight
-      const engine = new ExportEngine(canvas)
-      engine.setVideoItem(videoItem)
-
-      let blob: Blob
-      const hasNewContent = layers.some(l => l.isNew) ||
-        Array.from(imageResources.values()).some(r => r.isNew)
-
-      if (hasNewContent && originalBuffer) {
-        // 有新增图层，使用合并构建
-        const imageSizes = new Map<string, { width: number; height: number }>()
-        imageResources.forEach((resource, key) => {
-          if (resource.width > 0 && resource.height > 0) {
-            imageSizes.set(key, { width: resource.width, height: resource.height })
-          }
+      const blob = await buildCurrentSvgaBlob()
+      if (isTauriRuntime()) {
+        const filePath = await tauriAPI.dialog.saveFile({
+          defaultPath: getDefaultSvgaName(currentSource),
+          filters: [
+            { name: 'SVGA Files', extensions: ['svga'] },
+            { name: 'All Files', extensions: ['*'] }
+          ]
         })
-        const originalImages: Record<string, Uint8Array> = {}
-        if (videoItem.buffers) {
-          Object.entries(videoItem.buffers).forEach(([key, buffer]) => {
-            originalImages[key] = new Uint8Array(buffer)
-          })
-        }
-        const { svgaBuilder } = await import('@/core')
-        blob = await svgaBuilder.mergeWithOriginal(originalBuffer, {
-          params, layers, imageResources, originalImages, imageSizes
-        })
-      } else if (originalBuffer) {
-        blob = await engine.exportSVGALite(originalBuffer, {
-          fps: params.fps,
-          frames: params.frames,
-          compression: compressionConfig,
-          slotConfigs: slotConfigs,
-          layers
-        })
-      } else {
-        throw new Error('没有原始数据可保存')
-      }
-
-      // 如果有原始文件路径且是文件来源，直接覆盖
-      if (shouldOverwriteSource) {
-        const base64 = btoa(new Uint8Array(await blob.arrayBuffer()).reduce((s, b) => s + String.fromCharCode(b), ''))
-        const result = await tauriAPI.file.write(currentSource, base64)
+        if (!filePath) return false
+        const result = await tauriAPI.file.write(filePath, await blobToBase64(blob))
         if (result && !result.success) {
           throw new Error(result.error || '写入失败')
         }
+        useEditorStore.setState({
+          currentSource: filePath,
+          sourceType: 'file',
+          isDirty: false
+        })
       } else {
-        // URL 来源或无路径，使用 Tauri 保存对话框
-        const saved = await saveGeneratedFile(blob, 'export.svga')
-        if (!saved) return
+        const saved = await saveGeneratedFile(blob, getDefaultSvgaName(currentSource))
+        if (!saved) return false
+        useEditorStore.setState({ isDirty: false })
       }
+      return true
     } catch (err) {
       setError(`保存失败: ${(err as Error).message}`)
+      return false
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [buildCurrentSvgaBlob])
 
-  // 导出文件（始终弹出保存对话框）
-  const handleExport = useCallback(async () => {
-    const { videoItem, originalBuffer, compressionConfig, slotConfigs, layers } = useEditorStore.getState()
-    const params = getCurrentParamsSnapshot()
-    if (!videoItem || !params || !originalBuffer) return
+  // 保存文件（本地文件覆盖保存；URL/浏览器来源转为另存为）
+  const handleSave = useCallback(async () => {
+    const { videoItem, currentSource, sourceType } = useEditorStore.getState()
+    if (!videoItem) return false
+    const shouldOverwriteSource = isTauriRuntime() && sourceType === 'file' && currentSource
+
+    if (!shouldOverwriteSource) {
+      return handleSaveAs()
+    }
 
     setLoading(true)
     setError(null)
     try {
-      const canvas = document.createElement('canvas')
-      canvas.width = params.viewBoxWidth
-      canvas.height = params.viewBoxHeight
-      const engine = new ExportEngine(canvas)
-      engine.setVideoItem(videoItem)
+      const blob = await buildCurrentSvgaBlob()
+      const result = await tauriAPI.file.write(currentSource, await blobToBase64(blob))
+      if (result && !result.success) {
+        throw new Error(result.error || '写入失败')
+      }
+      useEditorStore.setState({ isDirty: false })
+      return true
+    } catch (err) {
+      setError(`保存失败: ${(err as Error).message}`)
+      return false
+    } finally {
+      setLoading(false)
+    }
+  }, [buildCurrentSvgaBlob, handleSaveAs])
 
-      const blob = await engine.exportSVGALite(originalBuffer, {
-        fps: params.fps,
-        frames: params.frames,
-        compression: compressionConfig,
-        slotConfigs: slotConfigs,
-        layers
-      })
+  // 导出文件（始终弹出保存对话框）
+  const handleExport = useCallback(async () => {
+    const { videoItem } = useEditorStore.getState()
+    if (!videoItem) return
 
+    setLoading(true)
+    setError(null)
+    try {
+      const blob = await buildCurrentSvgaBlob()
       const saved = await saveGeneratedFile(blob, 'export.svga')
       if (!saved) return
     } catch (err) {
@@ -638,7 +964,11 @@ export const App: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [buildCurrentSvgaBlob])
+
+  useEffect(() => {
+    handleSaveRef.current = handleSave
+  }, [handleSave])
 
   // 菜单事件监听 - 使用 Tauri 兼容层
   useEffect(() => {
@@ -653,13 +983,16 @@ export const App: React.FC = () => {
         case 'save':
           handleSave()
           break
+        case 'saveAs':
+          handleSaveAs()
+          break
         case 'export':
           handleExport()
           break
       }
     })
     return unsubscribe
-  }, [handleOpenFile, handleSave, handleExport])
+  }, [handleOpenFile, handleSave, handleSaveAs, handleExport])
 
   // 键盘快捷键
   useEffect(() => {
@@ -676,11 +1009,27 @@ export const App: React.FC = () => {
             break
           case 's':
             e.preventDefault()
-            handleSave()
+            if (e.shiftKey) {
+              handleSaveAs()
+            } else {
+              handleSave()
+            }
             break
           case 'e':
             e.preventDefault()
             handleExport()
+            break
+          case 'z':
+            e.preventDefault()
+            if (e.shiftKey) {
+              redo()
+            } else {
+              undo()
+            }
+            break
+          case 'y':
+            e.preventDefault()
+            redo()
             break
         }
       }
@@ -695,12 +1044,29 @@ export const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [handleOpenFile, handleSave, handleExport])
+  }, [handleOpenFile, handleSave, handleSaveAs, handleExport, undo, redo])
 
   return (
     <div className="h-screen flex flex-col bg-bg-primary text-text-primary overflow-hidden">
       {/* 菜单栏 */}
-      <MenuBar />
+      <MenuBar
+        onOpenFile={handleOpenFile}
+        onOpenUrl={() => setShowUrlModal(true)}
+        onSave={handleSave}
+        onSaveAs={handleSaveAs}
+        onExport={handleExport}
+        onUndo={undo}
+        onRedo={redo}
+        onShowAbout={() => setShowAboutModal(true)}
+      />
+
+      <input
+        ref={svgaFileInputRef}
+        type="file"
+        accept=".svga,application/octet-stream"
+        className="hidden"
+        onChange={handleSvgaFileInputChange}
+      />
 
       {/* 工具栏 */}
       <div className="h-12 bg-bg-secondary border-b border-border flex items-center justify-between px-4">
@@ -712,6 +1078,20 @@ export const App: React.FC = () => {
           <Button variant="ghost" size="sm" onClick={() => setShowUrlModal(true)}>
             <Icon name="globe" size={16} />
             打开 URL
+          </Button>
+          <Button variant="ghost" size="sm" onClick={handleSave} disabled={!videoItem}>
+            <Icon name="save" size={16} />
+            保存
+          </Button>
+          <Button variant="ghost" size="sm" onClick={undo} disabled={!canUndo} aria-label="撤销">
+            <Icon name="undo" size={16} />
+          </Button>
+          <Button variant="ghost" size="sm" onClick={redo} disabled={!canRedo} aria-label="重做">
+            <Icon name="redo" size={16} />
+          </Button>
+          <Button variant="ghost" size="sm" onClick={handleExport} disabled={!videoItem}>
+            <Icon name="export" size={16} />
+            导出
           </Button>
         </div>
 
@@ -735,15 +1115,15 @@ export const App: React.FC = () => {
           className="border-r border-border flex flex-col overflow-hidden flex-shrink-0"
           style={{ width: leftPanelWidth }}
         >
-          <LayerPanel className="flex-1 min-h-[180px] border-b border-border rounded-none overflow-auto" />
+          <div className="min-h-[180px] overflow-hidden border-b border-border" style={{ height: layerPanelHeight }}>
+            <LayerPanel className="h-full rounded-none overflow-auto" />
+          </div>
           <PanelSplitter 
             direction="vertical" 
-            onDrag={(_delta) => {
-              // 垂直分割器的拖拽逻辑
-            }} 
+            onDrag={(delta) => setLayerPanelHeight(prev => Math.max(180, Math.min(520, prev + delta)))}
           />
           <ResourcePanel 
-            className="flex-1 min-h-[180px] rounded-none border-0 overflow-auto" 
+            className="flex-1 min-h-[180px] rounded-none border-0 overflow-auto"
             onImageSelect={handleImageSelect}
           />
         </div>
@@ -756,7 +1136,17 @@ export const App: React.FC = () => {
 
         {/* 中间区域 */}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-          <CanvasPreview className="flex-1 min-h-0" />
+          <CanvasPreview
+            className="flex-1 min-h-0"
+            onOpenFile={handleOpenFile}
+            onSvgaDrop={async (file) => {
+              try {
+                await runWithUnsavedProtection(() => handleSvgaFile(file))
+              } catch (err) {
+                setError(`拖放文件失败: ${(err as Error).message}`)
+              }
+            }}
+          />
           <PlaybackControls />
           <Timeline className="h-40 flex-shrink-0" />
         </div>
@@ -822,6 +1212,51 @@ export const App: React.FC = () => {
           {error && (
             <p className="text-sm text-error">{error}</p>
           )}
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showUnsavedModal}
+        onClose={() => resolveUnsavedChoice('cancel')}
+        title="保存当前修改？"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => resolveUnsavedChoice('cancel')}>
+              取消
+            </Button>
+            <Button variant="danger" onClick={() => resolveUnsavedChoice('discard')}>
+              不保存
+            </Button>
+            <Button variant="primary" onClick={() => resolveUnsavedChoice('save')}>
+              保存
+            </Button>
+          </>
+        }
+      >
+        <p className="text-sm text-text-secondary">
+          当前 SVGA 还有未保存修改，继续操作会丢失这些修改。
+        </p>
+      </Modal>
+
+      <Modal
+        isOpen={showAboutModal}
+        onClose={() => setShowAboutModal(false)}
+        title="关于 SVGA Editor Pro"
+        footer={
+          <Button variant="primary" onClick={() => setShowAboutModal(false)}>
+            知道了
+          </Button>
+        }
+      >
+        <div className="space-y-3 text-sm text-text-secondary">
+          <p>SVGA Editor Pro v2.0.0</p>
+          <p>支持 SVGA 预览、图层调整、资源替换、插槽配置与导出。</p>
+          <div className="rounded border border-border bg-bg-tertiary p-3 text-xs">
+            <div>打开文件：Ctrl+O</div>
+            <div>打开 URL：Ctrl+Shift+O</div>
+            <div>保存：Ctrl+S</div>
+            <div>导出：Ctrl+E</div>
+          </div>
         </div>
       </Modal>
     </div>

@@ -9,7 +9,7 @@ import { CanvasRenderer } from './renderer'
 import type { VideoItem, CompressionConfig, SlotConfig, Layer } from '@/types'
 import {
   applyLayerNamesToMovie,
-  hasLayerNameChangesForSprites
+  normalizeMovieImageReferences
 } from './layer-name-sync'
 import SVGA_PROTO_JSON from './svga-proto'
 import SVGA_PROTO_LITE from './svga-proto-lite'
@@ -37,6 +37,13 @@ type BrowserWindowWithSavePicker = Window & {
 }
 
 export type SaveFileTarget = (blob: Blob) => Promise<void>
+
+function createSVGA2Blob(encoded: Uint8Array, level: number = 6): Blob {
+  const compressed = pako.deflate(encoded, { level: level as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 })
+  return new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer], {
+    type: 'application/octet-stream'
+  })
+}
 
 export class ExportEngine {
   private renderer: CanvasRenderer
@@ -123,6 +130,7 @@ export class ExportEngine {
 
       // 2. 解码 protobuf
       const decodedMessage = this.MovieEntity.decode(decompressed)
+      decodedMessage.version = '2.0.0'
       
 
       // 将消息转换为普通对象，保留所有字段
@@ -141,17 +149,8 @@ export class ExportEngine {
         key => slotConfigs[key]?.type === 'image' && slotConfigs[key]?.value
       )
 
-      // 如果没有图片替换且没有启用压缩，直接返回原始文件
+      // Always re-encode so every exported .svga is standard SVGA 2.0.
       const compression = config.compression
-      const hasLayerNameChanges = hasLayerNameChangesForSprites(decodedMessage.sprites, config.layers)
-      const needsReencode =
-        replacementKeys.length > 0 ||
-        hasLayerNameChanges ||
-        (compression?.enabled && compression.quality < 100)
-      
-      if (!needsReencode) {
-        return new Blob([originalBuffer], { type: 'application/octet-stream' })
-      }
 
       // 处理图片替换
       if (replacementKeys.length > 0) {
@@ -236,6 +235,13 @@ export class ExportEngine {
       }
 
       applyLayerNamesToMovie(decodedMessage, config.layers)
+      const normalizedReferences = normalizeMovieImageReferences(decodedMessage)
+      if (normalizedReferences.missingImageKeys.length > 0) {
+        console.warn(
+          '[Exporter] Missing image data for sprite references:',
+          normalizedReferences.missingImageKeys
+        )
+      }
 
       // 直接编码原始消息对象（已被修改）
       const encoded = this.MovieEntity.encode(decodedMessage).finish()
@@ -249,17 +255,7 @@ export class ExportEngine {
         throw new Error('导出验证失败: sprites 数据格式异常')
       }
       
-      // 压缩并构建 SVGA 文件
-      const compressed = pako.deflate(encoded, { level: 6 })
-      
-      // 构建 SVGA 文件头
-      const header = new Uint8Array([0x53, 0x56, 0x47, 0x41, svgaVersion, 0x00, 0x00, 0x00])
-      const result = new Uint8Array(header.length + compressed.length)
-      result.set(header, 0)
-      result.set(compressed, header.length)
-      
-      
-      return new Blob([result], { type: 'application/octet-stream' })
+      return createSVGA2Blob(encoded)
     } catch (error) {
       console.error('[Exporter] Export failed:', error)
       throw error
@@ -359,6 +355,8 @@ export class ExportEngine {
     scale: number
     prefix?: string
     quality?: number
+    slotConfigs?: Record<string, SlotConfig>
+    layers?: Layer[]
   }): Promise<Blob> {
     if (!this.videoItem) {
       throw new Error('没有可导出的视频')
@@ -368,11 +366,17 @@ export class ExportEngine {
     const params = movie.params!
     const totalFrames = params.frames
     const prefix = config.prefix || 'frame_'
+    const renderOptions = {
+      slotConfigs: config.slotConfigs,
+      layers: config.layers,
+      applySlots: true,
+      useFrameCache: false
+    }
 
     const zip = new JSZip()
 
     for (let i = 0; i < totalFrames; i++) {
-      await this.renderer.renderFrameAsync(i)
+      await this.renderer.renderFrameAsync(i, renderOptions)
       const blob = await this.renderer.exportFrame('image/png')
       const fileName = `${prefix}${String(i).padStart(4, '0')}.png`
       zip.file(fileName, blob)
@@ -387,6 +391,9 @@ export class ExportEngine {
   async exportWebP(config: {
     quality: number
     scale: number
+    frameIndex?: number
+    slotConfigs?: Record<string, SlotConfig>
+    layers?: Layer[]
   }): Promise<Blob> {
     if (!this.videoItem) {
       throw new Error('没有可导出的视频')
@@ -395,17 +402,15 @@ export class ExportEngine {
     const { movie } = this.videoItem
     const params = movie.params!
     const totalFrames = params.frames
+    const frameIndex = Math.max(0, Math.min(config.frameIndex ?? 0, totalFrames - 1))
 
-    // 收集所有帧
-    const frames: Blob[] = []
-    for (let i = 0; i < totalFrames; i++) {
-      await this.renderer.renderFrameAsync(i)
-      const blob = await this.renderer.exportFrame('image/webp', config.quality / 100)
-      frames.push(blob)
-    }
-
-    // 简单返回第一帧（实际需要用 WebP muxer）
-    return frames[0] || new Blob()
+    await this.renderer.renderFrameAsync(frameIndex, {
+      slotConfigs: config.slotConfigs,
+      layers: config.layers,
+      applySlots: true,
+      useFrameCache: false
+    })
+    return this.renderer.exportFrame('image/webp', config.quality / 100)
   }
 
   /**
@@ -444,7 +449,7 @@ export class ExportEngine {
 
   /**
    * 导出 SVGA 文件 - 兼容模式（参考 SVGA Editor）
-   * 不使用文件头，直接输出 zlib 压缩的 protobuf 数据
+   * 输出官方 SVGA 2.0：zlib 压缩的 protobuf MovieEntity 数据
    */
   async exportSVGALite(
     originalBuffer: ArrayBuffer,
@@ -494,6 +499,7 @@ export class ExportEngine {
       // 注意：不使用 defaults: true，保留 undefined 值
       // 否则 layout.x, transform.tx 等不存在字段会被填充为 0
       const decodedMessage = this.MovieEntity.decode(decompressed)
+      decodedMessage.version = '2.0.0'
       // 2.5 修改 FPS 和帧数（如果用户修改了）
 
       if (decodedMessage.params) {
@@ -639,6 +645,13 @@ export class ExportEngine {
       }
 
       applyLayerNamesToMovie(decodedMessage, config.layers)
+      const normalizedReferences = normalizeMovieImageReferences(decodedMessage)
+      if (normalizedReferences.missingImageKeys.length > 0) {
+        console.warn(
+          '[Exporter Lite] Missing image data for sprite references:',
+          normalizedReferences.missingImageKeys
+        )
+      }
 
       // 5. 直接使用标准 protobuf 编码（不使用 lite 格式转换）
       // 这样可以保留原始数据的完整性
@@ -653,11 +666,8 @@ export class ExportEngine {
         throw new Error('导出验证失败: sprites 数据格式异常')
       }
 
-      // 7. 使用 pako.deflate 压缩（不添加文件头）
-      const compressed = pako.deflate(encoded)
-
-      // 8. 直接返回压缩数据（无 SVGA 文件头）
-      return new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer], { type: 'application/octet-stream' })
+      // Official SVGA 2.0: zlib-compressed protobuf MovieEntity, no custom file header.
+      return createSVGA2Blob(encoded)
     } catch (error) {
       console.error('[Exporter Lite] Export failed:', error)
       throw error

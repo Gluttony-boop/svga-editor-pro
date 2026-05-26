@@ -2,7 +2,6 @@ import React from 'react'
 import { Panel, NumberInput, Slider, Icon } from '@/components/ui'
 import { useEditorStore, useCurrentParams } from '@/stores'
 import { cn } from '@/utils/cn'
-import type { LayerTracks } from '@/types'
 
 interface PropertyPanelProps {
   className?: string

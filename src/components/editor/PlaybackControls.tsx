@@ -14,7 +14,7 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
   const playbackFps = useEditorStore((s) => s.playback.fps)
   const loop = useEditorStore((s) => s.playback.loop)
   const speed = useEditorStore((s) => s.playback.speed)
-  const initialFrame = useEditorStore((s) => s.playback.currentFrame) // 仅用于初始化
+  const storeCurrentFrame = useEditorStore((s) => s.playback.currentFrame)
   
   const params = useEditorStore((s) => s.params)
   const setPlaying = useEditorStore((s) => s.setPlaying)
@@ -23,7 +23,7 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
   const setSpeed = useEditorStore((s) => s.setSpeed)
   
   // 本地帧状态，用于播放时更新 UI
-  const [currentFrame, setCurrentFrameLocal] = useState(initialFrame)
+  const [currentFrame, setCurrentFrameLocal] = useState(storeCurrentFrame)
   
   // 性能监控
   const [fps, setFps] = useState(0)
@@ -49,9 +49,9 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
   // 当 params 变化时，重置本地状态
   useEffect(() => {
     if (params) {
-      setCurrentFrameLocal(0)
+      setCurrentFrameLocal(storeCurrentFrame)
     }
-  }, [params])
+  }, [params, storeCurrentFrame])
 
 
 

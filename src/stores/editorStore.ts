@@ -21,6 +21,28 @@ import type {
 import type { OptimizationConfig, OptimizationStats } from '@/core/optimizer'
 import { v4 as uuid } from 'uuid'
 
+interface EditorSnapshot {
+  params: MovieParams | null
+  customFps: number | null
+  customFrames: number | null
+  layers: Layer[]
+  selectedLayerId: string | null
+  imageResources: Map<string, ImageResource>
+  audioResources: Map<string, AudioResource>
+  slotConfigs: Record<string, SlotConfig>
+  detectedSlots: string[]
+  compressionConfig: CompressionConfig
+  optimizationConfig: OptimizationConfig
+  selectedPresetId: string
+}
+
+interface EditorHistoryState {
+  past: Array<{ snapshot: EditorSnapshot; label?: string }>
+  future: Array<{ snapshot: EditorSnapshot; label?: string }>
+  maxDepth: number
+  isApplyingHistory: boolean
+}
+
 interface EditorStore {
   // 文件状态
   currentSource: string | null
@@ -68,6 +90,11 @@ interface EditorStore {
   selectedPresetId: string
   optimizationStats: OptimizationStats | null
 
+  // 历史记录
+  history: EditorHistoryState
+  canUndo: boolean
+  canRedo: boolean
+
   // Actions
   setVideoItem: (videoItem: VideoItem | null) => void
   setSource: (source: string | null, type: 'url' | 'file' | null) => void
@@ -93,6 +120,7 @@ interface EditorStore {
   removeImageResource: (key: string) => void
   getImageResource: (key: string) => ImageResource | undefined
   renameImageKey: (layerId: string, newKey: string) => void
+  renameImageResourceKey: (oldKey: string, newKey: string) => boolean
 
   // 音频资源操作
   addAudioResource: (resource: AudioResource) => void
@@ -138,6 +166,12 @@ interface EditorStore {
   setSelectedPresetId: (id: string) => void
   setOptimizationStats: (stats: OptimizationStats | null) => void
 
+  // 历史操作
+  undo: () => void
+  redo: () => void
+  commitHistory: (label?: string) => void
+  clearHistory: () => void
+
   // 重置
   reset: () => void
 }
@@ -162,7 +196,7 @@ const initialCompression: CompressionConfig = {
 const initialOptimization: OptimizationConfig = {
   enabled: true,
   image: {
-    format: 'webp',
+    format: 'png',
     quality: 80,
     resizeEnabled: false,
     resizePercent: 100,
@@ -182,8 +216,196 @@ const initialOptimization: OptimizationConfig = {
   }
 }
 
+const cloneParams = (params: MovieParams | null): MovieParams | null =>
+  params ? { ...params } : null
+
+const cloneLayer = (layer: Layer): Layer => ({
+  ...layer,
+  clip: { ...layer.clip },
+  imageSource: layer.imageSource ? { ...layer.imageSource, file: undefined } : undefined,
+  audioSource: layer.audioSource ? { ...layer.audioSource, file: undefined } : undefined,
+  tracks: {
+    position: {
+      ...layer.tracks.position,
+      currentValue: { ...layer.tracks.position.currentValue },
+      defaultValue: { ...layer.tracks.position.defaultValue },
+      keyframes: layer.tracks.position.keyframes.map((kf) => ({
+        ...kf,
+        value: { ...kf.value },
+        bezierControlPoints: kf.bezierControlPoints ? { ...kf.bezierControlPoints } : undefined
+      }))
+    },
+    scale: {
+      ...layer.tracks.scale,
+      currentValue: { ...layer.tracks.scale.currentValue },
+      defaultValue: { ...layer.tracks.scale.defaultValue },
+      keyframes: layer.tracks.scale.keyframes.map((kf) => ({
+        ...kf,
+        value: { ...kf.value },
+        bezierControlPoints: kf.bezierControlPoints ? { ...kf.bezierControlPoints } : undefined
+      }))
+    },
+    rotation: {
+      ...layer.tracks.rotation,
+      keyframes: layer.tracks.rotation.keyframes.map((kf) => ({
+        ...kf,
+        bezierControlPoints: kf.bezierControlPoints ? { ...kf.bezierControlPoints } : undefined
+      }))
+    },
+    alpha: {
+      ...layer.tracks.alpha,
+      keyframes: layer.tracks.alpha.keyframes.map((kf) => ({
+        ...kf,
+        bezierControlPoints: kf.bezierControlPoints ? { ...kf.bezierControlPoints } : undefined
+      }))
+    }
+  },
+  sprites: layer.sprites
+    ? {
+        ...layer.sprites,
+        frames: layer.sprites.frames.map((frame) => ({
+          ...frame,
+          layout: frame.layout ? { ...frame.layout } : null,
+          transform: { ...frame.transform },
+          shapes: frame.shapes ? frame.shapes.map((shape) => ({ ...shape })) : undefined
+        }))
+      }
+    : undefined
+})
+
+const cloneImageResource = (resource: ImageResource): ImageResource => ({
+  ...resource,
+  data: new Uint8Array(resource.data),
+  source: resource.source ? { ...resource.source, file: undefined } : undefined,
+  bitmap: undefined
+})
+
+const cloneAudioResource = (resource: AudioResource): AudioResource => ({
+  ...resource,
+  data: new Uint8Array(resource.data),
+  source: resource.source ? { ...resource.source, file: undefined } : undefined,
+  audioBuffer: undefined
+})
+
+const cloneImageResources = (resources: Map<string, ImageResource>) =>
+  new Map(Array.from(resources.entries()).map(([key, value]) => [key, cloneImageResource(value)]))
+
+const cloneAudioResources = (resources: Map<string, AudioResource>) =>
+  new Map(Array.from(resources.entries()).map(([key, value]) => [key, cloneAudioResource(value)]))
+
+const cloneSlotConfigs = (configs: Record<string, SlotConfig>) =>
+  Object.fromEntries(Object.entries(configs).map(([key, value]) => [
+    key,
+    {
+      ...value,
+      imageConfig: value.imageConfig ? { ...value.imageConfig } : undefined,
+      textConfig: value.textConfig ? { ...value.textConfig } : undefined
+    }
+  ]))
+
+const cloneOptimizationConfig = (config: OptimizationConfig): OptimizationConfig => ({
+  image: { ...config.image },
+  frames: { ...config.frames },
+  compression: { ...config.compression },
+  enabled: config.enabled
+})
+
+const cloneCompressionConfig = (config: CompressionConfig): CompressionConfig => ({ ...config })
+
+const createSnapshot = (state: EditorStore): EditorSnapshot => ({
+  params: cloneParams(state.params),
+  customFps: state.customFps,
+  customFrames: state.customFrames,
+  layers: state.layers.map(cloneLayer),
+  selectedLayerId: state.selectedLayerId,
+  imageResources: cloneImageResources(state.imageResources),
+  audioResources: cloneAudioResources(state.audioResources),
+  slotConfigs: cloneSlotConfigs(state.slotConfigs),
+  detectedSlots: [...state.detectedSlots],
+  compressionConfig: cloneCompressionConfig(state.compressionConfig),
+  optimizationConfig: cloneOptimizationConfig(state.optimizationConfig),
+  selectedPresetId: state.selectedPresetId
+})
+
+const serializeSnapshot = (snapshot: EditorSnapshot) => JSON.stringify({
+  ...snapshot,
+  imageResources: Array.from(snapshot.imageResources.entries()).map(([key, value]) => [
+    key,
+    { ...value, data: Array.from(value.data) }
+  ]),
+  audioResources: Array.from(snapshot.audioResources.entries()).map(([key, value]) => [
+    key,
+    { ...value, data: Array.from(value.data) }
+  ])
+})
+
+const isSameSnapshot = (a: EditorSnapshot, b: EditorSnapshot) =>
+  serializeSnapshot(a) === serializeSnapshot(b)
+
 export const useEditorStore = create<EditorStore>()(
-  subscribeWithSelector((set, get) => ({
+  subscribeWithSelector((set, get) => {
+    const applySnapshot = (snapshot: EditorSnapshot) => {
+      set((state) => ({
+        params: cloneParams(snapshot.params),
+        customFps: snapshot.customFps,
+        customFrames: snapshot.customFrames,
+        layers: snapshot.layers.map(cloneLayer),
+        selectedLayerId: snapshot.selectedLayerId,
+        imageResources: cloneImageResources(snapshot.imageResources),
+        audioResources: cloneAudioResources(snapshot.audioResources),
+        slotConfigs: cloneSlotConfigs(snapshot.slotConfigs),
+        detectedSlots: [...snapshot.detectedSlots],
+        compressionConfig: cloneCompressionConfig(snapshot.compressionConfig),
+        optimizationConfig: cloneOptimizationConfig(snapshot.optimizationConfig),
+        selectedPresetId: snapshot.selectedPresetId,
+        playback: snapshot.params
+          ? {
+              ...state.playback,
+              totalFrames: snapshot.customFrames ?? snapshot.params.frames,
+              fps: snapshot.customFps ?? snapshot.params.fps,
+              currentFrame: Math.min(
+                state.playback.currentFrame,
+                Math.max(0, (snapshot.customFrames ?? snapshot.params.frames) - 1)
+              )
+            }
+          : state.playback,
+        isDirty: true
+      }))
+    }
+
+    const pushHistory = (snapshot: EditorSnapshot, label?: string) => {
+      const state = get()
+      if (state.history.isApplyingHistory) return
+
+      const previous = state.history.past[state.history.past.length - 1]?.snapshot
+      if (previous && isSameSnapshot(previous, snapshot)) return
+
+      const past = [...state.history.past, { snapshot, label }].slice(-state.history.maxDepth)
+      set({
+        history: { ...state.history, past, future: [] },
+        canUndo: past.length > 0,
+        canRedo: false
+      })
+    }
+
+    const withHistory = (updater: Parameters<typeof set>[0], label?: string) => {
+      const before = createSnapshot(get())
+      set(updater)
+      const after = createSnapshot(get())
+      if (!isSameSnapshot(before, after)) {
+        pushHistory(before, label)
+      }
+    }
+
+    const clearHistoryState = () => {
+      set((state) => ({
+        history: { ...state.history, past: [], future: [], isApplyingHistory: false },
+        canUndo: false,
+        canRedo: false
+      }))
+    }
+
+    return ({
     // 初始状态
     currentSource: null,
     sourceType: null,
@@ -220,10 +442,19 @@ export const useEditorStore = create<EditorStore>()(
     optimizationConfig: initialOptimization,
     selectedPresetId: 'balanced',
     optimizationStats: null,
+    history: {
+      past: [],
+      future: [],
+      maxDepth: 100,
+      isApplyingHistory: false
+    },
+    canUndo: false,
+    canRedo: false,
 
     // Actions
     setVideoItem: (videoItem) => {
       set({ videoItem, isDirty: false })
+      clearHistoryState()
       if (videoItem?.movie.params) {
         const params = videoItem.movie.params
         set({
@@ -306,7 +537,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     setParams: (params) => {
-      set({ params })
+      withHistory({ params }, 'Update params')
       if (params) {
         set({
           playback: {
@@ -319,7 +550,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     setCustomFps: (fps) => {
-      set({ customFps: fps, isDirty: true })
+      withHistory({ customFps: fps, isDirty: true }, 'Update FPS')
       if (fps) {
         set({
           playback: {
@@ -331,12 +562,12 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     setCustomFrames: (frames) => {
-      set({ customFrames: frames, isDirty: true })
+      withHistory({ customFrames: frames, isDirty: true }, 'Update frames')
     },
 
     // 图层操作
     setLayers: (layers) => {
-      set({ layers })
+      withHistory({ layers, isDirty: true }, 'Set layers')
     },
 
     selectLayer: (layerId) => {
@@ -344,7 +575,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     updateLayer: (layerId, updates) => {
-      set((state) => ({
+      withHistory((state) => ({
         layers: state.layers.map((layer) =>
           layer.id === layerId ? { ...layer, ...updates } : layer
         ),
@@ -353,7 +584,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     updateLayerTrackDefaultValue: (layerId, trackKey, value) => {
-      set((state) => ({
+      withHistory((state) => ({
         layers: state.layers.map((layer) => {
           if (layer.id !== layerId) return layer
           const track = layer.tracks[trackKey]
@@ -370,7 +601,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     reorderLayers: (fromIndex, toIndex) => {
-      set((state) => {
+      withHistory((state) => {
         const layers = [...state.layers]
         const [removed] = layers.splice(fromIndex, 1)
         layers.splice(toIndex, 0, removed)
@@ -380,7 +611,7 @@ export const useEditorStore = create<EditorStore>()(
 
     addLayer: (layer) => {
       const id = uuid()
-      set((state) => ({
+      withHistory((state) => ({
         layers: [...state.layers, { ...layer, id }],
         selectedLayerId: id,
         isDirty: true
@@ -389,7 +620,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     deleteLayer: (layerId) => {
-      set((state) => ({
+      withHistory((state) => ({
         layers: state.layers.filter((l) => l.id !== layerId),
         selectedLayerId: state.selectedLayerId === layerId ? null : state.selectedLayerId,
         isDirty: true
@@ -415,7 +646,7 @@ export const useEditorStore = create<EditorStore>()(
         }
       }
 
-      set((state) => ({
+      withHistory((state) => ({
         layers: [...state.layers, duplicated],
         selectedLayerId: newId,
         isDirty: true
@@ -426,7 +657,7 @@ export const useEditorStore = create<EditorStore>()(
 
     // 资源操作
     addImageResource: (resource) => {
-      set((state) => {
+      withHistory((state) => {
         const newResources = new Map(state.imageResources)
         newResources.set(resource.key, resource)
         return { imageResources: newResources, isDirty: true }
@@ -434,10 +665,25 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     removeImageResource: (key) => {
-      set((state) => {
+      withHistory((state) => {
         const newResources = new Map(state.imageResources)
+        const removedResource = newResources.get(key)
         newResources.delete(key)
-        return { imageResources: newResources, isDirty: true }
+        const { [key]: _, ...slotConfigs } = state.slotConfigs
+        const shouldRemoveLayers = Boolean(removedResource?.isNew)
+        const layers = shouldRemoveLayers
+          ? state.layers.filter((layer) => layer.imageKey !== key)
+          : state.layers
+
+        return {
+          imageResources: newResources,
+          slotConfigs,
+          layers,
+          selectedLayerId: shouldRemoveLayers && state.selectedLayerId && !layers.some((layer) => layer.id === state.selectedLayerId)
+            ? null
+            : state.selectedLayerId,
+          isDirty: true
+        }
       })
     },
 
@@ -453,84 +699,113 @@ export const useEditorStore = create<EditorStore>()(
       const oldKey = layer.imageKey
       if (oldKey === newKey) return
       if (!newKey.trim()) return
+      get().renameImageResourceKey(oldKey, newKey)
+    },
 
-      // 检查新 key 是否已存在（非当前图层的）
+    renameImageResourceKey: (oldKey, newKey) => {
+      const trimmedKey = newKey.trim()
+      if (!oldKey || !trimmedKey) return false
+      if (oldKey === trimmedKey) return true
+
+      const state = get()
       const keyConflict = state.layers.some(
-        (l) => l.id !== layerId && l.imageKey === newKey
-      )
+        (layer) => layer.imageKey === trimmedKey && layer.imageKey !== oldKey
+      ) ||
+        state.imageResources.has(trimmedKey) ||
+        Boolean(state.videoItem?.buffers?.[trimmedKey]) ||
+        Boolean(state.videoItem?.images?.[trimmedKey]) ||
+        Boolean(state.slotConfigs[trimmedKey])
+
       if (keyConflict) {
-        console.warn(`[renameImageKey] Key "${newKey}" already exists, aborting`)
-        return
+        console.warn(`[renameImageResourceKey] Key "${trimmedKey}" already exists, aborting`)
+        return false
       }
 
-      set((state) => {
-        // 1. 更新图层的 imageKey 和 name
-        const layers = state.layers.map((l) => {
-          if (l.id !== layerId) return l
+      const hasSource =
+        state.layers.some((layer) => layer.imageKey === oldKey) ||
+        state.imageResources.has(oldKey) ||
+        Boolean(state.videoItem?.buffers?.[oldKey]) ||
+        Boolean(state.videoItem?.images?.[oldKey]) ||
+        Boolean(state.slotConfigs[oldKey])
+
+      if (!hasSource) {
+        return false
+      }
+
+      withHistory((state) => {
+        const layers = state.layers.map((layer) => {
+          if (layer.imageKey !== oldKey) return layer
           return {
-            ...l,
-            imageKey: newKey,
-            name: newKey,
-            // 同步更新 sprites 中的 imageKey
-            sprites: l.sprites ? { ...l.sprites, imageKey: newKey } : undefined,
+            ...layer,
+            imageKey: trimmedKey,
+            name: layer.name === oldKey ? trimmedKey : layer.name,
+            sprites: layer.sprites
+              ? {
+                  ...layer.sprites,
+                  imageKey: layer.sprites.imageKey === oldKey ? trimmedKey : layer.sprites.imageKey,
+                  matteKey: layer.sprites.matteKey === oldKey ? trimmedKey : layer.sprites.matteKey
+                }
+              : undefined
           }
         })
 
-        // 2. 更新 videoItem 中的 sprites、buffers、images
         let videoItem = state.videoItem
         if (videoItem) {
           const movie = { ...videoItem.movie }
-          // 更新 sprites
-          movie.sprites = movie.sprites.map((sprite) => {
-            if (sprite.imageKey === oldKey) {
-              return { ...sprite, imageKey: newKey }
-            }
-            // 更新 matteKey 引用
-            if (sprite.matteKey === oldKey) {
-              return { ...sprite, matteKey: newKey }
-            }
-            return sprite
-          })
+          movie.sprites = movie.sprites.map((sprite) => ({
+            ...sprite,
+            imageKey: sprite.imageKey === oldKey ? trimmedKey : sprite.imageKey,
+            matteKey: sprite.matteKey === oldKey ? trimmedKey : sprite.matteKey
+          }))
 
-          // 更新 buffers
           const buffers = { ...videoItem.buffers }
           if (buffers[oldKey] !== undefined) {
-            buffers[newKey] = buffers[oldKey]
+            buffers[trimmedKey] = buffers[oldKey]
             delete buffers[oldKey]
           }
 
-          // 更新 images
           const images = { ...videoItem.images }
           if (images[oldKey] !== undefined) {
-            images[newKey] = images[oldKey]
+            images[trimmedKey] = images[oldKey]
             delete images[oldKey]
           }
 
           videoItem = { ...videoItem, movie, buffers, images }
         }
 
-        // 3. 更新 imageResources Map
         const imageResources = new Map(state.imageResources)
         const resource = imageResources.get(oldKey)
         if (resource) {
           imageResources.delete(oldKey)
-          imageResources.set(newKey, { ...resource, key: newKey })
+          imageResources.set(trimmedKey, { ...resource, key: trimmedKey })
         }
 
-        // 4. 更新 slotConfigs
         let slotConfigs = state.slotConfigs
         if (slotConfigs[oldKey]) {
           const { [oldKey]: slotConfig, ...rest } = slotConfigs
-          slotConfigs = { ...rest, [newKey]: { ...slotConfig, name: newKey } }
+          slotConfigs = { ...rest, [trimmedKey]: { ...slotConfig, name: trimmedKey } }
         }
 
-        return { layers, videoItem, imageResources, slotConfigs, isDirty: true }
+        const detectedSlots = state.detectedSlots.map((slot) =>
+          slot === oldKey ? trimmedKey : slot
+        )
+
+        return {
+          layers,
+          videoItem,
+          imageResources,
+          slotConfigs,
+          detectedSlots,
+          isDirty: true
+        }
       })
+
+      return true
     },
 
     // 音频资源操作
     addAudioResource: (resource) => {
-      set((state) => {
+      withHistory((state) => {
         const newResources = new Map(state.audioResources)
         newResources.set(resource.key, resource)
         return { audioResources: newResources, isDirty: true }
@@ -538,7 +813,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     removeAudioResource: (key) => {
-      set((state) => {
+      withHistory((state) => {
         const newResources = new Map(state.audioResources)
         newResources.delete(key)
         return { audioResources: newResources, isDirty: true }
@@ -550,26 +825,26 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     setAudioResources: (resources) => {
-      set({ audioResources: resources })
+      withHistory({ audioResources: resources, isDirty: true }, 'Set audio resources')
     },
 
     // 插槽操作
     setSlotConfig: (key, config) => {
-      set((state) => ({
+      withHistory((state) => ({
         slotConfigs: { ...state.slotConfigs, [key]: config },
         isDirty: true
       }))
     },
 
     removeSlotConfig: (key) => {
-      set((state) => {
+      withHistory((state) => {
         const { [key]: _, ...rest } = state.slotConfigs
         return { slotConfigs: rest, isDirty: true }
       })
     },
 
     setDetectedSlots: (slots) => {
-      set({ detectedSlots: slots })
+      withHistory({ detectedSlots: slots, isDirty: true }, 'Set detected slots')
     },
 
     // 播放控制
@@ -599,14 +874,14 @@ export const useEditorStore = create<EditorStore>()(
 
     // 关键帧操作
     addKeyframe: (keyframe) => {
-      set((state) => ({
+      withHistory((state) => ({
         keyframes: [...state.keyframes, { ...keyframe, id: uuid() }],
         isDirty: true
       }))
     },
 
     updateKeyframe: (id, updates) => {
-      set((state) => ({
+      withHistory((state) => ({
         keyframes: state.keyframes.map((kf) =>
           kf.id === id ? { ...kf, ...updates } : kf
         ),
@@ -615,7 +890,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     deleteKeyframe: (id) => {
-      set((state) => ({
+      withHistory((state) => ({
         keyframes: state.keyframes.filter((kf) => kf.id !== id),
         isDirty: true
       }))
@@ -637,7 +912,7 @@ export const useEditorStore = create<EditorStore>()(
 
     // 图层关键帧操作
     addLayerKeyframe: (layerId, trackKey, keyframe) => {
-      set((state) => ({
+      withHistory((state) => ({
         layers: state.layers.map((layer) => {
           if (layer.id !== layerId) return layer
           const track = layer.tracks[trackKey]
@@ -657,7 +932,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     updateLayerKeyframe: (layerId, trackKey, keyframeId, updates) => {
-      set((state) => ({
+      withHistory((state) => ({
         layers: state.layers.map((layer) => {
           if (layer.id !== layerId) return layer
           const track = layer.tracks[trackKey]
@@ -677,7 +952,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     deleteLayerKeyframe: (layerId, trackKey, keyframeId) => {
-      set((state) => ({
+      withHistory((state) => ({
         layers: state.layers.map((layer) => {
           if (layer.id !== layerId) return layer
           const track = layer.tracks[trackKey]
@@ -695,7 +970,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     applyAnimationPreset: (layerId, preset, startFrame) => {
-      set((state) => {
+      withHistory((state) => {
         const params = state.params
         if (!params) return state
 
@@ -798,26 +1073,82 @@ export const useEditorStore = create<EditorStore>()(
 
     // 导出配置
     setCompressionConfig: (config) => {
-      set((state) => ({
-        compressionConfig: { ...state.compressionConfig, ...config }
-      }))
+      withHistory((state) => ({
+        compressionConfig: { ...state.compressionConfig, ...config },
+        isDirty: true
+      }), 'Update compression')
     },
     
     // 优化配置
     setOptimizationConfig: (config) => {
-      set((state) => ({
+      withHistory((state) => ({
         optimizationConfig: { ...state.optimizationConfig, ...config },
-        selectedPresetId: 'custom'
-      }))
+        selectedPresetId: 'custom',
+        isDirty: true
+      }), 'Update optimization')
     },
     
     setSelectedPresetId: (id) => {
-      set({ selectedPresetId: id })
+      withHistory({ selectedPresetId: id, isDirty: true }, 'Select preset')
     },
     
     setOptimizationStats: (stats) => {
       set({ optimizationStats: stats })
     },
+
+    undo: () => {
+      const state = get()
+      const entry = state.history.past[state.history.past.length - 1]
+      if (!entry) return
+
+      const current = createSnapshot(state)
+      const nextPast = state.history.past.slice(0, -1)
+      const nextFuture = [{ snapshot: current, label: entry.label }, ...state.history.future]
+      set({
+        history: {
+          ...state.history,
+          past: nextPast,
+          future: nextFuture,
+          isApplyingHistory: true
+        },
+        canUndo: nextPast.length > 0,
+        canRedo: true
+      })
+      applySnapshot(entry.snapshot)
+      set((latest) => ({
+        history: { ...latest.history, isApplyingHistory: false }
+      }))
+    },
+
+    redo: () => {
+      const state = get()
+      const entry = state.history.future[0]
+      if (!entry) return
+
+      const current = createSnapshot(state)
+      const nextPast = [...state.history.past, { snapshot: current, label: entry.label }].slice(-state.history.maxDepth)
+      const nextFuture = state.history.future.slice(1)
+      set({
+        history: {
+          ...state.history,
+          past: nextPast,
+          future: nextFuture,
+          isApplyingHistory: true
+        },
+        canUndo: true,
+        canRedo: nextFuture.length > 0
+      })
+      applySnapshot(entry.snapshot)
+      set((latest) => ({
+        history: { ...latest.history, isApplyingHistory: false }
+      }))
+    },
+
+    commitHistory: (label) => {
+      pushHistory(createSnapshot(get()), label)
+    },
+
+    clearHistory: clearHistoryState,
 
     // 重置
     reset: () => {
@@ -846,10 +1177,18 @@ export const useEditorStore = create<EditorStore>()(
         compressionConfig: initialCompression,
         optimizationConfig: initialOptimization,
         selectedPresetId: 'balanced',
-        optimizationStats: null
+        optimizationStats: null,
+        history: {
+          past: [],
+          future: [],
+          maxDepth: get().history.maxDepth,
+          isApplyingHistory: false
+        },
+        canUndo: false,
+        canRedo: false
       })
     }
-  }))
+  })})
 )
 
 // 计算属性 Hooks

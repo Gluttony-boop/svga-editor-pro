@@ -13,8 +13,59 @@ interface MutableMovieLike {
   sprites?: MutableSpriteLike[] | null
 }
 
+export interface ImageReferenceNormalizationResult {
+  changed: boolean
+  missingImageKeys: string[]
+}
+
 const hasOwn = (target: MutableImageMap, key: string) =>
   Object.prototype.hasOwnProperty.call(target, key)
+
+const IMAGE_DATA_PREFIXES = [
+  'data:image/',
+  'UklGR',       // WebP RIFF base64
+  'iVBORw0KGgo', // PNG base64
+  '/9j/',        // JPEG base64
+  'R0lGOD'       // GIF base64
+]
+
+function isLikelyInlineImageData(value: string): boolean {
+  const compact = value.trim().replace(/\s/g, '')
+  if (!compact) return false
+
+  if (IMAGE_DATA_PREFIXES.some((prefix) => compact.startsWith(prefix))) {
+    return true
+  }
+
+  return compact.length > 180 && /^[A-Za-z0-9+/=]+$/.test(compact)
+}
+
+function sanitizeImageKeyPart(value: string): string {
+  const cleaned = value
+    .trim()
+    .replace(/^data:image\/[^;]+;base64,/i, '')
+    .replace(/[^a-zA-Z0-9_.-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48)
+
+  return cleaned || 'image'
+}
+
+export function getCompatibleImageKey(
+  requestedKey: string,
+  fallback: string,
+  layerIndex: number
+): string {
+  if (!requestedKey || isLikelyInlineImageData(requestedKey)) {
+    return `image_${layerIndex + 1}`
+  }
+
+  if (requestedKey.length > 120) {
+    return sanitizeImageKeyPart(fallback || requestedKey)
+  }
+
+  return requestedKey
+}
 
 export function getLayerExportImageKey(layer: Layer, fallback = ''): string {
   const trimmedName = layer.name.trim()
@@ -82,7 +133,11 @@ export function createLayerImageAliases(
     const sourceKey = sourceKeyByLayerId.get(layer.id) ?? layer.imageKey
     if (!sourceKey) return
 
-    const requestedKey = getLayerExportImageKey(layer, sourceKey)
+    const requestedKey = getCompatibleImageKey(
+      getLayerExportImageKey(layer, sourceKey),
+      sourceKey,
+      index
+    )
     if (!requestedKey) return
 
     const sourceImage = images[sourceKey]
@@ -124,7 +179,11 @@ export function hasLayerNameChangesForSprites(
     const currentKey = sprite.imageKey || layer.imageKey || ''
     if (!currentKey) return false
 
-    return getLayerExportImageKey(layer, currentKey) !== currentKey
+    return getCompatibleImageKey(
+      getLayerExportImageKey(layer, currentKey),
+      currentKey,
+      index
+    ) !== currentKey
   })
 }
 
@@ -191,4 +250,106 @@ export function applyLayerNamesToMovie(
   }
 
   return changed
+}
+
+export function hasIncompatibleMovieImageReferences(movie: MutableMovieLike): boolean {
+  const sprites = movie.sprites
+  const images = movie.images
+  if (!sprites?.length || !images) return false
+
+  return sprites.some((sprite, index) => {
+    const imageKey = sprite.imageKey || ''
+    const matteKey = sprite.matteKey || ''
+    return (
+      (imageKey && hasOwn(images, imageKey) && getCompatibleImageKey(imageKey, imageKey, index) !== imageKey) ||
+      (matteKey && hasOwn(images, matteKey) && getCompatibleImageKey(matteKey, matteKey, index) !== matteKey)
+    )
+  })
+}
+
+export function normalizeMovieImageReferences(movie: MutableMovieLike): ImageReferenceNormalizationResult {
+  const sprites = movie.sprites
+  const images = movie.images
+  if (!sprites?.length || !images) {
+    return { changed: false, missingImageKeys: [] }
+  }
+
+  const renamedKeys = new Map<string, string>()
+  const claimedKeys = new Map<string, string>()
+  const missingImageKeys = new Set<string>()
+  let changed = false
+
+  const renameIfNeeded = (key: string | null | undefined, index: number): string | null | undefined => {
+    if (!key) return key
+
+    const existingRename = renamedKeys.get(key)
+    if (existingRename) return existingRename
+
+    const sourceImage = images[key]
+    if (sourceImage === undefined) {
+      missingImageKeys.add(key)
+      return key
+    }
+
+    const requestedKey = getCompatibleImageKey(key, key, index)
+    if (requestedKey === key) return key
+
+    const exportKey = allocateImageKey(
+      requestedKey,
+      key,
+      images,
+      claimedKeys,
+      index
+    )
+
+    if (!hasOwn(images, exportKey)) {
+      images[exportKey] = sourceImage
+    }
+
+    renamedKeys.set(key, exportKey)
+    claimedKeys.set(exportKey, key)
+    changed = true
+    return exportKey
+  }
+
+  sprites.forEach((sprite, index) => {
+    const imageKey = renameIfNeeded(sprite.imageKey, index)
+    if (imageKey !== sprite.imageKey) {
+      sprite.imageKey = imageKey
+    }
+
+    const matteKey = renameIfNeeded(sprite.matteKey, index)
+    if (matteKey !== sprite.matteKey) {
+      sprite.matteKey = matteKey
+    }
+  })
+
+  if (renamedKeys.size > 0) {
+    const usedKeys = new Set<string>()
+    sprites.forEach((sprite) => {
+      if (sprite.imageKey) usedKeys.add(sprite.imageKey)
+      if (sprite.matteKey) usedKeys.add(sprite.matteKey)
+    })
+
+    for (const oldKey of renamedKeys.keys()) {
+      if (!usedKeys.has(oldKey) && hasOwn(images, oldKey)) {
+        delete images[oldKey]
+        changed = true
+      }
+    }
+  }
+
+  sprites.forEach((sprite) => {
+    if (sprite.imageKey && !hasOwn(images, sprite.imageKey)) {
+      missingImageKeys.add(sprite.imageKey)
+    }
+    if (sprite.matteKey && !hasOwn(images, sprite.matteKey)) {
+      missingImageKeys.add(sprite.matteKey)
+    }
+  })
+
+  return {
+    changed,
+    missingImageKeys: Array.from(missingImageKeys)
+  }
 }

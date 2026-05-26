@@ -3,7 +3,7 @@ syntax = "proto3";
 package com.opensource.svga;
 
 option objc_class_prefix = "SVGAProto";
-option java_package = "com.opensource.svgaplayer";
+option java_package = "com.opensource.svgaplayer.proto";
 
 message MovieParams {
   float viewBoxWidth = 1;
@@ -16,6 +16,14 @@ message SpriteEntity {
   string imageKey = 1;
   repeated FrameEntity frames = 2;
   string matteKey = 3;
+}
+
+message AudioEntity {
+  string audioKey = 1;
+  int32 startFrame = 2;
+  int32 endFrame = 3;
+  int32 startTime = 4;
+  int32 totalTime = 5;
 }
 
 message Layout {
@@ -115,4 +123,5 @@ message MovieEntity {
   MovieParams params = 2;
   map<string, bytes> images = 3;
   repeated SpriteEntity sprites = 4;
+  repeated AudioEntity audios = 5;
 }

@@ -13,7 +13,7 @@ export default {
             svga: {
               options: {
                 objc_class_prefix: 'SVGAProto',
-                java_package: 'com.opensource.svgaplayer'
+                java_package: 'com.opensource.svgaplayer.proto'
               },
               nested: {
                 MovieParams: {
@@ -50,6 +50,30 @@ export default {
                     matteKey: {
                       type: 'string',
                       id: 3
+                    }
+                  }
+                },
+                AudioEntity: {
+                  fields: {
+                    audioKey: {
+                      type: 'string',
+                      id: 1
+                    },
+                    startFrame: {
+                      type: 'int32',
+                      id: 2
+                    },
+                    endFrame: {
+                      type: 'int32',
+                      id: 3
+                    },
+                    startTime: {
+                      type: 'int32',
+                      id: 4
+                    },
+                    totalTime: {
+                      type: 'int32',
+                      id: 5
                     }
                   }
                 },
@@ -317,6 +341,11 @@ export default {
                       rule: 'repeated',
                       type: 'SpriteEntity',
                       id: 4
+                    },
+                    audios: {
+                      rule: 'repeated',
+                      type: 'AudioEntity',
+                      id: 5
                     }
                   }
                 }

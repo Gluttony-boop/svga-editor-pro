@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect } from 'react'
 import { Icon, Button } from '@/components/ui'
 import { useEditorStore } from '@/stores'
 import { cn } from '@/utils/cn'
+import type { Keyframe, Layer } from '@/types'
 
 interface TimelineProps {
   className?: string
@@ -19,6 +20,7 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
 
   const videoItem = useEditorStore((s) => s.videoItem)
   const params = useEditorStore((s) => s.params)
+  const layers = useEditorStore((s) => s.layers)
   const setCurrentFrameGlobal = useEditorStore((s) => s.setCurrentFrame)
   const frameWidth = 10 * scale
   const setPlayheadFrame = React.useCallback((frameIndex: number) => {
@@ -70,14 +72,13 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   const totalFrames = params.frames
   const totalWidth = totalFrames * frameWidth
   const trackHeight = 32
-  const sprites = videoItem.movie.sprites || []
-  const totalTrackHeight = Math.max(trackViewportHeight, sprites.length * trackHeight)
+  const totalTrackHeight = Math.max(trackViewportHeight, layers.length * trackHeight)
   const visibleStart = Math.max(0, Math.floor(scrollTop / trackHeight) - 2)
   const visibleEnd = Math.min(
-    sprites.length,
+    layers.length,
     Math.ceil((scrollTop + trackViewportHeight) / trackHeight) + 2
   )
-  const visibleSprites = sprites.slice(visibleStart, visibleEnd)
+  const visibleLayers = layers.slice(visibleStart, visibleEnd)
 
   const handleTimelineClick = (e: React.MouseEvent) => {
     const rect = e.currentTarget.getBoundingClientRect()
@@ -179,12 +180,12 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
             </div>
 
             {/* 图层轨道 */}
-            {visibleSprites.map((sprite, offset) => {
+            {visibleLayers.map((layer, offset) => {
               const layerIndex = visibleStart + offset
               return (
               <LayerTrack
-                key={layerIndex}
-                sprite={sprite}
+                key={layer.id}
+                layer={layer}
                 index={layerIndex}
                 frameWidth={frameWidth}
                 totalFrames={totalFrames}
@@ -206,14 +207,21 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
 }
 
 interface LayerTrackProps {
-  sprite: any
+  layer: Layer
   index: number
   frameWidth: number
   totalFrames: number
 }
 
-const LayerTrack: React.FC<LayerTrackProps> = React.memo(({ sprite, index, frameWidth, totalFrames }) => {
-  const frames = sprite.frames || []
+const LayerTrack: React.FC<LayerTrackProps> = React.memo(({ layer, index, frameWidth, totalFrames }) => {
+  const frames = layer.sprites?.frames || []
+  const keyframeFrames = Object.values(layer.tracks)
+    .flatMap((track) => track.keyframes.map((keyframe: Keyframe) => keyframe.frameIndex))
+  const fallbackFrames = [
+    layer.clip.startFrame,
+    Math.max(layer.clip.startFrame, layer.clip.startFrame + layer.clip.duration - 1)
+  ]
+  const markerFrames = keyframeFrames.length > 0 ? Array.from(new Set(keyframeFrames)) : fallbackFrames
   const maxMarkers = 80
   const markerStep = Math.max(1, Math.ceil(frames.length / maxMarkers))
   const denseTrack = frames.length > maxMarkers
@@ -226,7 +234,7 @@ const LayerTrack: React.FC<LayerTrackProps> = React.memo(({ sprite, index, frame
       {/* 图层名称 */}
       <div className="absolute left-2 top-1/2 -translate-y-1/2 z-10 bg-bg-secondary pr-2">
         <span className="text-xs text-text-secondary truncate max-w-[100px] block">
-          {sprite.imageKey || `Layer ${index + 1}`}
+          {layer.name || layer.imageKey || `Layer ${index + 1}`}
         </span>
       </div>
 
@@ -241,21 +249,35 @@ const LayerTrack: React.FC<LayerTrackProps> = React.memo(({ sprite, index, frame
             }}
           />
         )}
-        {frames.map((frame: any, i: number) => {
-          if (denseTrack && i % markerStep !== 0 && i !== frames.length - 1) return null
-          // 只在有变化的帧显示标记
-          if (i === 0 || frame.transform || frame.alpha !== undefined) {
+        {frames.length > 0 ? (
+          frames.map((frame: any, i: number) => {
+            if (denseTrack && i % markerStep !== 0 && i !== frames.length - 1) return null
+            // 只在有变化的帧显示标记
+            if (i === 0 || frame.transform || frame.alpha !== undefined) {
+              return (
+                <div
+                  key={i}
+                  className="absolute top-1/2 -translate-y-1/2 w-2 h-2 bg-accent rounded-full cursor-pointer hover:scale-150 transition-transform"
+                  style={{ left: `${i * frameWidth + frameWidth / 2 - 4}px` }}
+                  title={`Frame ${i}`}
+                />
+              )
+            }
+            return null
+          })
+        ) : (
+          markerFrames.map((frame) => {
+            const safeFrame = Math.max(0, Math.min(totalFrames - 1, frame))
             return (
               <div
-                key={i}
+                key={safeFrame}
                 className="absolute top-1/2 -translate-y-1/2 w-2 h-2 bg-accent rounded-full cursor-pointer hover:scale-150 transition-transform"
-                style={{ left: `${i * frameWidth + frameWidth / 2 - 4}px` }}
-                title={`Frame ${i}`}
+                style={{ left: `${safeFrame * frameWidth + frameWidth / 2 - 4}px` }}
+                title={`Frame ${safeFrame}`}
               />
             )
-          }
-          return null
-        })}
+          })
+        )}
       </div>
     </div>
   )

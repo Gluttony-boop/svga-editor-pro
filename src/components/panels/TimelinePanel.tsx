@@ -95,17 +95,20 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({ className }) => {
   ) => {
     const layer = layers.find(l => l.id === layerId)
     if (!layer) return
+    const safeFrameIndex = params
+      ? Math.max(0, Math.min(params.frames - 1, frameIndex))
+      : Math.max(0, frameIndex)
 
     const track = layer.tracks[trackKey]
     
     // 检查是否已存在该帧的关键帧
-    const existing = track.keyframes.find(kf => kf.frameIndex === frameIndex)
+    const existing = track.keyframes.find(kf => kf.frameIndex === safeFrameIndex)
     if (existing) return
 
     // 获取当前值
     const currentValue = AnimationEngine.interpolateProperty(
       track.keyframes,
-      frameIndex,
+      safeFrameIndex,
       track.defaultValue,
       (a, b, t) => {
         if (typeof a === 'number' && typeof b === 'number') {
@@ -123,7 +126,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({ className }) => {
     )
 
     addLayerKeyframe(layerId, trackKey, {
-      frameIndex,
+      frameIndex: safeFrameIndex,
       value: currentValue,
       easing: 'linear'
     })
@@ -171,7 +174,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({ className }) => {
     if (!rect) return
 
     const x = e.clientX - rect.left + scrollOffset
-    const newFrame = Math.round(x / frameWidth)
+    const maxFrame = Math.max(0, (params?.frames ?? 1) - 1)
+    const newFrame = Math.max(0, Math.min(maxFrame, Math.round(x / frameWidth)))
     const frameDelta = newFrame - draggedKeyframe.startFrame
 
     if (frameDelta !== 0) {
@@ -183,7 +187,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({ className }) => {
       )
       if (!keyframe) return
 
-      const newFrameIndex = Math.max(0, keyframe.frameIndex + frameDelta)
+      const newFrameIndex = Math.max(0, Math.min(maxFrame, keyframe.frameIndex + frameDelta))
       updateLayerKeyframe(
         draggedKeyframe.layerId,
         draggedKeyframe.trackKey,
@@ -193,7 +197,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({ className }) => {
 
       setDraggedKeyframe(prev => prev ? { ...prev, startFrame: newFrame } : null)
     }
-  }, [draggedKeyframe, frameWidth, scrollOffset, layers, updateLayerKeyframe])
+  }, [draggedKeyframe, frameWidth, scrollOffset, layers, params, updateLayerKeyframe])
 
   // 关键帧拖拽结束
   const handleKeyframeDragEnd = React.useCallback(() => {
@@ -364,9 +368,12 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({ className }) => {
               onDeleteKeyframe={(trackKey, keyframeId) =>
                 handleDeleteKeyframe(layer.id, trackKey, keyframeId)
               }
-              onKeyframeDragStart={(trackKey, keyframeId, frame) =>
+              onUpdateKeyframe={(trackKey, keyframeId, updates) =>
+                updateLayerKeyframe(layer.id, trackKey, keyframeId, updates)
+              }
+              onKeyframeDragStart={(event, trackKey, keyframeId, frame) =>
                 handleKeyframeDragStart(
-                  {} as React.MouseEvent,
+                  event,
                   layer.id,
                   trackKey,
                   keyframeId,
@@ -493,7 +500,8 @@ const LayerTrack: React.FC<{
   currentFrame: number
   onAddKeyframe: (trackKey: keyof LayerTracks, frame: number) => void
   onDeleteKeyframe: (trackKey: keyof LayerTracks, keyframeId: string) => void
-  onKeyframeDragStart: (trackKey: keyof LayerTracks, keyframeId: string, frame: number) => void
+  onUpdateKeyframe: (trackKey: keyof LayerTracks, keyframeId: string, updates: Partial<Keyframe>) => void
+  onKeyframeDragStart: (event: React.MouseEvent, trackKey: keyof LayerTracks, keyframeId: string, frame: number) => void
 }> = ({
   layer,
   frames,
@@ -503,6 +511,7 @@ const LayerTrack: React.FC<{
   currentFrame: _currentFrame,
   onAddKeyframe,
   onDeleteKeyframe,
+  onUpdateKeyframe,
   onKeyframeDragStart
 }) => {
   const trackKeys: Array<keyof LayerTracks> = ['position', 'scale', 'rotation', 'alpha']
@@ -530,8 +539,9 @@ const LayerTrack: React.FC<{
               keyframe={kf}
               frameWidth={frameWidth}
               selected={selectedKeyframes.has(kf.id)}
-              onDragStart={(_e) => onKeyframeDragStart(trackKey, kf.id, kf.frameIndex)}
+              onDragStart={(event) => onKeyframeDragStart(event, trackKey, kf.id, kf.frameIndex)}
               onDelete={() => onDeleteKeyframe(trackKey, kf.id)}
+              onEasingChange={(easing) => onUpdateKeyframe(trackKey, kf.id, { easing })}
             />
           ))}
         </div>
@@ -549,7 +559,8 @@ const KeyframeDiamond: React.FC<{
   selected: boolean
   onDragStart: (e: React.MouseEvent) => void
   onDelete: () => void
-}> = ({ keyframe, frameWidth, selected, onDragStart, onDelete }) => {
+  onEasingChange: (easing: Keyframe['easing']) => void
+}> = ({ keyframe, frameWidth, selected, onDragStart, onDelete, onEasingChange }) => {
   const [showMenu, setShowMenu] = React.useState(false)
 
   return (
@@ -578,8 +589,8 @@ const KeyframeDiamond: React.FC<{
           <div className="text-xs text-text-muted px-2 py-1">帧 {keyframe.frameIndex}</div>
           <select
             value={keyframe.easing}
-            onChange={() => {
-              // 这里应该调用 updateLayerKeyframe
+            onChange={(e) => {
+              onEasingChange(e.target.value as Keyframe['easing'])
               setShowMenu(false)
             }}
             className="w-full text-xs bg-bg-tertiary border border-border rounded px-1 py-0.5"

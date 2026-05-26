@@ -128,13 +128,13 @@ export default {
             shapes: { rule: 'repeated', type: 'Shape', id: 5 }
           }
         },
-        AudioDefine: {
+        AudioEntity: {
           fields: {
             audioKey: { type: 'string', id: 1 },
             startFrame: { type: 'int32', id: 2 },
             endFrame: { type: 'int32', id: 3 },
-            totalFrame: { type: 'int32', id: 4 },
-            audioSource: { type: 'bytes', id: 5 }
+            startTime: { type: 'int32', id: 4 },
+            totalTime: { type: 'int32', id: 5 }
           }
         },
         MovieEntity: {
@@ -143,7 +143,7 @@ export default {
             params: { type: 'MovieParams', id: 2 },
             images: { keyType: 'string', type: 'bytes', id: 3 },
             sprites: { rule: 'repeated', type: 'Sprite', id: 4 },
-            audios: { rule: 'repeated', type: 'AudioDefine', id: 5 }
+            audios: { rule: 'repeated', type: 'AudioEntity', id: 5 }
           }
         }
       }
