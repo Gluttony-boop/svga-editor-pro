@@ -17,3 +17,10 @@ test-*.png
 test*.svga
 codex-*.log
 vite-dev.*.log
+vite.config.js
+vite.config.d.ts
+public/debug-*.html
+public/debug-*.js
+public/test-*.html
+public/test*.svga
+public/svga-diagnostic.html

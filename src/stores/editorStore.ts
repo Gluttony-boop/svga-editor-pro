@@ -196,7 +196,7 @@ const initialCompression: CompressionConfig = {
 const initialOptimization: OptimizationConfig = {
   enabled: true,
   image: {
-    format: 'webp',
+    format: 'png',
     quality: 80,
     resizeEnabled: false,
     resizePercent: 100,

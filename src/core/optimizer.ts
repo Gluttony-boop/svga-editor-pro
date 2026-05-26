@@ -26,7 +26,7 @@ export interface OptimizationConfig {
   
   /** 图片优化 */
   image: {
-    /** 图片格式: 'webp' | 'png' | 'auto' */
+    /** 图片格式: 'webp' | 'png' | 'auto'. PNG is the safest choice for legacy SVGA players. */
     format: 'webp' | 'png' | 'auto'
     /** 压缩质量 (0-100) */
     quality: number
@@ -119,7 +119,7 @@ export const OPTIMIZATION_PRESETS: OptimizationPreset[] = [
     config: {
       enabled: true,
       image: {
-        format: 'webp',
+        format: 'png',
         quality: 90,
         resizeEnabled: false,
         resizePercent: 100,
@@ -146,7 +146,7 @@ export const OPTIMIZATION_PRESETS: OptimizationPreset[] = [
     config: {
       enabled: true,
       image: {
-        format: 'webp',
+        format: 'png',
         quality: 80,
         resizeEnabled: false,
         resizePercent: 100,
@@ -173,7 +173,7 @@ export const OPTIMIZATION_PRESETS: OptimizationPreset[] = [
     config: {
       enabled: true,
       image: {
-        format: 'webp',
+        format: 'png',
         quality: 70,
         resizeEnabled: true,
         resizePercent: 75,
@@ -200,7 +200,7 @@ export const OPTIMIZATION_PRESETS: OptimizationPreset[] = [
     config: {
       enabled: true,
       image: {
-        format: 'webp',
+        format: 'png',
         quality: 60,
         resizeEnabled: true,
         resizePercent: 50,
@@ -227,7 +227,7 @@ export const OPTIMIZATION_PRESETS: OptimizationPreset[] = [
     config: {
       enabled: true,
       image: {
-        format: 'webp',
+        format: 'png',
         quality: 80,
         resizeEnabled: false,
         resizePercent: 100,

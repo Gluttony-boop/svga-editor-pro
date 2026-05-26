@@ -7,7 +7,7 @@ describe('optimization presets', () => {
 
     expect(preset?.name).toBe('均衡优化')
     expect(preset?.config.enabled).toBe(true)
-    expect(preset?.config.image.format).toBe('webp')
+    expect(preset?.config.image.format).toBe('png')
   })
 
   it('keeps preset ids unique', () => {
