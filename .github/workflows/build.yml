@@ -48,6 +48,18 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify protoc for prost-build
+        shell: pwsh
+        run: |
+          $protoc = Get-Command protoc -ErrorAction Stop
+          "PROTOC=$($protoc.Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          & $protoc.Path --version
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
