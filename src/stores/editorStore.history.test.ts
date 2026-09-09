@@ -66,6 +66,12 @@ describe('editorStore history', () => {
         fps: 24,
         frames: 24
       },
+      playback: {
+        ...useEditorStore.getState().playback,
+        fps: 24,
+        totalFrames: 24,
+        currentFrame: 0
+      },
       layers: [createLayer('layer-1')],
       selectedLayerId: 'layer-1',
       isDirty: false
@@ -130,5 +136,32 @@ describe('editorStore history', () => {
 
     expect(useEditorStore.getState().canUndo).toBe(false)
     expect(useEditorStore.getState().canRedo).toBe(false)
+  })
+
+  it('syncs custom fps changes to playback', () => {
+    useEditorStore.getState().setCustomFps(12)
+
+    expect(useEditorStore.getState().customFps).toBe(12)
+    expect(useEditorStore.getState().playback.fps).toBe(12)
+
+    useEditorStore.getState().setCustomFps(null)
+
+    expect(useEditorStore.getState().customFps).toBeNull()
+    expect(useEditorStore.getState().playback.fps).toBe(24)
+  })
+
+  it('syncs custom frame changes to playback and clamps the current frame', () => {
+    useEditorStore.getState().setCurrentFrame(23)
+
+    useEditorStore.getState().setCustomFrames(12)
+
+    expect(useEditorStore.getState().customFrames).toBe(12)
+    expect(useEditorStore.getState().playback.totalFrames).toBe(12)
+    expect(useEditorStore.getState().playback.currentFrame).toBe(11)
+
+    useEditorStore.getState().setCustomFrames(null)
+
+    expect(useEditorStore.getState().customFrames).toBeNull()
+    expect(useEditorStore.getState().playback.totalFrames).toBe(24)
   })
 })

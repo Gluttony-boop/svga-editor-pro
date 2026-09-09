@@ -1,7 +1,6 @@
 import React from 'react'
 import { Panel, NumberInput, Slider, Icon } from '@/components/ui'
 import { useEditorStore, useCurrentParams } from '@/stores'
-import { cn } from '@/utils/cn'
 
 interface PropertyPanelProps {
   className?: string
@@ -15,8 +14,6 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
   const customFrames = useEditorStore((s) => s.customFrames)
   const setCustomFps = useEditorStore((s) => s.setCustomFps)
   const setCustomFrames = useEditorStore((s) => s.setCustomFrames)
-  const compressionConfig = useEditorStore((s) => s.compressionConfig)
-  const setCompressionConfig = useEditorStore((s) => s.setCompressionConfig)
   const videoItem = useEditorStore((s) => s.videoItem)
   const layers = useEditorStore((s) => s.layers)
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId)
@@ -332,52 +329,7 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
           </div>
         </div>
 
-        {/* 图片压缩 */}
-        <div>
-          <div className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">压缩</div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-text-primary">启用压缩</span>
-              <button
-                className={cn(
-                  'w-9 h-5 rounded-full transition-colors relative flex-shrink-0',
-                  compressionConfig.enabled ? 'bg-accent' : 'bg-border'
-                )}
-                onClick={() => setCompressionConfig({ enabled: !compressionConfig.enabled })}
-              >
-                <span
-                  className={cn(
-                    'absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform',
-                    compressionConfig.enabled ? 'translate-x-4.5' : 'translate-x-0.5'
-                  )}
-                />
-              </button>
-            </div>
-
-            {compressionConfig.enabled && (
-              <>
-                <select
-                  value={compressionConfig.mode}
-                  onChange={(e) => setCompressionConfig({ mode: e.target.value as any })}
-                  className="w-full px-2 py-1.5 rounded bg-bg-tertiary border border-border text-text-primary text-xs"
-                >
-                  <option value="smart">智能压缩</option>
-                  <option value="webp">WebP</option>
-                  <option value="png256">PNG 256色</option>
-                </select>
-
-                <Slider
-                  label="质量"
-                  value={compressionConfig.quality}
-                  min={10}
-                  max={100}
-                  unit="%"
-                  onChange={(v) => setCompressionConfig({ quality: v })}
-                />
-              </>
-            )}
-          </div>
-        </div>
+        <p className="text-xs text-text-muted">压缩配置已统一到下方「导出」面板，请在那里选择保真、PNG 量化或 WebP。</p>
       </div>
     </Panel>
   )

@@ -79,6 +79,19 @@ const SlotItem: React.FC<SlotItemProps> = ({ name, config, onChange, onRemove })
   const [type, setType] = React.useState<'text' | 'image'>(config?.type || 'text')
   const fileInputRef = React.useRef<HTMLInputElement>(null)
 
+  const revokeCurrentImageUrl = React.useCallback(() => {
+    const url = config?.imageConfig?.url
+    if (url?.startsWith('blob:')) {
+      URL.revokeObjectURL(url)
+    }
+  }, [config?.imageConfig?.url])
+
+  React.useEffect(() => {
+    return () => {
+      revokeCurrentImageUrl()
+    }
+  }, [revokeCurrentImageUrl])
+
   React.useEffect(() => {
     setType(config?.type || 'text')
   }, [config?.type])
@@ -107,6 +120,7 @@ const SlotItem: React.FC<SlotItemProps> = ({ name, config, onChange, onRemove })
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) {
+      revokeCurrentImageUrl()
       const url = URL.createObjectURL(file)
       onChange({
         type: 'image',
@@ -132,6 +146,7 @@ const SlotItem: React.FC<SlotItemProps> = ({ name, config, onChange, onRemove })
               type === 'text' ? 'bg-accent text-white' : 'bg-border text-text-secondary hover:text-text-primary'
             )}
             onClick={() => {
+              revokeCurrentImageUrl()
               setType('text')
               onChange({ type: 'text', name, value: '' })
             }}
@@ -207,7 +222,10 @@ const SlotItem: React.FC<SlotItemProps> = ({ name, config, onChange, onRemove })
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={onRemove}
+                onClick={() => {
+                  revokeCurrentImageUrl()
+                  onRemove()
+                }}
               >
                 清除
               </Button>

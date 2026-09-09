@@ -38,6 +38,50 @@ type BrowserWindowWithSavePicker = Window & {
 
 export type SaveFileTarget = (blob: Blob) => Promise<void>
 
+type ExportFrame = {
+  alpha?: number
+  layout?: unknown
+  transform?: unknown
+  clipPath?: string | null
+  shapes?: unknown[]
+}
+
+function cloneFrame<T extends ExportFrame>(frame: T): T {
+  if (typeof structuredClone === 'function') {
+    return structuredClone(frame)
+  }
+  return JSON.parse(JSON.stringify(frame)) as T
+}
+
+function createEmptyFrame(): ExportFrame {
+  return {
+    alpha: 0,
+    layout: null,
+    transform: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 },
+    clipPath: null
+  }
+}
+
+function normalizeSpriteFrameCounts(sprites: Array<{ frames?: ExportFrame[] }> | undefined, frameCount: number): void {
+  if (!sprites || !Number.isFinite(frameCount) || frameCount < 1) return
+
+  for (const sprite of sprites) {
+    const frames = sprite.frames ?? []
+    if (frames.length > frameCount) {
+      sprite.frames = frames.slice(0, frameCount)
+      continue
+    }
+
+    if (frames.length < frameCount) {
+      const lastFrame = frames[frames.length - 1] ?? createEmptyFrame()
+      sprite.frames = [
+        ...frames,
+        ...Array.from({ length: frameCount - frames.length }, () => cloneFrame(lastFrame))
+      ]
+    }
+  }
+}
+
 function createSVGA2Blob(encoded: Uint8Array, level: number = 6): Blob {
   const compressed = pako.deflate(encoded, { level: level as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 })
   return new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer], {
@@ -78,6 +122,8 @@ export class ExportEngine {
   async exportSVGA(
     originalBuffer: ArrayBuffer,
     config: {
+      viewBoxWidth?: number
+      viewBoxHeight?: number
       fps: number
       frames: number
       compression?: CompressionConfig
@@ -131,6 +177,12 @@ export class ExportEngine {
       // 2. 解码 protobuf
       const decodedMessage = this.MovieEntity.decode(decompressed)
       decodedMessage.version = '2.0.0'
+      if (decodedMessage.params) {
+        if (config.viewBoxWidth !== undefined) decodedMessage.params.viewBoxWidth = config.viewBoxWidth
+        if (config.viewBoxHeight !== undefined) decodedMessage.params.viewBoxHeight = config.viewBoxHeight
+        decodedMessage.params.fps = config.fps
+        decodedMessage.params.frames = config.frames
+      }
       
 
       // 将消息转换为普通对象，保留所有字段
@@ -168,7 +220,7 @@ export class ExportEngine {
             // 设置新图片数据
             movieObj.images[key] = new Uint8Array(imageBuffer)
           } catch (err) {
-            console.error(`[Exporter] Failed to replace image "${key}":`, err)
+            throw new Error(`替换图片“${key}”读取失败，请重新选择图片后导出`)
           }
         }
       }
@@ -178,8 +230,8 @@ export class ExportEngine {
 
         // 检查是否需要缩放
         const needResize = compression.resizeEnabled && compression.resizePercent < 100
-        // 检查是否需要压缩（使用 WebP）
-        const needCompress = compression.mode === 'webp' || compression.quality < 100
+        const useWebP = compression.mode === 'webp'
+        const needCompress = useWebP || compression.quality < 100
 
         if (needResize || needCompress) {
           for (const key of Object.keys(movieObj.images)) {
@@ -194,7 +246,7 @@ export class ExportEngine {
                 url,
                 compression.quality / 100,
                 needResize ? compression.resizePercent / 100 : 1,
-                needCompress
+                useWebP
               )
 
               // 只有处理后更小才替换
@@ -235,6 +287,7 @@ export class ExportEngine {
       }
 
       applyLayerNamesToMovie(decodedMessage, config.layers)
+      normalizeSpriteFrameCounts(decodedMessage.sprites, config.frames)
       const normalizedReferences = normalizeMovieImageReferences(decodedMessage)
       if (normalizedReferences.missingImageKeys.length > 0) {
         console.warn(
@@ -454,6 +507,8 @@ export class ExportEngine {
   async exportSVGALite(
     originalBuffer: ArrayBuffer,
     config: {
+      viewBoxWidth?: number
+      viewBoxHeight?: number
       fps: number
       frames: number
       compression?: CompressionConfig
@@ -503,6 +558,12 @@ export class ExportEngine {
       // 2.5 修改 FPS 和帧数（如果用户修改了）
 
       if (decodedMessage.params) {
+        if (config.viewBoxWidth !== undefined) {
+          decodedMessage.params.viewBoxWidth = config.viewBoxWidth
+        }
+        if (config.viewBoxHeight !== undefined) {
+          decodedMessage.params.viewBoxHeight = config.viewBoxHeight
+        }
         // 检查 FPS 是否被修改
         const currentFps = decodedMessage.params.fps
         if (config.fps !== undefined && config.fps !== currentFps) {
@@ -541,7 +602,7 @@ export class ExportEngine {
               decodedMessage.images[key] = new Uint8Array(imageBuffer)
             }
           } catch (err) {
-            console.error(`[Exporter Lite] Failed to replace image "${key}":`, err)
+            throw new Error(`替换图片“${key}”读取失败，请重新选择图片后导出`)
           }
         }
       }
@@ -552,8 +613,8 @@ export class ExportEngine {
 
         // 检查是否需要缩放
         const needResize = compression.resizeEnabled && compression.resizePercent < 100
-        // 检查是否需要压缩（使用 WebP）
-        const needCompress = compression.mode === 'webp' || compression.quality < 100
+        const useWebP = compression.mode === 'webp'
+        const needCompress = useWebP || compression.quality < 100
         
         const baseScale = needResize ? compression.resizePercent / 100 : 1
 
@@ -575,7 +636,7 @@ export class ExportEngine {
                 url,
                 compression.quality / 100,
                 baseScale,  // 使用统一的 baseScale
-                needCompress
+                useWebP
               )
 
               // 只有处理后更小才替换
@@ -645,6 +706,7 @@ export class ExportEngine {
       }
 
       applyLayerNamesToMovie(decodedMessage, config.layers)
+      normalizeSpriteFrameCounts(decodedMessage.sprites, config.frames)
       const normalizedReferences = normalizeMovieImageReferences(decodedMessage)
       if (normalizedReferences.missingImageKeys.length > 0) {
         console.warn(
@@ -678,17 +740,6 @@ export class ExportEngine {
 /**
  * 保存文件
  */
-function getNativeSaveFile(): ((buffer: ArrayBuffer, defaultName: string) => Promise<unknown>) | undefined {
-  const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-  const nativeSaveFile = typeof window !== 'undefined' ? window.nativeAPI?.saveFile : undefined
-
-  if (isTauriRuntime && nativeSaveFile) {
-    return nativeSaveFile
-  }
-
-  return undefined
-}
-
 function getBrowserSavePicker(): BrowserSaveFilePicker | undefined {
   if (typeof window === 'undefined') return undefined
   return (window as BrowserWindowWithSavePicker).showSaveFilePicker
@@ -748,31 +799,36 @@ async function saveWithBrowserFileHandle(
     await writable.close()
     writable = null
   } catch (error) {
-    console.warn('[Exporter] Browser file write unavailable, falling back to download:', error)
-
     if (writable) {
       try {
         if (writable.abort) {
           await writable.abort()
-        } else {
-          await writable.close()
         }
       } catch {
-        // Ignore cleanup errors while falling back to browser download.
+        // Preserve the original write error.
       }
     }
 
-    await downloadBlob(blob, defaultName)
+    throw error
   }
 }
 
 export async function createSaveFileTarget(defaultName: string): Promise<SaveFileTarget | null> {
-  const nativeSaveFile = getNativeSaveFile()
-  if (nativeSaveFile) {
+  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+    const { tauriAPI } = await import('@/lib/tauri-api')
+    const extension = defaultName.split('.').pop() || 'svga'
+    const filePath = await tauriAPI.dialog.saveFile({ defaultPath: defaultName, filters: [
+      { name: `${extension.toUpperCase()} 文件`, extensions: [extension] },
+      { name: '所有文件', extensions: ['*'] }
+    ] })
+    if (!filePath) return null
     return async (blob) => {
       ensureBlobHasData(blob, defaultName)
-      const buffer = await blob.arrayBuffer()
-      await nativeSaveFile(buffer, defaultName)
+      const bytes = new Uint8Array(await blob.arrayBuffer())
+      const chunks: string[] = []
+      for (let index = 0; index < bytes.length; index += 8192) chunks.push(String.fromCharCode(...bytes.subarray(index, index + 8192)))
+      const result = await tauriAPI.file.write(filePath, btoa(chunks.join('')))
+      if (!result.success) throw new Error(result.error || '写入文件失败')
     }
   }
 

@@ -9,6 +9,15 @@ import { tauriAPI, createNativeAPI } from '@/lib/tauri-api'
 import type { SvgaData } from '@/lib/tauri-api'
 import { cn } from '@/utils/cn'
 import type { ImageResource, Layer, VideoItem } from '@/types'
+import { previewFileName } from '@/utils/preview-view'
+import { createWindowCloseHandler } from '@/lib/window-close'
+
+const INSPECTOR_TABS = [
+  { id: 'properties', label: '属性', icon: 'settings' },
+  { id: 'slots', label: '插槽', icon: 'key' },
+  { id: 'export', label: '导出', icon: 'export' }
+] as const
+type InspectorTab = typeof INSPECTOR_TABS[number]['id']
 
 function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -157,7 +166,7 @@ function hasExportableLayerEdits(
 }
 
 // Windows 窗口控制组件 - 使用 Tauri API
-const WindowControls: React.FC = () => {
+const WindowControls: React.FC<{ onError: (message: string) => void }> = ({ onError }) => {
   const [isMaximized, setIsMaximized] = useState(false)
   const [platform, setPlatform] = useState<string>('')
 
@@ -188,7 +197,8 @@ const WindowControls: React.FC = () => {
       </button>
       <button
         className="w-11 h-8 flex items-center justify-center hover:bg-red-500 transition-colors"
-        onClick={() => tauriAPI.window.close()}
+        aria-label="关闭窗口"
+        onClick={() => { void tauriAPI.window.close().catch(err => onError(`关闭窗口失败：${String(err)}`)) }}
       >
         <Icon name="close" size={14} className="text-text-secondary" />
       </button>
@@ -207,6 +217,7 @@ interface MenuAction {
 }
 
 interface MenuBarProps {
+  onWindowError: (message: string) => void
   onOpenFile: () => void
   onOpenUrl: () => void
   onSave: () => void
@@ -219,6 +230,7 @@ interface MenuBarProps {
 
 // 菜单栏组件
 const MenuBar: React.FC<MenuBarProps> = ({
+  onWindowError,
   onOpenFile,
   onOpenUrl,
   onSave,
@@ -229,6 +241,7 @@ const MenuBar: React.FC<MenuBarProps> = ({
   onShowAbout
 }) => {
   const videoItem = useEditorStore((s) => s.videoItem)
+  const currentSource = useEditorStore((s) => s.currentSource)
   const isDirty = useEditorStore((s) => s.isDirty)
   const canUndo = useEditorStore((s) => s.canUndo)
   const canRedo = useEditorStore((s) => s.canRedo)
@@ -280,13 +293,9 @@ const MenuBar: React.FC<MenuBarProps> = ({
     view: [
       { label: `${showGrid ? '隐藏' : '显示'}网格`, onSelect: toggleGrid },
       {
-        label: `渲染器：${rendererMode === 'pixi' ? 'WebGL 极速' : rendererMode === 'official' ? '官方兼容' : 'Canvas 高性能'}`,
+        label: `渲染器：${rendererMode === 'high-performance' ? 'Canvas 高性能' : '官方兼容'}`,
         onSelect: () => {
-          const nextMode = rendererMode === 'pixi'
-            ? 'official'
-            : rendererMode === 'official'
-              ? 'high-performance'
-              : 'pixi'
+          const nextMode = rendererMode === 'official' ? 'high-performance' : 'official'
           setRendererMode(nextMode)
         }
       }
@@ -336,15 +345,14 @@ const MenuBar: React.FC<MenuBarProps> = ({
       </div>
 
       {/* 中间标题 */}
-      <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
+      <div className="absolute left-1/2 -translate-x-1/2 flex max-w-[36%] items-center gap-2 pointer-events-none">
         <Icon name="play" size={16} className="text-accent" />
-        <span className="text-sm text-text-primary">SVGA Editor Pro</span>
-        {videoItem && <span className="text-xs text-text-muted">- 编辑中</span>}
-        {isDirty && <span className="text-xs text-warning">●</span>}
+        <span className="truncate text-sm text-text-primary">{videoItem ? previewFileName(currentSource) : 'SVGA Editor Pro'}</span>
+        {isDirty && <span className="flex-shrink-0 h-1.5 w-1.5 rounded-full bg-warning" title="有未保存修改" />}
       </div>
 
       {/* 右侧窗口控制 */}
-      <WindowControls />
+      <WindowControls onError={onWindowError} />
     </div>
   )
 }
@@ -374,21 +382,8 @@ const StatusBar: React.FC = () => {
   const isDirty = useEditorStore((s) => s.isDirty)
   const fps = useEditorStore((s) => s.playback.fps)
   const totalFrames = useEditorStore((s) => s.playback.totalFrames)
-  const [currentFrame, setCurrentFrame] = useState(0)
+  const currentFrame = useEditorStore((s) => s.playback.currentFrame)
   const [memory, setMemory] = useState('0 MB')
-
-  // 监听动画播放时的帧更新事件
-  useEffect(() => {
-    const handleFrameUpdate = (e: CustomEvent<{ frameIndex: number }>) => {
-      setCurrentFrame(e.detail.frameIndex)
-    }
-    
-    window.addEventListener('svga-frame-update', handleFrameUpdate as EventListener)
-    
-    return () => {
-      window.removeEventListener('svga-frame-update', handleFrameUpdate as EventListener)
-    }
-  }, [])
 
   useEffect(() => {
     const updateMemory = () => {
@@ -435,26 +430,33 @@ export const App: React.FC = () => {
   const devAutoLoadRef = useRef(false)
   const launchFileAutoLoadRef = useRef(false)
   const unsavedResolverRef = useRef<((choice: UnsavedChoice) => void) | null>(null)
-  const allowNextCloseRef = useRef(false)
   const handleSaveRef = useRef<(() => Promise<boolean>) | null>(null)
   const svgaFileInputRef = useRef<HTMLInputElement>(null)
+  const exportPanelRef = useRef<HTMLDivElement>(null)
   
   // 面板宽度状态
-  const [leftPanelWidth, setLeftPanelWidth] = useState(260)
-  const [rightPanelWidth, setRightPanelWidth] = useState(300)
-  const [layerPanelHeight, setLayerPanelHeight] = useState(300)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(320)
+  const [rightPanelWidth, setRightPanelWidth] = useState(340)
+  const [layerPanelHeight, setLayerPanelHeight] = useState(340)
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('properties')
+  const [isImmersive, setIsImmersive] = useState(false)
+  const previewVideoItem = useEditorStore((s) => s.videoItem)
+  const toggleImmersive = useCallback(() => {
+    if (useEditorStore.getState().videoItem) setIsImmersive(value => !value)
+  }, [])
+  useEffect(() => { setIsImmersive(false) }, [previewVideoItem])
 
   const setVideoItem = useEditorStore((s) => s.setVideoItem)
   const setSource = useEditorStore((s) => s.setSource)
   const setOriginalBuffer = useEditorStore((s) => s.setOriginalBuffer)
   const setDetectedSlots = useEditorStore((s) => s.setDetectedSlots)
   const setAudioResources = useEditorStore((s) => s.setAudioResources)
+  const setRendererMode = useEditorStore((s) => s.setRendererMode)
   const reset = useEditorStore((s) => s.reset)
   const undo = useEditorStore((s) => s.undo)
   const redo = useEditorStore((s) => s.redo)
   const canUndo = useEditorStore((s) => s.canUndo)
   const canRedo = useEditorStore((s) => s.canRedo)
-  const videoItem = useEditorStore((s) => s.videoItem)
   
   // 图层操作
   const addLayer = useEditorStore((s) => s.addLayer)
@@ -533,11 +535,15 @@ export const App: React.FC = () => {
       await svgaParser.init()
       const videoItem = await svgaParser.parse(buffer)
       const slots = svgaParser.detectSlots(videoItem.movie)
+      const hasMatte = videoItem.movie.sprites?.some((sprite) => Boolean(sprite.matteKey))
 
       setVideoItem(videoItem)
       setSource(source, type)
       setOriginalBuffer(buffer)
       setDetectedSlots(slots)
+      if (hasMatte) {
+        setRendererMode('official')
+      }
 
       // 解析音频轨道（如果有）
       try {
@@ -557,7 +563,7 @@ export const App: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [setVideoItem, setSource, setOriginalBuffer, setDetectedSlots, setAudioResources, reset])
+  }, [setVideoItem, setSource, setOriginalBuffer, setDetectedSlots, setAudioResources, setRendererMode, reset])
 
   const loadSVGAFromFilePath = useCallback(async (filePath: string) => {
     if (!isSvgaFileName(filePath)) return
@@ -581,10 +587,14 @@ export const App: React.FC = () => {
         const videoItem = convertTauriSvgaToVideoItem(svgaData)
         if (videoItem) {
           const slots = svgaParser.detectSlots(videoItem.movie)
+          const hasMatte = videoItem.movie.sprites?.some((sprite: { matteKey?: string | null }) => Boolean(sprite.matteKey))
           setVideoItem(videoItem)
           setSource(filePath, 'file')
           setOriginalBuffer(originalBuffer)
           setDetectedSlots(slots)
+          if (hasMatte) {
+            setRendererMode('official')
+          }
           return
         }
       } catch (rustErr) {
@@ -603,7 +613,7 @@ export const App: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [loadSVGA, setVideoItem, setSource, setOriginalBuffer, setDetectedSlots, reset])
+  }, [loadSVGA, setVideoItem, setSource, setOriginalBuffer, setDetectedSlots, setRendererMode, reset])
 
   useEffect(() => {
     if (launchFileAutoLoadRef.current) return
@@ -778,33 +788,21 @@ export const App: React.FC = () => {
 
     let disposed = false
     let unlisten: (() => void) | null = null
+    let closeHandler: ReturnType<typeof createWindowCloseHandler> | null = null
 
     ;(async () => {
       try {
         const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
-        unlisten = await getCurrentWebviewWindow().onCloseRequested(async (event) => {
-          if (allowNextCloseRef.current) {
-            allowNextCloseRef.current = false
-            return
-          }
-
-          if (!useEditorStore.getState().isDirty) return
-
-          event.preventDefault()
-          const choice = await confirmDiscardUnsavedChanges()
-          if (choice === 'cancel') return
-          if (choice === 'save') {
-            const saved = await handleSaveRef.current?.()
-            if (!saved) return
-          }
-          allowNextCloseRef.current = true
-          try {
-            await tauriAPI.window.close()
-          } catch (err) {
-            allowNextCloseRef.current = false
-            throw err
-          }
+        if (disposed) return
+        const nativeWindow = getCurrentWebviewWindow()
+        closeHandler = createWindowCloseHandler({
+          isDirty: () => useEditorStore.getState().isDirty,
+          confirm: confirmDiscardUnsavedChanges,
+          save: async () => await handleSaveRef.current?.() ?? false,
+          destroy: () => nativeWindow.destroy(),
+          onError: err => setError(`关闭窗口失败：${String(err)}`)
         })
+        unlisten = await nativeWindow.onCloseRequested(closeHandler.handle)
 
         if (disposed) {
           unlisten()
@@ -812,11 +810,13 @@ export const App: React.FC = () => {
         }
       } catch (err) {
         console.warn('[App] Tauri close listener unavailable:', err)
+        if (!disposed) setError(`未能启用关闭保护：${String(err)}`)
       }
     })()
 
     return () => {
       disposed = true
+      closeHandler?.dispose()
       unlisten?.()
     }
   }, [confirmDiscardUnsavedChanges])
@@ -960,23 +960,14 @@ export const App: React.FC = () => {
     }
   }, [buildCurrentSvgaBlob, handleSaveAs])
 
-  // 导出文件（始终弹出保存对话框）
-  const handleExport = useCallback(async () => {
-    const { videoItem } = useEditorStore.getState()
-    if (!videoItem) return
-
-    setLoading(true)
-    setError(null)
-    try {
-      const blob = await buildCurrentSvgaBlob()
-      const saved = await saveGeneratedFile(blob, 'export.svga')
-      if (!saved) return
-    } catch (err) {
-      setError(`导出失败: ${(err as Error).message}`)
-    } finally {
-      setLoading(false)
-    }
-  }, [buildCurrentSvgaBlob])
+  const handleFocusExportPanel = useCallback(() => {
+    setIsImmersive(false)
+    setInspectorTab('export')
+    requestAnimationFrame(() => {
+      document.getElementById('inspector-tab-export')?.focus({ preventScroll: true })
+      exportPanelRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    })
+  }, [])
 
   useEffect(() => {
     handleSaveRef.current = handleSave
@@ -999,16 +990,28 @@ export const App: React.FC = () => {
           handleSaveAs()
           break
         case 'export':
-          handleExport()
+          handleFocusExportPanel()
           break
       }
     })
     return unsubscribe
-  }, [handleOpenFile, handleSave, handleSaveAs, handleExport])
+  }, [handleOpenFile, handleSave, handleSaveAs, handleFocusExportPanel])
 
   // 键盘快捷键
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.isComposing) return
+      const hasDialog = !!document.querySelector('[role="dialog"]')
+      if (!hasDialog && e.key === 'F9' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault()
+        toggleImmersive()
+        return
+      }
+      if (!hasDialog && isImmersive && e.key === 'Escape') {
+        e.preventDefault()
+        setIsImmersive(false)
+        return
+      }
       if (e.ctrlKey || e.metaKey) {
         switch (e.key.toLowerCase()) {
           case 'o':
@@ -1029,7 +1032,7 @@ export const App: React.FC = () => {
             break
           case 'e':
             e.preventDefault()
-            handleExport()
+            handleFocusExportPanel()
             break
           case 'z':
             e.preventDefault()
@@ -1047,7 +1050,7 @@ export const App: React.FC = () => {
       }
 
       // 空格播放/暂停
-      if (e.key === ' ' && !(e.target as HTMLElement)?.matches?.('input, textarea')) {
+      if (e.key === ' ' && !e.repeat && !(e.target as HTMLElement)?.closest?.('input, textarea, select, button, [contenteditable="true"], [role="dialog"]')) {
         e.preventDefault()
         const { playback, setPlaying } = useEditorStore.getState()
         setPlaying(!playback.isPlaying)
@@ -1056,17 +1059,18 @@ export const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [handleOpenFile, handleSave, handleSaveAs, handleExport, undo, redo])
+  }, [handleOpenFile, handleSave, handleSaveAs, handleFocusExportPanel, undo, redo, isImmersive, toggleImmersive])
 
   return (
-    <div className="h-screen flex flex-col bg-bg-primary text-text-primary overflow-hidden">
+    <div className="editor-shell h-screen flex flex-col bg-bg-primary text-text-primary overflow-hidden" data-immersive={isImmersive}>
       {/* 菜单栏 */}
       <MenuBar
+        onWindowError={setError}
         onOpenFile={handleOpenFile}
         onOpenUrl={() => setShowUrlModal(true)}
         onSave={handleSave}
         onSaveAs={handleSaveAs}
-        onExport={handleExport}
+        onExport={handleFocusExportPanel}
         onUndo={undo}
         onRedo={redo}
         onShowAbout={() => setShowAboutModal(true)}
@@ -1081,7 +1085,7 @@ export const App: React.FC = () => {
       />
 
       {/* 工具栏 */}
-      <div className="h-12 bg-bg-secondary border-b border-border flex items-center justify-between px-4">
+      <div className={cn('min-h-14 gap-3 bg-bg-secondary border-b border-border flex items-center justify-between px-4', isImmersive && !loading && !error && '!hidden')}>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={handleOpenFile}>
             <Icon name="folder-open" size={16} />
@@ -1091,23 +1095,16 @@ export const App: React.FC = () => {
             <Icon name="globe" size={16} />
             打开 URL
           </Button>
-          <Button variant="ghost" size="sm" onClick={handleSave} disabled={!videoItem}>
-            <Icon name="save" size={16} />
-            保存
-          </Button>
           <Button variant="ghost" size="sm" onClick={undo} disabled={!canUndo} aria-label="撤销">
             <Icon name="undo" size={16} />
           </Button>
+          <div className="mx-1 h-5 w-px bg-border" />
           <Button variant="ghost" size="sm" onClick={redo} disabled={!canRedo} aria-label="重做">
             <Icon name="redo" size={16} />
           </Button>
-          <Button variant="ghost" size="sm" onClick={handleExport} disabled={!videoItem}>
-            <Icon name="export" size={16} />
-            导出
-          </Button>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           {loading && (
             <span className="text-sm text-text-muted flex items-center gap-2">
               <span className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />
@@ -1115,8 +1112,14 @@ export const App: React.FC = () => {
             </span>
           )}
           {error && (
-            <span className="text-sm text-error">{error}</span>
+            <span role="alert" className="max-w-[220px] truncate text-sm text-error" title={error}>{error}</span>
           )}
+          <Button variant="ghost" size="sm" title="重置面板宽度和高度" onClick={() => { setLeftPanelWidth(320); setRightPanelWidth(340); setLayerPanelHeight(340) }}>
+            <Icon name="refresh" size={15} />
+            <span className="hidden xl:inline">重置面板</span>
+          </Button>
+          <Button variant="secondary" size="sm" disabled={!previewVideoItem || loading} onClick={handleSave} title="保存（Ctrl+S）"><Icon name="save" size={15} />保存</Button>
+          <Button variant="primary" size="sm" disabled={!previewVideoItem} onClick={handleFocusExportPanel} title="打开导出设置（Ctrl+E）"><Icon name="export" size={15} />导出</Button>
         </div>
       </div>
 
@@ -1124,8 +1127,9 @@ export const App: React.FC = () => {
       <div className="flex-1 flex overflow-hidden">
         {/* 左侧面板 - 可调整宽度 */}
         <div 
-          className="border-r border-border flex flex-col overflow-hidden flex-shrink-0"
-          style={{ width: leftPanelWidth }}
+          className={cn('border-r border-border flex flex-col overflow-hidden flex-shrink-0', isImmersive && '!hidden')}
+          style={{ width: leftPanelWidth, maxWidth: '28vw', minWidth: 240 }}
+          aria-label="图层与资源"
         >
           <div className="min-h-[180px] overflow-hidden border-b border-border" style={{ height: layerPanelHeight }}>
             <LayerPanel className="h-full rounded-none overflow-auto" />
@@ -1143,6 +1147,7 @@ export const App: React.FC = () => {
         {/* 左侧面板宽度调整手柄 */}
         <PanelSplitter 
           direction="horizontal" 
+          className={isImmersive ? '!hidden' : undefined}
           onDrag={(delta) => setLeftPanelWidth(prev => Math.max(200, Math.min(400, prev + delta)))} 
         />
 
@@ -1150,6 +1155,8 @@ export const App: React.FC = () => {
         <div className="flex-1 flex flex-col overflow-hidden min-w-0">
           <CanvasPreview
             className="flex-1 min-h-0"
+            immersive={isImmersive}
+            onToggleImmersive={toggleImmersive}
             onOpenFile={handleOpenFile}
             onSvgaDrop={async (file) => {
               try {
@@ -1160,31 +1167,48 @@ export const App: React.FC = () => {
             }}
           />
           <PlaybackControls />
-          <Timeline className="h-40 flex-shrink-0" />
+          <Timeline className={cn('flex-shrink-0', isImmersive && '!hidden')} />
         </div>
 
         {/* 右侧面板宽度调整手柄 */}
         <PanelSplitter 
           direction="horizontal" 
+          className={isImmersive ? '!hidden' : undefined}
           onDrag={(delta) => setRightPanelWidth(prev => Math.max(220, Math.min(450, prev - delta)))} 
         />
 
         {/* 右侧面板 - 可调整宽度 */}
         <div 
-          className="border-l border-border flex flex-col overflow-hidden flex-shrink-0"
-          style={{ width: rightPanelWidth }}
+          className={cn('border-l border-border flex flex-col overflow-hidden flex-shrink-0', isImmersive && '!hidden')}
+          style={{ width: rightPanelWidth, maxWidth: '30vw', minWidth: 280 }}
+          aria-label="检查器"
         >
-          <PropertyPanel 
-            className="border-b border-border rounded-none min-h-0" 
-            collapsible 
-            defaultCollapsed={false}
-          />
-          <SlotPanel 
-            className="border-b border-border rounded-none min-h-0" 
-            collapsible 
-            defaultCollapsed={true}
-          />
-          <ExportPanel className="flex-1 rounded-none border-0 min-h-[120px]" />
+          <div className="flex h-11 flex-shrink-0 items-center justify-between px-4 text-xs text-text-muted"><span className="font-medium tracking-wide">检查器</span><span className="rounded border border-border px-1.5 py-0.5 text-[10px]">SVGA</span></div>
+          <div role="tablist" aria-label="检查器面板" className="inspector-tabs mx-3 mb-2 flex flex-shrink-0 rounded-lg bg-bg-primary p-1">
+            {INSPECTOR_TABS.map((tab, index) => (
+              <button key={tab.id} id={`inspector-tab-${tab.id}`} role="tab" type="button" aria-controls={`inspector-view-${tab.id}`} aria-selected={inspectorTab === tab.id} tabIndex={inspectorTab === tab.id ? 0 : -1}
+                className={cn('flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-2 text-sm transition-colors', inspectorTab === tab.id ? 'bg-bg-tertiary text-text-primary shadow-sm' : 'text-text-muted hover:text-text-primary')}
+                onClick={() => setInspectorTab(tab.id)}
+                onKeyDown={e => {
+                  const next = e.key === 'ArrowRight' ? (index + 1) % 3 : e.key === 'ArrowLeft' ? (index + 2) % 3 : e.key === 'Home' ? 0 : e.key === 'End' ? 2 : -1
+                  if (next < 0) return
+                  e.preventDefault(); e.stopPropagation()
+                  setInspectorTab(INSPECTOR_TABS[next].id)
+                  document.getElementById(`inspector-tab-${INSPECTOR_TABS[next].id}`)?.focus()
+                }}>
+                <Icon name={tab.icon} size={14} />{tab.label}
+              </button>
+            ))}
+          </div>
+          <div role="tabpanel" id="inspector-view-properties" aria-labelledby="inspector-tab-properties" hidden={inspectorTab !== 'properties'} className={cn('inspector-view flex-1 min-h-0', inspectorTab !== 'properties' && '!hidden')}>
+            <PropertyPanel className="h-full rounded-none border-0" collapsible={false} />
+          </div>
+          <div role="tabpanel" id="inspector-view-slots" aria-labelledby="inspector-tab-slots" hidden={inspectorTab !== 'slots'} className={cn('inspector-view flex-1 min-h-0', inspectorTab !== 'slots' && '!hidden')}>
+            <SlotPanel className="h-full rounded-none border-0" collapsible={false} />
+          </div>
+          <div role="tabpanel" id="inspector-view-export" aria-labelledby="inspector-tab-export" hidden={inspectorTab !== 'export'} ref={exportPanelRef} className={cn('inspector-view flex-1 min-h-0', inspectorTab !== 'export' && '!hidden')}>
+            <ExportPanel className="h-full rounded-none border-0" collapsible={false} />
+          </div>
         </div>
       </div>
 

@@ -19,7 +19,7 @@ export class SVGAParser {
   /**
    * 解析 SVGA 文件
    */
-  async parse(buffer: ArrayBuffer): Promise<VideoItem> {
+  async parse(buffer: ArrayBuffer, options?: { onImageUrlCreated?: (url: string) => void }): Promise<VideoItem> {
     if (!this.MovieEntity) {
       await this.init()
     }
@@ -32,7 +32,7 @@ export class SVGAParser {
       const movie = this.decodeProto(decompressed)
       
       // 解析图片
-      const images = await this.parseImages(movie.images || {})
+      const images = await this.parseImages(movie.images || {}, options?.onImageUrlCreated)
       
       const buffers: Record<string, ArrayBuffer> = {}
       
@@ -147,7 +147,8 @@ export class SVGAParser {
    * 解析图片资源
    */
   private async parseImages(
-    imageDataMap: Record<string, Uint8Array | number[]>
+    imageDataMap: Record<string, Uint8Array | number[]>,
+    onImageUrlCreated?: (url: string) => void
   ): Promise<Record<string, HTMLImageElement>> {
     const images: Record<string, HTMLImageElement> = {}
     
@@ -166,6 +167,7 @@ export class SVGAParser {
           const mimeType = this.getImageMimeType(uint8Data)
           const blob = new Blob([bufferCopy], { type: mimeType })
           const url = URL.createObjectURL(blob)
+          onImageUrlCreated?.(url)
           
           const img = new Image()
           // 设置 decode 选项，确保图片解码完成
@@ -193,15 +195,23 @@ export class SVGAParser {
           
           // 额外确保图片已解码
           if (img.decode && img.complete && img.width > 0) {
-            await Promise.race([
-              img.decode(),
-              new Promise<void>((resolve) => {
-                window.setTimeout(() => {
-                  console.warn(`[Parser] Image decode timeout: ${key}`)
+            await new Promise<void>((resolve) => {
+              const timer = window.setTimeout(() => {
+                console.warn(`[Parser] Image decode timeout: ${key}`)
+                resolve()
+              }, 1000)
+
+              img.decode()
+                .then(() => {
+                  window.clearTimeout(timer)
                   resolve()
-                }, 1000)
-              })
-            ])
+                })
+                .catch((err) => {
+                  window.clearTimeout(timer)
+                  console.warn(`[Parser] Image decode failed: ${key}`, err)
+                  resolve()
+                })
+            })
           }
           
           if (img.width > 0 && img.height > 0) {

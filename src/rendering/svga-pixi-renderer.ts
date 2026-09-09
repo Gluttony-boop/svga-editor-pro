@@ -29,6 +29,7 @@ type LayerRenderState = {
 type FrameDisplayItem = {
   spriteIndex: number
   imageKey: string
+  matteKey?: string
   transform: PixiTransform
   width: number
   height: number
@@ -40,6 +41,12 @@ type SpriteNode = {
   container: Container
   sprite: Sprite
   matrix: Matrix
+  maskContainer: Container
+  maskSprite: Sprite
+  maskMatrix: Matrix
+  maskTexture: Texture | null
+  maskWidth: number
+  maskHeight: number
   texture: Texture | null
   width: number
   height: number
@@ -169,6 +176,7 @@ export class SVGAPixiRenderer {
 
     const frameItems = this.displayLists[frameIndex] || []
     const layerStates = this.getLayerStates(layers)
+    const itemsByImageKey = this.getFrameItemsByImageKey(frameItems)
 
     let spriteCount = 0
     const generation = this.nextVisibilityGeneration()
@@ -210,6 +218,13 @@ export class SVGAPixiRenderer {
         node.blendMode = item.blendMode
       }
 
+      const matteItem = item.matteKey ? itemsByImageKey.get(item.matteKey) : undefined
+      const maskApplied = matteItem ? this.updateMaskNode(node, matteItem) : false
+      if (!maskApplied && node.container.mask) {
+        node.container.mask = null
+        node.maskContainer.visible = false
+      }
+
       node.matrix.a = item.transform.a
       node.matrix.b = item.transform.b
       node.matrix.c = item.transform.c
@@ -225,7 +240,10 @@ export class SVGAPixiRenderer {
     for (const spriteIndex of this.activeSpriteIndices) {
       if (this.visibleSpriteMarks[spriteIndex] === generation) continue
       const node = this.spriteNodes[spriteIndex]
-      if (node) node.container.visible = false
+      if (node) {
+        node.container.visible = false
+        node.maskContainer.visible = false
+      }
     }
 
     const previousActive = this.activeSpriteIndices
@@ -343,18 +361,32 @@ export class SVGAPixiRenderer {
     for (let spriteIndex = 0; spriteIndex < sprites.length; spriteIndex++) {
       const container = new Container()
       const sprite = new Sprite(Texture.EMPTY)
+      const maskContainer = new Container()
+      const maskSprite = new Sprite(Texture.EMPTY)
 
       container.visible = false
       container.eventMode = 'none'
       sprite.anchor.set(0, 0)
       sprite.eventMode = 'none'
       container.addChild(sprite)
+      maskContainer.visible = false
+      maskContainer.eventMode = 'none'
+      maskSprite.anchor.set(0, 0)
+      maskSprite.eventMode = 'none'
+      maskContainer.addChild(maskSprite)
       this.stage.addChild(container)
+      this.stage.addChild(maskContainer)
 
       this.spriteNodes[spriteIndex] = {
         container,
         sprite,
         matrix: new Matrix(),
+        maskContainer,
+        maskSprite,
+        maskMatrix: new Matrix(),
+        maskTexture: null,
+        maskWidth: -1,
+        maskHeight: -1,
         texture: null,
         width: -1,
         height: -1,
@@ -395,6 +427,7 @@ export class SVGAPixiRenderer {
         items.push({
           spriteIndex,
           imageKey: sprite.imageKey,
+          matteKey: sprite.matteKey || undefined,
           transform: this.getFrameTransform(frame),
           width: layout.width,
           height: layout.height,
@@ -405,6 +438,46 @@ export class SVGAPixiRenderer {
 
       this.displayLists[frameIndex] = items
     }
+  }
+
+  private getFrameItemsByImageKey(frameItems: FrameDisplayItem[]): Map<string, FrameDisplayItem> {
+    const map = new Map<string, FrameDisplayItem>()
+    for (const item of frameItems) {
+      if (!map.has(item.imageKey)) map.set(item.imageKey, item)
+    }
+    return map
+  }
+
+  private updateMaskNode(node: SpriteNode, matteItem: FrameDisplayItem): boolean {
+    const texture = this.slotTextures.get(matteItem.imageKey) || this.textureCache.get(matteItem.imageKey)
+    if (!texture || texture === Texture.EMPTY) return false
+
+    if (node.maskTexture !== texture) {
+      node.maskSprite.texture = texture
+      node.maskTexture = texture
+      node.maskWidth = -1
+      node.maskHeight = -1
+    }
+    if (node.maskWidth !== matteItem.width) {
+      node.maskSprite.width = matteItem.width
+      node.maskWidth = matteItem.width
+    }
+    if (node.maskHeight !== matteItem.height) {
+      node.maskSprite.height = matteItem.height
+      node.maskHeight = matteItem.height
+    }
+
+    node.maskMatrix.a = matteItem.transform.a
+    node.maskMatrix.b = matteItem.transform.b
+    node.maskMatrix.c = matteItem.transform.c
+    node.maskMatrix.d = matteItem.transform.d
+    node.maskMatrix.tx = matteItem.transform.tx
+    node.maskMatrix.ty = matteItem.transform.ty
+    node.maskContainer.setFromMatrix(node.maskMatrix)
+    node.maskContainer.alpha = matteItem.alpha
+    node.maskContainer.visible = true
+    node.container.mask = node.maskContainer
+    return true
   }
 
   private getFrameTransform(frame: FrameData): PixiTransform {
@@ -535,10 +608,23 @@ export class SVGAPixiRenderer {
     if (existing) {
       const sprite = existing.children[0] as Sprite | undefined
       if (sprite) {
+        const maskContainer = new Container()
+        const maskSprite = new Sprite(Texture.EMPTY)
+        maskContainer.visible = false
+        maskContainer.eventMode = 'none'
+        maskSprite.eventMode = 'none'
+        maskContainer.addChild(maskSprite)
+        this.stage.addChild(maskContainer)
         return {
           container: existing,
           sprite,
           matrix: new Matrix(),
+          maskContainer,
+          maskSprite,
+          maskMatrix: new Matrix(),
+          maskTexture: null,
+          maskWidth: -1,
+          maskHeight: -1,
           texture: sprite.texture,
           width: sprite.width,
           height: sprite.height,
@@ -549,15 +635,28 @@ export class SVGAPixiRenderer {
 
     const container = new Container()
     const sprite = new Sprite(Texture.EMPTY)
+    const maskContainer = new Container()
+    const maskSprite = new Sprite(Texture.EMPTY)
     container.name = layer.id
     container.eventMode = 'none'
     sprite.eventMode = 'none'
     container.addChild(sprite)
+    maskContainer.visible = false
+    maskContainer.eventMode = 'none'
+    maskSprite.eventMode = 'none'
+    maskContainer.addChild(maskSprite)
     this.stage.addChild(container)
+    this.stage.addChild(maskContainer)
     const node = {
       container,
       sprite,
       matrix: new Matrix(),
+      maskContainer,
+      maskSprite,
+      maskMatrix: new Matrix(),
+      maskTexture: null,
+      maskWidth: -1,
+      maskHeight: -1,
       texture: null,
       width: -1,
       height: -1,

@@ -102,7 +102,7 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
 
   return (
     <div className={cn(
-      'flex items-center gap-4 px-6 py-3 bg-bg-secondary border-t border-border',
+      'flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 bg-bg-secondary border-t border-border',
       className
     )}>
       {/* 播放控制按钮 */}
@@ -167,9 +167,10 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
       </div>
 
       {/* 帧滑块 */}
-      <div className="flex-1">
+      <div className="flex-1 min-w-[100px]">
         <input
           type="range"
+          aria-label="播放帧"
           min={0}
           max={totalFrames - 1 || 0}
           value={currentFrame}
@@ -193,7 +194,7 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
 
       {/* 帧数显示 */}
       <div className="text-sm text-text-secondary font-mono">
-        {currentFrame + 1} / {totalFrames}
+        {totalFrames ? currentFrame + 1 : 0} / {totalFrames}
       </div>
 
       <div className="w-px h-6 bg-border" />
@@ -232,22 +233,9 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
       </Button>
 
       {/* 速度控制 */}
-      <div className="flex items-center gap-1">
-        {speeds.map((s) => (
-          <button
-            key={s}
-            className={cn(
-              'px-2 py-1 text-xs rounded transition-colors',
-              speed === s
-                ? 'bg-accent text-white'
-                : 'text-text-secondary hover:text-text-primary hover:bg-bg-tertiary'
-            )}
-            onClick={() => setSpeed(s)}
-          >
-            {s}x
-          </button>
-        ))}
-      </div>
+      <select aria-label="播放速度" value={speed} onChange={e => setSpeed(Number(e.target.value))} className="h-8 rounded-md border border-border bg-bg-tertiary px-2 text-xs text-text-secondary" disabled={!params}>
+        {speeds.map(value => <option key={value} value={value}>{value}x</option>)}
+      </select>
     </div>
   )
 }

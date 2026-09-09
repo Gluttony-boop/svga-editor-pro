@@ -30,6 +30,8 @@ export interface OptimizationConfig {
     format: 'webp' | 'png' | 'auto'
     /** 压缩质量 (0-100) */
     quality: number
+    /** 0 = full colour, 64/128/256 = lossy RGBA palette quantization. */
+    pngColors?: 0 | 64 | 128 | 256
     /** 是否启用缩放 */
     resizeEnabled: boolean
     /** 缩放百分比 (1-100) */
@@ -79,174 +81,32 @@ export interface OptimizationStats {
   framesRemoved: number
   
   processingTime: number
+  imagesFailed?: number
+  warnings?: string[]
 }
 
 /**
  * 预设配置列表
  */
-export const OPTIMIZATION_PRESETS: OptimizationPreset[] = [
-  {
-    id: 'none',
-    name: '无优化',
-    description: '保持原始质量，不进行任何优化',
-    config: {
-      enabled: false,
-      image: {
-        format: 'auto',
-        quality: 100,
-        resizeEnabled: false,
-        resizePercent: 100,
-        maxWidth: 0,
-        maxHeight: 0,
-        deduplicate: false
-      },
-      frames: {
-        simplify: false,
-        keyframeThreshold: 0,
-        removeInvisible: false,
-        precision: 6
-      },
-      compression: {
-        level: 6,
-        useBestCompression: false
-      }
-    }
-  },
-  {
-    id: 'light',
-    name: '轻度优化',
-    description: '轻度压缩，画质损失极小，适合高清展示',
-    config: {
-      enabled: true,
-      image: {
-        format: 'png',
-        quality: 90,
-        resizeEnabled: false,
-        resizePercent: 100,
-        maxWidth: 0,
-        maxHeight: 0,
-        deduplicate: false  // 关闭去重，避免潜在问题
-      },
-      frames: {
-        simplify: false,
-        keyframeThreshold: 0.01,
-        removeInvisible: false,
-        precision: 6
-      },
-      compression: {
-        level: 7,
-        useBestCompression: false
-      }
-    }
-  },
-  {
-    id: 'balanced',
-    name: '均衡优化',
-    description: '平衡画质与体积，适合大多数场景',
-    config: {
-      enabled: true,
-      image: {
-        format: 'png',
-        quality: 80,
-        resizeEnabled: false,
-        resizePercent: 100,
-        maxWidth: 0,
-        maxHeight: 0,
-        deduplicate: false  // 关闭去重，避免潜在问题
-      },
-      frames: {
-        simplify: false,
-        keyframeThreshold: 0.02,
-        removeInvisible: false,
-        precision: 6
-      },
-      compression: {
-        level: 8,
-        useBestCompression: true
-      }
-    }
-  },
-  {
-    id: 'aggressive',
-    name: '激进优化',
-    description: '大幅压缩体积，适合网络传输',
-    config: {
-      enabled: true,
-      image: {
-        format: 'png',
-        quality: 70,
-        resizeEnabled: true,
-        resizePercent: 75,
-        maxWidth: 1080,
-        maxHeight: 1920,
-        deduplicate: false
-      },
-      frames: {
-        simplify: false,
-        keyframeThreshold: 0.03,
-        removeInvisible: false,
-        precision: 4
-      },
-      compression: {
-        level: 9,
-        useBestCompression: true
-      }
-    }
-  },
-  {
-    id: 'extreme',
-    name: '极限优化',
-    description: '最大程度压缩，适合移动端和低带宽场景',
-    config: {
-      enabled: true,
-      image: {
-        format: 'png',
-        quality: 60,
-        resizeEnabled: true,
-        resizePercent: 50,
-        maxWidth: 750,
-        maxHeight: 1334,
-        deduplicate: false
-      },
-      frames: {
-        simplify: false,
-        keyframeThreshold: 0.05,
-        removeInvisible: false,
-        precision: 3
-      },
-      compression: {
-        level: 9,
-        useBestCompression: true
-      }
-    }
-  },
-  {
-    id: 'custom',
-    name: '自定义',
-    description: '自定义优化参数',
-    config: {
-      enabled: true,
-      image: {
-        format: 'png',
-        quality: 80,
-        resizeEnabled: false,
-        resizePercent: 100,
-        maxWidth: 0,
-        maxHeight: 0,
-        deduplicate: false
-      },
-      frames: {
-        simplify: false,
-        keyframeThreshold: 0.02,
-        removeInvisible: false,
-        precision: 6
-      },
-      compression: {
-        level: 8,
-        useBestCompression: true
-      }
-    }
+const makePreset = (id: string, name: string, description: string, pngColors: 0 | 64 | 128 | 256, resizePercent = 100): OptimizationPreset => ({
+  id, name, description,
+  config: {
+    enabled: id !== 'none',
+    image: { format: 'png', quality: 85, pngColors, resizeEnabled: resizePercent < 100, resizePercent, maxWidth: 0, maxHeight: 0, deduplicate: false },
+    frames: { simplify: false, keyframeThreshold: 0.01, removeInvisible: false, precision: 6 },
+    compression: { level: 9, useBestCompression: true }
   }
+})
+
+export const OPTIMIZATION_PRESETS: OptimizationPreset[] = [
+  makePreset('none', '无优化', '仅应用编辑，不压缩素材，保留当前质量。', 0),
+  makePreset('light', '保真 PNG', '全彩 PNG，不缩图、不精简动画；更小才替换，压缩收益可能有限。', 0),
+  makePreset('balanced', '均衡 PNG · 256 色', 'PNG 调色板量化，不改变画布尺寸；渐变、半透明可能有轻微损失，请先预览。', 256),
+  makePreset('aggressive', '高压缩 PNG · 128 色', '128 色量化，图片分辨率降至 75%，画布和动画坐标不变。', 128, 75),
+  makePreset('extreme', '极限 PNG · 64 色', '64 色量化，图片分辨率降至 50%；明显有损，务必对比画面。', 64, 50),
+  { ...makePreset('webp', 'WebP · 兼容性自检', '有损 WebP，保留画布与动画。必须在目标 SVGA 播放器验证支持情况。', 0),
+    config: { ...makePreset('webp', '', '', 0).config, image: { ...makePreset('webp', '', '', 0).config.image, format: 'webp', quality: 85 } } },
+  makePreset('custom', '自定义', '按实际图片格式选择色数或质量；尺寸设置只改变图片分辨率。', 0)
 ]
 
 /**
@@ -298,7 +158,9 @@ export class SVGAOptimizer {
       imagesDeduplicated: 0,
       framesSimplified: 0,
       framesRemoved: 0,
-      processingTime: 0
+      processingTime: 0,
+      imagesFailed: 0,
+      warnings: []
     }
   }
 
@@ -307,7 +169,8 @@ export class SVGAOptimizer {
    */
   async optimize(
     buffer: ArrayBuffer,
-    config: OptimizationConfig
+    config: OptimizationConfig,
+    onProgress?: (completed: number, total: number) => void
   ): Promise<Blob> {
     const startTime = performance.now()
     this.resetStats()
@@ -324,6 +187,14 @@ export class SVGAOptimizer {
       this.stats.reductionPercent = 0
       this.stats.processingTime = Math.round(performance.now() - startTime)
       return new Blob([buffer], { type: 'application/octet-stream' })
+    }
+
+    if (!Number.isFinite(config.image.quality) || config.image.quality < 0 || config.image.quality > 100
+      || ![0,64,128,256].includes(config.image.pngColors ?? 0)
+      || !Number.isFinite(config.image.resizePercent) || config.image.resizePercent < 1 || config.image.resizePercent > 100
+      || ![config.image.maxWidth, config.image.maxHeight].every(value => Number.isFinite(value) && value >= 0)
+      || !Number.isInteger(config.compression.level) || config.compression.level < 1 || config.compression.level > 9) {
+      throw new Error('压缩参数无效，请重新选择一个预设')
     }
 
     // 1. 解压 SVGA 数据
@@ -355,7 +226,7 @@ export class SVGAOptimizer {
     // 3. 图片优化（包含去重和更新引用）
     // 直接修改 decodedMessage，不创建新对象
     if (config.image) {
-      await this.optimizeImages(decodedMessage, config.image)
+      await this.optimizeImages(decodedMessage, config.image, onProgress)
     }
 
     // 4. 帧数据优化
@@ -367,20 +238,22 @@ export class SVGAOptimizer {
     const encoded = this.MovieEntity.encode(decodedMessage).finish()
 
     // 验证编码后的数据可以正确解码
-    try {
-      const verifyMsg = this.MovieEntity.decode(encoded)
-      // @ts-ignore verification check
-      const verifyObj = this.MovieEntity.toObject(verifyMsg, { bytes: Uint8Array, defaults: false })
-    } catch (e) {
-      console.error('[Optimizer] Verification failed:', e)
-    }
+    this.MovieEntity.decode(encoded)
 
     // 6. 压缩
     const compressionLevel = config.compression.level
     const compressed = pako.deflate(encoded, { level: compressionLevel as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 })
 
     // 7. 构建官方 SVGA 2.0 输出：zlib-compressed protobuf MovieEntity
-    const result = compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer
+    let result = compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer
+    if (result.byteLength > buffer.byteLength) {
+      result = buffer.slice(0)
+      this.stats.imagesOptimized = 0
+      this.stats.imagesDeduplicated = 0
+      this.stats.framesSimplified = 0
+      this.stats.framesRemoved = 0
+      this.stats.warnings?.push('整包优化未减小体积，已保留优化前的编辑副本。')
+    }
 
     // 更新统计
     this.stats.optimizedSize = result.byteLength
@@ -395,223 +268,79 @@ export class SVGAOptimizer {
    */
   private async optimizeImages(
     decodedMessage: any,
-    config: OptimizationConfig['image']
+    config: OptimizationConfig['image'],
+    onProgress?: (completed: number, total: number) => void
   ): Promise<void> {
     if (!decodedMessage.images) return
-
-    // 图片去重（需要更新 sprites 引用）
-    if (config.deduplicate) {
-      this.deduplicateImagesWithReferences(decodedMessage)
-    }
-
-    // 计算基础缩放比例
-    let baseScale = 1
-    if (config.resizeEnabled && config.resizePercent < 100) {
-      baseScale = config.resizePercent / 100
-    }
-
-    // 如果启用了缩放，需要先计算所有图片的最终缩放比例
-    let finalScale = baseScale
-    
-    if (baseScale !== 1 && (config.maxWidth > 0 || config.maxHeight > 0)) {
-      // 第一遍：计算每张图片的实际缩放比例
-      const imageScaleMap = new Map<string, number>()
-      
-      for (const key of Object.keys(decodedMessage.images)) {
-        try {
-          const uint8Data = decodedMessage.images[key]
-          if (!uint8Data) continue
-          
-          // 创建 Blob URL 获取图片尺寸
-          const mimeType = this.getImageMimeType(uint8Data)
-          const blob = new Blob([uint8Data.buffer.slice(uint8Data.byteOffset, uint8Data.byteOffset + uint8Data.byteLength)], { type: mimeType })
-          const url = URL.createObjectURL(blob)
-          
-          // 获取图片尺寸
-          const dimensions = await this.getImageDimensions(url)
-          
-          // 计算此图片的实际缩放比例
-          let targetWidth = Math.round(dimensions.width * baseScale)
-          let targetHeight = Math.round(dimensions.height * baseScale)
-          let actualScale = baseScale
-          
-          // originalRatio: dimensions.width / dimensions.height（保留用于比例验证扩展）
-          
-          if (config.maxWidth > 0 && targetWidth > config.maxWidth) {
-            actualScale = config.maxWidth / dimensions.width
-          }
-          if (config.maxHeight > 0 && targetHeight > config.maxHeight) {
-            const scaleForHeight = config.maxHeight / dimensions.height
-            actualScale = Math.min(actualScale, scaleForHeight)
-          }
-          
-          imageScaleMap.set(key, actualScale)
-          URL.revokeObjectURL(url)
-          
-        } catch (err) {
-          console.warn(`[Optimizer] Failed to get dimensions for "${key}":`, err)
-          imageScaleMap.set(key, baseScale)
-        }
-      }
-      
-      // 找出所有精灵图使用的图片中的最小缩放比例
-      if (decodedMessage.sprites) {
-        const usedScales: number[] = []
-        for (const sprite of decodedMessage.sprites) {
-          if (sprite.imageKey && imageScaleMap.has(sprite.imageKey)) {
-            usedScales.push(imageScaleMap.get(sprite.imageKey)!)
-          }
-        }
-        finalScale = usedScales.length > 0 ? Math.min(...usedScales) : baseScale
-      }
-      
-    }
-
-    // 第二遍：使用统一的 finalScale 处理所有图片
-    for (const key of Object.keys(decodedMessage.images)) {
+    if (config.deduplicate) this.deduplicateImagesWithReferences(decodedMessage)
+    const audioKeys = new Set((decodedMessage.audios || []).map((audio: any) => audio.audioKey || audio.key))
+    const keys = Object.keys(decodedMessage.images).filter(key => !audioKeys.has(key))
+    const scale = config.resizeEnabled ? Math.max(0.01, Math.min(1, config.resizePercent / 100)) : 1
+    let completed = 0
+    for (const key of keys) {
+      let url: string | undefined
       try {
-        const uint8Data = decodedMessage.images[key]
-        if (!uint8Data) continue
-        
-        const originalSize = uint8Data.length
-
-        // 创建 Blob URL
-        const mimeType = this.getImageMimeType(uint8Data)
-        const blob = new Blob([uint8Data.buffer.slice(uint8Data.byteOffset, uint8Data.byteOffset + uint8Data.byteLength)], { type: mimeType })
-        const url = URL.createObjectURL(blob)
-
-        // 处理图片，使用统一的 finalScale
-        const { buffer: processedBuffer } = await this.processImageWithScale(
-          url,
-          config.quality / 100,
-          finalScale,  // 使用统一的 finalScale，不再应用 maxWidth/maxHeight
-          config.format === 'webp' || (config.format === 'auto' && mimeType !== 'image/png'),
-          0,  // maxWidth 设为 0，因为已经在 finalScale 中考虑了
-          0   // maxHeight 设为 0
+        const data: Uint8Array = decodedMessage.images[key]
+        if (!data?.byteLength) throw new Error('图片数据为空')
+        const mime = this.getImageMimeType(data)
+        url = URL.createObjectURL(new Blob([new Uint8Array(data).buffer], { type: mime }))
+        const result = await this.processImageWithScale(
+          url, config.quality / 100, scale,
+          config.format === 'webp' || (config.format === 'auto' && mime === 'image/webp'),
+          config.resizeEnabled ? config.maxWidth : 0,
+          config.resizeEnabled ? config.maxHeight : 0,
+          config.pngColors ?? 0
         )
-
-        // 只有处理后更小才替换
-        if (processedBuffer.byteLength < originalSize) {
-          decodedMessage.images[key] = new Uint8Array(processedBuffer)
+        if (result.buffer.byteLength < data.byteLength) {
+          decodedMessage.images[key] = new Uint8Array(result.buffer)
           this.stats.imagesOptimized++
         } else {
           this.stats.imagesSkipped++
         }
-
-        URL.revokeObjectURL(url)
-      } catch (err) {
-        console.warn(`[Optimizer] Failed to process image "${key}":`, err)
+      } catch (error) {
         this.stats.imagesSkipped++
+        this.stats.imagesFailed = (this.stats.imagesFailed ?? 0) + 1
+        this.stats.warnings?.push(`图片“${key}”处理失败，已保留原图：${(error as Error).message}`)
+      } finally {
+        if (url) URL.revokeObjectURL(url)
       }
+      onProgress?.(++completed, keys.length)
+      // Give painting, progress and document-change checks a chance between textures.
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
     }
-
-    // 缩放 viewBox 和 sprites（使用统一的 finalScale）
-    if (finalScale !== 1 && decodedMessage.sprites) {
-      
-      // 缩放 viewBox（画布尺寸）
-      if (decodedMessage.params) {
-        if (decodedMessage.params.viewBoxWidth !== undefined) {
-          decodedMessage.params.viewBoxWidth = Math.round(decodedMessage.params.viewBoxWidth * finalScale)
-        }
-        if (decodedMessage.params.viewBoxHeight !== undefined) {
-          decodedMessage.params.viewBoxHeight = Math.round(decodedMessage.params.viewBoxHeight * finalScale)
-        }
-      }
-      
-      // 缩放 sprites 的 layout 和 transform
-      for (const sprite of decodedMessage.sprites) {
-        if (!sprite.frames) continue
-        
-        for (const frame of sprite.frames) {
-          // 缩放 layout（绘制区域）
-          if (frame.layout) {
-            if (frame.layout.width !== undefined) {
-              frame.layout.width = Math.round(frame.layout.width * finalScale)
-            }
-            if (frame.layout.height !== undefined) {
-              frame.layout.height = Math.round(frame.layout.height * finalScale)
-            }
-            if (frame.layout.x !== undefined) {
-              frame.layout.x = Math.round(frame.layout.x * finalScale)
-            }
-            if (frame.layout.y !== undefined) {
-              frame.layout.y = Math.round(frame.layout.y * finalScale)
-            }
-          }
-          // 缩放 transform
-          if (frame.transform) {
-            if (frame.transform.tx !== undefined) {
-              frame.transform.tx = Math.round(frame.transform.tx * finalScale)
-            }
-            if (frame.transform.ty !== undefined) {
-              frame.transform.ty = Math.round(frame.transform.ty * finalScale)
-            }
-            // 不修改 a, b, c, d
-          }
-        }
-      }
-    }
+    // Texture resolution is independent of layout, transforms, paths and viewBox.
   }
-  
-  /**
-   * 获取图片尺寸
-   */
-  private getImageDimensions(url: string): Promise<{ width: number; height: number }> {
-    return new Promise((resolve, reject) => {
-      const img = new Image()
-      img.crossOrigin = 'anonymous'
-      img.onload = () => {
-        resolve({ width: img.width, height: img.height })
-      }
-      img.onerror = () => reject(new Error('Failed to load image'))
-      img.src = url
-    })
-  }
-
   /**
    * 图片去重（同时更新 sprites 引用）
    */
   private deduplicateImagesWithReferences(decodedMessage: any): void {
     if (!decodedMessage.images || !decodedMessage.sprites) return
-
     const images = decodedMessage.images
-    const sprites = decodedMessage.sprites
-    const keys = Object.keys(images)
-    const hashMap = new Map<string, string>()
-    const duplicateMap = new Map<string, string>() // key -> originalKey
-
-    // 找出重复图片
-    for (const key of keys) {
-      const data = images[key]
-      if (!data) continue
-      
+    const protectedKeys = new Set<string>([
+      ...decodedMessage.sprites.map((sprite: any) => sprite.matteKey).filter(Boolean),
+      ...(decodedMessage.audios || []).map((audio: any) => audio.audioKey || audio.key).filter(Boolean)
+    ])
+    const buckets = new Map<string, string[]>()
+    const aliases = new Map<string, string>()
+    for (const key of Object.keys(images)) {
+      if (protectedKeys.has(key)) continue
+      const data: Uint8Array = images[key]
       const hash = this.simpleHash(data)
-
-      if (hashMap.has(hash)) {
-        const originalKey = hashMap.get(hash)!
-        duplicateMap.set(key, originalKey)
-      } else {
-        hashMap.set(hash, key)
-      }
+      const candidates = buckets.get(hash) || []
+      // A hash only narrows candidates. Equality must include every byte.
+      const match = candidates.find(candidate => data.length === images[candidate].length
+        && data.every((byte, index) => byte === images[candidate][index]))
+      if (match) aliases.set(key, match)
+      else { candidates.push(key); buckets.set(hash, candidates) }
     }
-
-    // 更新 sprites 中的引用
-    if (duplicateMap.size > 0) {
-      for (const sprite of sprites) {
-        if (sprite.imageKey && duplicateMap.has(sprite.imageKey)) {
-          const newKey = duplicateMap.get(sprite.imageKey)!
-          sprite.imageKey = newKey
-        }
-      }
-
-      // 删除重复图片
-      for (const [key] of duplicateMap) {
-        delete images[key]
-        this.stats.imagesDeduplicated++
-      }
+    for (const sprite of decodedMessage.sprites) {
+      if (aliases.has(sprite.imageKey)) sprite.imageKey = aliases.get(sprite.imageKey)
+    }
+    for (const key of aliases.keys()) {
+      delete images[key]
+      this.stats.imagesDeduplicated++
     }
   }
-
   /**
    * 简单哈希函数
    */
@@ -629,96 +358,59 @@ export class SVGAOptimizer {
    * 保持等比缩放，不失去透明度
    */
   private async processImageWithScale(
-    url: string,
-    quality: number,
-    scale: number,
-    useWebP: boolean,
-    maxWidth: number,
-    maxHeight: number
+    url: string, quality: number, scale: number, useWebP: boolean,
+    maxWidth: number, maxHeight: number, pngColors: number = 0
   ): Promise<{ buffer: ArrayBuffer; actualScale: number }> {
     return new Promise((resolve, reject) => {
       const img = new Image()
-      img.crossOrigin = 'anonymous'
-
-      img.onload = () => {
-        const originalWidth = img.width
-        const originalHeight = img.height
-        
-        // 计算目标尺寸（保持等比）
-        let targetWidth = Math.round(originalWidth * scale)
-        let targetHeight = Math.round(originalHeight * scale)
-        
-        const originalRatio = originalWidth / originalHeight
-
-        // 应用最大尺寸限制（保持等比缩放）
-        if (maxWidth > 0 && targetWidth > maxWidth) {
-          targetWidth = maxWidth
-          targetHeight = Math.round(targetWidth / originalRatio)
-        }
-        if (maxHeight > 0 && targetHeight > maxHeight) {
-          targetHeight = maxHeight
-          targetWidth = Math.round(targetHeight * originalRatio)
-        }
-
-        // 计算实际缩放比例
-        const actualScale = targetWidth / originalWidth
-
-        const canvas = document.createElement('canvas')
-        canvas.width = targetWidth
-        canvas.height = targetHeight
-
-        const ctx = canvas.getContext('2d', { 
-          alpha: true,  // 启用透明通道
-          willReadFrequently: false
-        })
-        if (!ctx) {
-          reject(new Error('Failed to get canvas context'))
-          return
-        }
-
-        // 关键：清除画布，确保透明背景
-        ctx.clearRect(0, 0, targetWidth, targetHeight)
-        
-        // 绘制缩放后的图片
-        ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
-
-        // 选择输出格式
-        // WebP: 支持透明度，有损压缩，文件更小
-        // PNG: 支持透明度，无损压缩，质量最高
-        const mimeType = useWebP ? 'image/webp' : 'image/png'
-        const outputQuality = useWebP ? quality : 1
-
-        canvas.toBlob(async (blob) => {
-          if (blob) {
-            const buffer = await blob.arrayBuffer()
-            resolve({ buffer, actualScale })
-          } else {
-            reject(new Error('Failed to process image'))
-          }
-        }, mimeType, outputQuality)
+      let canvas: HTMLCanvasElement | undefined
+      let settled = false
+      const cleanup = () => {
+        clearTimeout(timer)
+        img.onload = null
+        img.onerror = null
+        if (canvas) { canvas.width = 0; canvas.height = 0 }
       }
-
-      img.onerror = () => reject(new Error('Failed to load image'))
+      const fail = (error: unknown) => {
+        if (settled) return
+        settled = true; cleanup()
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+      const timer = setTimeout(() => fail(new Error('图片处理超时')), 30000)
+      img.onload = async () => {
+        try {
+          const width = img.naturalWidth || img.width, height = img.naturalHeight || img.height
+          if (width < 1 || height < 1) throw new Error('图片尺寸无效')
+          const ratio = Math.min(1, scale, maxWidth > 0 ? maxWidth / width : 1, maxHeight > 0 ? maxHeight / height : 1)
+          const targetWidth = Math.max(1, Math.round(width * ratio)), targetHeight = Math.max(1, Math.round(height * ratio))
+          if (targetWidth * targetHeight > 16_777_216) throw new Error('图片超过安全处理像素上限')
+          canvas = document.createElement('canvas')
+          canvas.width = targetWidth; canvas.height = targetHeight
+          const ctx = canvas.getContext('2d', { alpha: true, willReadFrequently: pngColors > 0 })
+          if (!ctx) throw new Error('无法创建压缩画布')
+          ctx.clearRect(0, 0, targetWidth, targetHeight)
+          ctx.drawImage(img, 0, 0, targetWidth, targetHeight)
+          let buffer: ArrayBuffer
+          if (!useWebP && pngColors > 0) {
+            const pixels = ctx.getImageData(0, 0, targetWidth, targetHeight)
+            const { compressPalettePng } = await import('./png-compressor')
+            buffer = await compressPalettePng(pixels.data, targetWidth, targetHeight, pngColors)
+          } else {
+            const blob = await new Promise<Blob>((done, failed) => canvas!.toBlob(
+              result => result ? done(result) : failed(new Error('图片编码返回空结果')),
+              useWebP ? 'image/webp' : 'image/png', useWebP ? quality : 1
+            ))
+            buffer = await blob.arrayBuffer()
+          }
+          if (settled) return
+          settled = true; cleanup()
+          resolve({ buffer, actualScale: targetWidth / width })
+        } catch (error) { fail(error) }
+      }
+      img.onerror = () => fail(new Error('图片解码失败'))
       img.src = url
     })
   }
-  
-  /**
-   * 处理单张图片（兼容旧方法）
-   * 保持等比缩放，不失去透明度
-   */
-  private async processImage(
-    url: string,
-    quality: number,
-    scale: number,
-    useWebP: boolean,
-    maxWidth: number,
-    maxHeight: number
-  ): Promise<ArrayBuffer> {
-    const result = await this.processImageWithScale(url, quality, scale, useWebP, maxWidth, maxHeight)
-    return result.buffer
-  }
-
   /**
    * 优化帧数据
    */
@@ -780,6 +472,15 @@ export class SVGAOptimizer {
    * 计算帧差异
    */
   private calculateFrameDifference(frame1: any, frame2: any): number {
+    // Paths, layout, shapes and field presence cannot be reduced to transform distance.
+    const own = (object: object, key: string) => Object.prototype.hasOwnProperty.call(object, key)
+    for (const key of new Set([...Object.keys(frame1), ...Object.keys(frame2)])) {
+      if (own(frame1, key) !== own(frame2, key)) return Infinity
+      if (key !== 'alpha' && key !== 'transform' && JSON.stringify(frame1[key]) !== JSON.stringify(frame2[key])) return Infinity
+    }
+    if (frame1.transform && frame2.transform) {
+      for (const key of ['a', 'b', 'c', 'd', 'tx', 'ty']) if (own(frame1.transform, key) !== own(frame2.transform, key)) return Infinity
+    }
     let diff = 0
     let count = 0
 
@@ -817,23 +518,11 @@ export class SVGAOptimizer {
     }
 
     if (result.transform) {
-      result.transform = {
-        a: roundValue(result.transform.a),
-        b: roundValue(result.transform.b),
-        c: roundValue(result.transform.c),
-        d: roundValue(result.transform.d),
-        tx: roundValue(result.transform.tx),
-        ty: roundValue(result.transform.ty)
-      }
+      result.transform = Object.fromEntries(Object.entries(result.transform).map(([key, value]) => [key, typeof value === 'number' ? roundValue(value) : value]))
     }
 
     if (result.layout) {
-      result.layout = {
-        x: roundValue(result.layout.x),
-        y: roundValue(result.layout.y),
-        width: roundValue(result.layout.width),
-        height: roundValue(result.layout.height)
-      }
+      result.layout = Object.fromEntries(Object.entries(result.layout).map(([key, value]) => [key, typeof value === 'number' ? roundValue(value) : value]))
     }
 
     return result
@@ -884,115 +573,12 @@ export class SVGAOptimizer {
   
   /**
    * 安全优化 - 只进行图片压缩，保持原始 SVGA 结构不变
-   * 这个方法不重新编码 protobuf，只替换图片数据
+   * 重新编码 protobuf，但保留布局、坐标与帧数据，不做素材去重
    */
-  async safeOptimize(
-    buffer: ArrayBuffer,
-    config: OptimizationConfig['image']
-  ): Promise<Blob> {
-    const startTime = performance.now()
-    this.resetStats()
-    this.stats.originalSize = buffer.byteLength
-
-    if (!this.MovieEntity) {
-      await this.init()
-    }
-
-
-    // 1. 解压 SVGA 数据
-    const data = new Uint8Array(buffer)
-    let decompressed: Uint8Array
-    let svgaVersion = 0x02
-
-    const magic = String.fromCharCode(...data.slice(0, 4))
-    if (magic === 'SVGA') {
-      svgaVersion = data[4]
-      if (svgaVersion === 0x02) {
-        decompressed = pako.inflate(data.slice(8))
-      } else {
-        decompressed = data.slice(8)
-      }
-    } else {
-      try {
-        decompressed = pako.inflate(data)
-      } catch {
-        decompressed = data
-      }
-    }
-
-    // 2. 解码 protobuf
-    const decodedMessage = this.MovieEntity.decode(decompressed)
-    decodedMessage.version = '2.0.0'
-
-    // 3. 只处理图片
-    if (decodedMessage.images) {
-      await this.optimizeImagesOnly(decodedMessage, config)
-    }
-
-    // 4. 重新编码
-    const encoded = this.MovieEntity.encode(decodedMessage).finish()
-
-    // 5. 压缩
-    const compressed = pako.deflate(encoded, { level: 9 })
-    
-    // 6. 构建官方 SVGA 2.0 输出：zlib-compressed protobuf MovieEntity
-    const result = compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer
-
-    this.stats.optimizedSize = result.byteLength
-    this.stats.reductionPercent = Math.round((1 - this.stats.optimizedSize / this.stats.originalSize) * 100)
-    this.stats.processingTime = Math.round(performance.now() - startTime)
-
-    return new Blob([result], { type: 'application/octet-stream' })
-  }
-  
-  /**
-   * 只优化图片，不修改其他数据
-   */
-  private async optimizeImagesOnly(decodedMessage: any, config: OptimizationConfig['image']): Promise<void> {
-    const imageKeys = Object.keys(decodedMessage.images)
-
-    // 计算缩放比例
-    let scale = 1
-    if (config.resizeEnabled && config.resizePercent < 100) {
-      scale = config.resizePercent / 100
-    }
-
-    for (const key of imageKeys) {
-      try {
-        const uint8Data = decodedMessage.images[key]
-        if (!uint8Data) continue
-        
-        const originalSize = uint8Data.length
-
-        // 创建 Blob URL
-        const mimeType = this.getImageMimeType(uint8Data)
-        const blob = new Blob([uint8Data.buffer.slice(uint8Data.byteOffset, uint8Data.byteOffset + uint8Data.byteLength)], { type: mimeType })
-        const url = URL.createObjectURL(blob)
-
-        // 处理图片
-        const processedBuffer = await this.processImage(
-          url,
-          config.quality / 100,
-          scale,
-          config.format === 'webp' || (config.format === 'auto' && mimeType !== 'image/png'),
-          config.maxWidth,
-          config.maxHeight
-        )
-
-        // 只有处理后更小才替换
-        if (processedBuffer.byteLength < originalSize) {
-          decodedMessage.images[key] = new Uint8Array(processedBuffer)
-          this.stats.imagesOptimized++
-        } else {
-          this.stats.imagesSkipped++
-        }
-
-        URL.revokeObjectURL(url)
-      } catch (err) {
-        console.warn(`[Optimizer] Failed to process image "${key}":`, err)
-        this.stats.imagesSkipped++
-      }
-    }
+  async safeOptimize(buffer: ArrayBuffer, config: OptimizationConfig['image']): Promise<Blob> {
+    const options = structuredClone(getPreset('light')!.config)
+    options.image = { ...config, deduplicate: false }
+    return this.optimize(buffer, options)
   }
 }
 

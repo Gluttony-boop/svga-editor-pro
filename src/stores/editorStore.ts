@@ -19,6 +19,7 @@ import type {
   LayerTracks
 } from '@/types'
 import type { OptimizationConfig, OptimizationStats } from '@/core/optimizer'
+import { getPreset } from '@/core/optimizer'
 import { v4 as uuid } from 'uuid'
 
 interface EditorSnapshot {
@@ -78,6 +79,7 @@ interface EditorStore {
   // UI
   zoom: number
   canvasOffset: { x: number; y: number }
+  previewBackgroundColor: string
   showGrid: boolean
   showOnionSkin: boolean
   rendererMode: 'high-performance' | 'official' | 'pixi'
@@ -154,6 +156,7 @@ interface EditorStore {
   // UI 操作
   setZoom: (zoom: number) => void
   setCanvasOffset: (offset: { x: number; y: number }) => void
+  setPreviewBackgroundColor: (color: string) => void
   toggleGrid: () => void
   toggleOnionSkin: () => void
   setRendererMode: (mode: 'high-performance' | 'official' | 'pixi') => void
@@ -193,28 +196,7 @@ const initialCompression: CompressionConfig = {
   resizePercent: 100
 }
 
-const initialOptimization: OptimizationConfig = {
-  enabled: true,
-  image: {
-    format: 'png',
-    quality: 80,
-    resizeEnabled: false,
-    resizePercent: 100,
-    maxWidth: 0,
-    maxHeight: 0,
-    deduplicate: false  // 暂时关闭去重
-  },
-  frames: {
-    simplify: false,     // 暂时关闭帧精简
-    keyframeThreshold: 0.02,
-    removeInvisible: false,
-    precision: 6         // 保持高精度
-  },
-  compression: {
-    level: 8,
-    useBestCompression: true
-  }
-}
+const initialOptimization: OptimizationConfig = structuredClone(getPreset('balanced')!.config)
 
 const cloneParams = (params: MovieParams | null): MovieParams | null =>
   params ? { ...params } : null
@@ -433,9 +415,10 @@ export const useEditorStore = create<EditorStore>()(
 
     zoom: 1,
     canvasOffset: { x: 0, y: 0 },
+    previewBackgroundColor: 'transparent',
     showGrid: true,
     showOnionSkin: false,
-    rendererMode: 'pixi' as const,
+    rendererMode: 'official' as const,
 
     compressionConfig: initialCompression,
     
@@ -551,18 +534,27 @@ export const useEditorStore = create<EditorStore>()(
 
     setCustomFps: (fps) => {
       withHistory({ customFps: fps, isDirty: true }, 'Update FPS')
-      if (fps) {
-        set({
-          playback: {
-            ...get().playback,
-            fps
-          }
-        })
-      }
+      const state = get()
+      const nextFps = fps ?? state.params?.fps ?? state.playback.fps
+      set({
+        playback: {
+          ...state.playback,
+          fps: nextFps
+        }
+      })
     },
 
     setCustomFrames: (frames) => {
       withHistory({ customFrames: frames, isDirty: true }, 'Update frames')
+      const state = get()
+      const nextFrames = frames ?? state.params?.frames ?? state.playback.totalFrames
+      set({
+        playback: {
+          ...state.playback,
+          totalFrames: nextFrames,
+          currentFrame: Math.min(state.playback.currentFrame, Math.max(0, nextFrames - 1))
+        }
+      })
     },
 
     // 图层操作
@@ -1059,6 +1051,10 @@ export const useEditorStore = create<EditorStore>()(
       set({ canvasOffset: offset })
     },
 
+    setPreviewBackgroundColor: (color) => {
+      set({ previewBackgroundColor: color })
+    },
+
     toggleGrid: () => {
       set((state) => ({ showGrid: !state.showGrid }))
     },
@@ -1082,14 +1078,20 @@ export const useEditorStore = create<EditorStore>()(
     // 优化配置
     setOptimizationConfig: (config) => {
       withHistory((state) => ({
-        optimizationConfig: { ...state.optimizationConfig, ...config },
+        optimizationConfig: { ...state.optimizationConfig, ...config, enabled: config.enabled ?? true },
         selectedPresetId: 'custom',
         isDirty: true
       }), 'Update optimization')
     },
     
     setSelectedPresetId: (id) => {
-      withHistory({ selectedPresetId: id, isDirty: true }, 'Select preset')
+      const preset = getPreset(id)
+      if (!preset) return
+      withHistory((state) => ({
+        selectedPresetId: id,
+        optimizationConfig: id === 'custom' ? { ...state.optimizationConfig, enabled: true } : structuredClone(preset.config),
+        isDirty: true
+      }), 'Select preset')
     },
     
     setOptimizationStats: (stats) => {
@@ -1172,8 +1174,10 @@ export const useEditorStore = create<EditorStore>()(
         selectedKeyframeIds: [],
         zoom: 1,
         canvasOffset: { x: 0, y: 0 },
+        previewBackgroundColor: 'transparent',
         showGrid: true,
         showOnionSkin: false,
+        rendererMode: 'official',
         compressionConfig: initialCompression,
         optimizationConfig: initialOptimization,
         selectedPresetId: 'balanced',

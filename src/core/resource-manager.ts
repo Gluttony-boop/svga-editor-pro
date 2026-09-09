@@ -241,6 +241,25 @@ export class ResourceManager {
   }
 
   /**
+   * 资源 key 重命名时同步内部缓存，避免后续删除时找不到对应 Blob URL。
+   */
+  renameResource(oldKey: string, newKey: string): void {
+    if (oldKey === newKey) return
+
+    const blobUrl = this.blobUrls.get(oldKey)
+    if (blobUrl) {
+      this.blobUrls.delete(oldKey)
+      this.blobUrls.set(newKey, blobUrl)
+    }
+
+    const cachedImage = this.imageCache.get(oldKey)
+    if (cachedImage) {
+      this.imageCache.delete(oldKey)
+      this.imageCache.set(newKey, cachedImage)
+    }
+  }
+
+  /**
    * 缩放图片
    */
   async resizeImage(

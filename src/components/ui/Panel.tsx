@@ -25,12 +25,13 @@ export const Panel: React.FC<PanelProps> = ({
   style
 }) => {
   const [collapsed, setCollapsed] = React.useState(defaultCollapsed)
+  const isCollapsed = collapsible && collapsed
 
   return (
     <div 
       className={cn(
-        'bg-bg-secondary border border-border rounded-lg overflow-hidden flex flex-col',
-        collapsed && 'flex-shrink-0',
+        'ui-panel bg-bg-secondary border border-border rounded-lg overflow-hidden flex flex-col',
+        isCollapsed && 'flex-shrink-0',
         className
       )}
       style={style}
@@ -38,7 +39,7 @@ export const Panel: React.FC<PanelProps> = ({
       {title && (
         <div 
           className={cn(
-            'px-4 py-3 border-b border-border flex items-center justify-between bg-bg-tertiary/50 flex-shrink-0',
+            'ui-panel-header min-h-11 px-3 py-2 border-b border-border flex items-center justify-between bg-bg-secondary flex-shrink-0',
             collapsible && 'cursor-pointer hover:bg-bg-tertiary'
           )}
           onClick={() => collapsible && setCollapsed(!collapsed)}
@@ -49,21 +50,21 @@ export const Panel: React.FC<PanelProps> = ({
             {collapsible && (
               <span className={cn(
                 'transition-transform text-xs',
-                collapsed && '-rotate-90'
+                isCollapsed && '-rotate-90'
               )}>
                 ▼
               </span>
             )}
           </div>
-          {headerAction && !collapsed && (
+          {headerAction && !isCollapsed && (
             <div onClick={(e) => e.stopPropagation()}>
               {headerAction}
             </div>
           )}
         </div>
       )}
-      {!collapsed && (
-        <div className={cn('p-4 overflow-y-auto flex-1', contentClassName)}>
+      {!isCollapsed && (
+        <div className={cn('ui-panel-content p-4 overflow-y-auto flex-1 min-h-0', contentClassName)}>
           {children}
         </div>
       )}

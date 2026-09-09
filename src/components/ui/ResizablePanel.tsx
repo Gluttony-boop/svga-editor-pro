@@ -172,13 +172,15 @@ export const ResizableVerticalPanel: React.FC<ResizableVerticalPanelProps> = ({
  * 面板分割器 - 用于分割两个面板
  */
 export interface PanelSplitterProps {
+  className?: string
   direction?: 'horizontal' | 'vertical'
   onDrag: (delta: number) => void
 }
 
 export const PanelSplitter: React.FC<PanelSplitterProps> = ({
   direction = 'horizontal',
-  onDrag
+  onDrag,
+  className
 }) => {
   const [isDragging, setIsDragging] = useState(false)
   const startPosRef = useRef(0)
@@ -219,7 +221,8 @@ export const PanelSplitter: React.FC<PanelSplitterProps> = ({
         direction === 'horizontal' 
           ? 'w-1 cursor-col-resize hover:bg-accent/30'
           : 'h-1 cursor-row-resize hover:bg-accent/30',
-        isDragging && 'bg-accent/50'
+        isDragging && 'bg-accent/50',
+        className
       )}
       onMouseDown={handleMouseDown}
     >

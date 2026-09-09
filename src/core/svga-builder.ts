@@ -33,6 +33,42 @@ export interface SVGABuildConfig {
   imageSizes?: Map<string, { width: number; height: number }>
 }
 
+function cloneFrame(frame: FrameData): FrameData {
+  if (typeof structuredClone === 'function') {
+    return structuredClone(frame)
+  }
+  return JSON.parse(JSON.stringify(frame)) as FrameData
+}
+
+function createEmptyFrame(): FrameData {
+  return {
+    alpha: 0,
+    layout: null,
+    transform: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 },
+    clipPath: null
+  }
+}
+
+function fitSpriteFrameCount(sprite: Sprite, frameCount: number): Sprite {
+  if (!Number.isFinite(frameCount) || frameCount < 1) return sprite
+
+  const frames = sprite.frames ?? []
+  if (frames.length === frameCount) return sprite
+
+  if (frames.length > frameCount) {
+    return { ...sprite, frames: frames.slice(0, frameCount) }
+  }
+
+  const lastFrame = frames[frames.length - 1] ?? createEmptyFrame()
+  return {
+    ...sprite,
+    frames: [
+      ...frames,
+      ...Array.from({ length: frameCount - frames.length }, () => cloneFrame(lastFrame))
+    ]
+  }
+}
+
 export class SVGABuilder {
   private MovieEntity: any = null
 
@@ -362,7 +398,8 @@ export class SVGABuilder {
       const hasRenamed = Boolean(exportImageKey && exportImageKey !== sprite.imageKey)
 
       if (!hasNewAnimation) {
-        return [hasRenamed ? { ...sprite, imageKey: exportImageKey } : sprite]
+        const nextSprite = hasRenamed ? { ...sprite, imageKey: exportImageKey } : sprite
+        return [fitSpriteFrameCount(nextSprite, config.params.frames)]
       }
 
       // 重新计算帧数据

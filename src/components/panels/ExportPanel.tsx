@@ -1,8 +1,11 @@
 import React from 'react'
 import { Panel, Button, Icon, Slider, Select } from '@/components/ui'
 import { useEditorStore, useCanExport, useCurrentParams } from '@/stores'
-import { ExportEngine, saveGeneratedFile, svgaBuilder, svgaOptimizer, OPTIMIZATION_PRESETS, getPreset } from '@/core'
+import { ExportEngine, saveGeneratedFile, createSaveFileTarget, svgaBuilder, OPTIMIZATION_PRESETS } from '@/core'
+import { captureExportInputs, sameExportInputs, generateExportPreview, type ExportPreviewResult } from '@/core/export-preview'
+import { ExportPreviewDialog } from '@/components/editor/ExportPreviewDialog'
 import { cn } from '@/utils/cn'
+import { SVGAValidator } from '@/utils/svga-validator'
 
 interface ExportPanelProps {
   className?: string
@@ -18,6 +21,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   const slotConfigs = useEditorStore((s) => s.slotConfigs)
   const layers = useEditorStore((s) => s.layers)
   const imageResources = useEditorStore((s) => s.imageResources)
+  useEditorStore((s) => s.audioResources)
   const currentFrame = useEditorStore((s) => s.playback.currentFrame)
   const params = useCurrentParams()
   
@@ -32,6 +36,28 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   const [isExporting, setIsExporting] = React.useState(false)
   const [exportStatus, setExportStatus] = React.useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = React.useState(false)
+  const [showOtherFormats, setShowOtherFormats] = React.useState(false)
+  const [showMoreExports, setShowMoreExports] = React.useState(false)
+  const [preview, setPreview] = React.useState<{ inputs: readonly unknown[]; result: ExportPreviewResult } | null>(null)
+  const [showPreview, setShowPreview] = React.useState(false)
+  const busyRef = React.useRef(false)
+  const mountedRef = React.useRef(true)
+  const previewIsCurrent = !!preview && sameExportInputs(preview.inputs, captureExportInputs(useEditorStore.getState()))
+
+  React.useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  React.useEffect(() => {
+    setPreview(null)
+    setShowPreview(false)
+    setOptimizationStats(null)
+  }, [videoItem, originalBuffer, setOptimizationStats])
+
+  React.useEffect(() => {
+    if (preview && !previewIsCurrent) setOptimizationStats(null)
+  }, [preview, previewIsCurrent, setOptimizationStats])
 
   // 检查是否存在需要重建合并的编辑内容
   const hasNewContent = React.useMemo(() => {
@@ -89,6 +115,8 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
     }
 
     return engine.exportSVGALite(originalBuffer, {
+      viewBoxWidth: params.viewBoxWidth,
+      viewBoxHeight: params.viewBoxHeight,
       fps: params.fps,
       frames: params.frames,
       compression: exportCompression,
@@ -100,81 +128,87 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   // 当预设改变时更新配置
   const handlePresetChange = (presetId: string) => {
     setSelectedPresetId(presetId)
-    const preset = getPreset(presetId)
-    if (preset) {
-      setOptimizationConfig(preset.config)
+  }
+
+  const preparePreview = async () => {
+    const inputs = captureExportInputs(useEditorStore.getState())
+    if (preview && sameExportInputs(preview.inputs, inputs)) return preview
+    if (!params || !originalBuffer) throw new Error('没有原始 SVGA 数据')
+    const result = await generateExportPreview(
+      () => buildSvgaBlob({ ...compressionConfig, enabled: false }),
+      optimizationConfig,
+      originalBuffer.byteLength,
+      params,
+      (phase) => {
+        if (!mountedRef.current || !sameExportInputs(inputs, captureExportInputs(useEditorStore.getState()))) {
+          throw new Error('编辑内容或配置在生成期间发生变化，请重新生成')
+        }
+        setExportStatus(phase)
+      }
+    )
+    setExportStatus('正在校验导出文件结构…')
+    const validation = await new SVGAValidator().validate(await result.optimized.arrayBuffer())
+    const outputParams = validation.info.params
+    if (!validation.isValid || !outputParams || !Object.values(outputParams).every(value => Number.isFinite(value) && value > 0)) {
+      throw new Error(`导出校验失败：${validation.errors.join('；') || '动画参数无效'}`)
+    }
+    result.warnings.push(...validation.warnings)
+    result.stats.warnings = [...new Set([...(result.stats.warnings ?? []), ...validation.warnings])]
+    if (!mountedRef.current || !sameExportInputs(inputs, captureExportInputs(useEditorStore.getState()))) {
+      throw new Error('编辑内容或配置在生成期间发生变化，请重新生成')
+    }
+    const prepared = { inputs, result }
+    setPreview(prepared)
+    setOptimizationStats(result.stats)
+    return prepared
+  }
+
+  const savePreparedPreview = async (prepared: NonNullable<typeof preview>, kind: 'optimized' | 'baseline') => {
+    if (!sameExportInputs(prepared.inputs, captureExportInputs(useEditorStore.getState()))) throw new Error('结果已失效，请重新生成预览')
+    const save = await createSaveFileTarget(kind === 'optimized' ? 'export.svga' : 'export-unoptimized.svga')
+    if (!save) { setExportStatus('已取消保存，预览结果仍可使用'); return }
+    if (!mountedRef.current || !sameExportInputs(prepared.inputs, captureExportInputs(useEditorStore.getState()))) throw new Error('编辑内容或配置已变化，已取消保存旧结果')
+    await save(prepared.result[kind])
+    if (mountedRef.current) setExportStatus('已保存预览中的文件')
+  }
+
+  const runOptimizedAction = async (action: 'preview' | 'save') => {
+    if (!videoItem || busyRef.current) return
+    busyRef.current = true
+    setIsExporting(true)
+    try {
+      const prepared = await preparePreview()
+      if (action === 'preview') {
+        useEditorStore.getState().setPlaying(false)
+        setShowPreview(true)
+        setExportStatus('预览已生成；保存时直接使用同一文件，不会再次压缩')
+      } else {
+        await savePreparedPreview(prepared, 'optimized')
+      }
+    } catch (error) {
+      if (mountedRef.current) setExportStatus(`导出预览/保存失败: ${(error as Error).message}`)
+    } finally {
+      busyRef.current = false
+      if (mountedRef.current) setIsExporting(false)
     }
   }
 
-  // 一键优化导出
-  const handleQuickOptimizeExport = async () => {
-    if (!videoItem || !params) return
-    if (!originalBuffer) {
-      setExportStatus('导出失败: 没有原始 SVGA 数据')
-      return
-    }
-
+  const handleSavePreview = async (kind: 'optimized' | 'baseline') => {
+    if (!preview || busyRef.current) return
+    busyRef.current = true
     setIsExporting(true)
-    setExportStatus('正在导出...')
-    setOptimizationStats(null)
-
     try {
-
-      const baseBlob = await buildSvgaBlob({ ...compressionConfig, enabled: false })
-      const optimizedBlob = await svgaOptimizer.quickOptimize(await baseBlob.arrayBuffer())
-      const stats = svgaOptimizer.getStats()
-
-      const saved = await saveGeneratedFile(optimizedBlob, 'export.svga')
-      if (!saved) {
-        setExportStatus('已取消导出')
-        return
-      }
-
-      setOptimizationStats(stats)
-      setExportStatus(`导出完成!`)
+      await savePreparedPreview(preview, kind)
     } catch (error) {
-      console.error('导出失败:', error)
-      setExportStatus(`导出失败: ${(error as Error).message}`)
+      if (mountedRef.current) setExportStatus(`保存失败: ${(error as Error).message}`)
     } finally {
-      setIsExporting(false)
-    }
-  }
-
-  // 带优化配置的导出
-  const handleOptimizedExport = async () => {
-    if (!videoItem || !params) return
-    if (!originalBuffer) {
-      setExportStatus('导出失败: 没有原始 SVGA 数据')
-      return
-    }
-
-    setIsExporting(true)
-    setExportStatus('正在导出...')
-    setOptimizationStats(null)
-
-    try {
-      const baseBlob = await buildSvgaBlob({ ...compressionConfig, enabled: false })
-      const blob = await svgaOptimizer.optimize(await baseBlob.arrayBuffer(), optimizationConfig)
-      const stats = svgaOptimizer.getStats()
-      
-      const saved = await saveGeneratedFile(blob, 'export.svga')
-      if (!saved) {
-        setExportStatus('已取消导出')
-        return
-      }
-
-      setOptimizationStats(stats)
-      setExportStatus(`导出完成!`)
-    } catch (error) {
-      console.error('导出失败:', error)
-      setExportStatus(`导出失败: ${(error as Error).message}`)
-    } finally {
-      setIsExporting(false)
+      busyRef.current = false
+      if (mountedRef.current) setIsExporting(false)
     }
   }
 
   const handleExport = async (format: 'svga' | 'png-sequence' | 'webp') => {
-    if (!videoItem || !params) return
+    if (!videoItem || !params || busyRef.current) return
     if (format === 'svga' && !originalBuffer) {
       setExportStatus('导出失败: 没有原始数据')
       return
@@ -186,6 +220,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
         ? 'frame.webp'
         : 'export.svga'
 
+    busyRef.current = true
     setIsExporting(true)
     setExportStatus(null)
     
@@ -204,7 +239,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
         case 'svga':
           if (!originalBuffer) throw new Error('没有原始数据')
 
-          blob = await buildSvgaBlob(compressionConfig)
+          blob = await buildSvgaBlob({ ...compressionConfig, enabled: false })
           break
 
         case 'png-sequence':
@@ -240,11 +275,13 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
       console.error('导出失败:', error)
       setExportStatus(`导出失败: ${(error as Error).message}`)
     } finally {
+      busyRef.current = false
       setIsExporting(false)
     }
   }
 
   return (
+    <>
     <Panel
       title="导出"
       icon={<Icon name="export" size={16} />}
@@ -277,20 +314,9 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
           </div>
         )}
 
-        {/* 一键导出按钮 */}
-        <Button
-          variant="primary"
-          className="w-full"
-          disabled={!canExport || isExporting}
-          onClick={handleQuickOptimizeExport}
-        >
-          <Icon name="export" size={16} />
-          {isExporting ? '导出中...' : '导出 SVGA'}
-        </Button>
-
         {/* 优化预设选择 */}
-        <div className="space-y-2">
-          <label className="text-xs text-text-muted">优化预设</label>
+        <div className="space-y-2 rounded-xl border border-border bg-bg-primary/40 p-3">
+          <label className="text-xs font-medium text-text-secondary">压缩方案</label>
           <Select
             value={selectedPresetId}
             onChange={handlePresetChange}
@@ -299,20 +325,46 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
               label: p.name
             }))}
           />
-          {selectedPresetId !== 'none' && selectedPresetId !== 'custom' && (
-            <p className="text-xs text-text-muted">
+          {(
+            <p className="text-xs leading-relaxed text-text-muted">
               {OPTIMIZATION_PRESETS.find(p => p.id === selectedPresetId)?.description}
             </p>
           )}
         </div>
 
+        {/* 主导出按钮 */}
+        <Button
+          variant="primary"
+          size="lg"
+          className="w-full"
+          disabled={!canExport || isExporting}
+          loading={isExporting}
+          onClick={() => runOptimizedAction('save')}
+        >
+          {!isExporting && <Icon name="export" size={18} />}
+          导出 SVGA
+        </Button>
+
+        <Button variant="secondary" className="w-full" disabled={!canExport || isExporting} onClick={() => runOptimizedAction('preview')}>
+          <Icon name="eye-open" size={16} />
+          {previewIsCurrent ? '查看导出预览' : '生成导出预览'}
+        </Button>
+        {preview && !previewIsCurrent && <p className="text-xs text-warning">编辑或配置已变化，请重新生成导出预览。</p>}
+
         {/* 高级配置切换 */}
+        <p className="text-[11px] text-text-muted">主导出使用此配置；未优化副本不压缩素材。预设不改变画布和动画坐标，手动精简帧数据需验证效果。</p>
+        {optimizationConfig.enabled && <p className="text-xs text-text-secondary">当前：{optimizationConfig.image.format === 'webp' ? `WebP ${optimizationConfig.image.quality}%` : (optimizationConfig.image.pngColors ? `PNG ${optimizationConfig.image.pngColors} 色（有损）` : 'PNG 全彩')} · 图片分辨率 {optimizationConfig.image.resizeEnabled ? optimizationConfig.image.resizePercent : 100}%</p>}
+        {!!optimizationStats?.warnings?.length && <div role="status" className="space-y-1 text-xs text-warning">{optimizationStats.warnings.slice(0, 5).map((warning, index) => <p key={index}>{warning}</p>)}</div>}
         <button
-          className="flex items-center gap-1 text-xs text-text-muted hover:text-text-primary w-full"
+          type="button"
+          className="flex w-full items-center justify-between rounded border border-border/70 bg-bg-tertiary px-2 py-2 text-xs text-text-secondary hover:border-border-light hover:text-text-primary"
           onClick={() => setShowAdvanced(!showAdvanced)}
         >
-          <Icon name={showAdvanced ? 'chevron-down' : 'chevron-right'} size={12} />
-          高级配置
+          <span className="flex items-center gap-1.5">
+            <Icon name={showAdvanced ? 'chevron-down' : 'chevron-right'} size={12} />
+            高级配置
+          </span>
+          <span className="text-text-muted">{selectedPresetId === 'custom' ? '自定义' : '可选'}</span>
         </button>
 
         {/* 高级配置面板 */}
@@ -337,8 +389,15 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
                 />
               </div>
 
-              <div className="flex items-center gap-2">
-                <label className="text-xs text-text-muted w-16">质量</label>
+              {optimizationConfig.image.format !== 'webp' && <div className="space-y-1">
+                <label className="text-xs text-text-muted">PNG 色数（不是质量百分比）</label>
+                <Select value={String(optimizationConfig.image.pngColors ?? 0)} onChange={value => setOptimizationConfig({ image: { ...optimizationConfig.image, pngColors: Number(value) as 0 | 64 | 128 | 256 } })} options={[
+                  { value: '0', label: '全彩 · 不量化颜色' }, { value: '256', label: '256 色 · 均衡' }, { value: '128', label: '128 色 · 更小' }, { value: '64', label: '64 色 · 明显有损' }
+                ]} />
+                <p className="text-[10px] text-warning">量化包含透明度，辉光、渐变和边缘可能变化。更小才替换。</p>
+              </div>}
+              {optimizationConfig.image.format !== 'png' && <div className="flex items-center gap-2">
+                <label className="text-xs text-text-muted w-16">WebP 质量</label>
                 <div className="flex-1">
                   <Slider
                     value={optimizationConfig.image.quality}
@@ -351,7 +410,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
                   />
                 </div>
                 <span className="text-xs text-text-muted w-8">{optimizationConfig.image.quality}%</span>
-              </div>
+              </div>}
 
               <div className="flex items-center gap-2">
                 <input
@@ -362,14 +421,14 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
                   })}
                   className="rounded"
                 />
-                <label className="text-xs text-text-muted">启用缩放</label>
+                <label className="text-xs text-text-muted">降低图片分辨率（不缩画布）</label>
                 {optimizationConfig.image.resizeEnabled && (
                   <div className="flex items-center gap-1 ml-2">
                     <input
                       type="number"
                       value={optimizationConfig.image.resizePercent}
                       onChange={(e) => setOptimizationConfig({
-                        image: { ...optimizationConfig.image, resizePercent: parseInt(e.target.value) || 100 }
+                        image: { ...optimizationConfig.image, resizePercent: Math.max(10, Math.min(100, parseInt(e.target.value) || 100)) }
                       })}
                       className="w-14 px-1 py-0.5 text-xs bg-bg-primary border border-border rounded"
                       min={10}
@@ -380,6 +439,12 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
                 )}
               </div>
 
+              {optimizationConfig.image.resizeEnabled && <div className="flex flex-wrap gap-2 text-xs text-text-muted">
+                <label>最大宽 <input aria-label="图片最大宽度" type="number" min={0} max={8192} value={optimizationConfig.image.maxWidth} onChange={e => setOptimizationConfig({image:{...optimizationConfig.image,maxWidth:Math.max(0,Math.min(8192,Number(e.target.value)||0))}})} className="w-16 rounded border border-border bg-bg-primary px-1" /></label>
+                <label>最大高 <input aria-label="图片最大高度" type="number" min={0} max={8192} value={optimizationConfig.image.maxHeight} onChange={e => setOptimizationConfig({image:{...optimizationConfig.image,maxHeight:Math.max(0,Math.min(8192,Number(e.target.value)||0))}})} className="w-16 rounded border border-border bg-bg-primary px-1" /></label>
+                <span>0 为不限；逐张等比缩小。</span>
+              </div>}
+
               <div className="flex items-center gap-2">
                 <input
                   type="checkbox"
@@ -389,13 +454,14 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
                   })}
                   className="rounded"
                 />
-                <label className="text-xs text-text-muted">去重相同图片</label>
+                <label className="text-xs text-text-muted">去重相同图片（会合并 Key，遮罩除外）</label>
               </div>
             </div>
 
             {/* 帧数据优化 */}
             <div className="space-y-2">
               <label className="text-xs font-medium text-text-primary">帧数据优化</label>
+              <p className="text-[10px] text-warning">以下选项可能改变动画细节，所有预设默认关闭精简并保持高精度。</p>
               
               <div className="flex items-center gap-2">
                 <input
@@ -464,35 +530,25 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
           </div>
         )}
 
-        {/* 带配置导出按钮 */}
-        <Button
-          variant="secondary"
-          className="w-full"
-          disabled={!canExport || isExporting}
-          onClick={handleOptimizedExport}
-        >
-          <Icon name="export" size={16} />
-          按配置导出
-        </Button>
-
         {/* 优化统计 */}
         {optimizationStats && (
-          <div className="text-xs bg-success/10 text-success px-2 py-1.5 rounded space-y-1">
+          <div className={cn('text-xs px-2 py-1.5 rounded space-y-1', optimizationStats.reductionPercent >= 0 ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning')}>
             <div className="flex justify-between">
-              <span>原始大小:</span>
-              <span>{(optimizationStats.originalSize / 1024).toFixed(1)} KB</span>
+              <span>当前编辑·未优化:</span>
+              <span>{(optimizationStats.originalSize / 1024).toFixed(1)} KiB</span>
             </div>
             <div className="flex justify-between">
               <span>优化后:</span>
-              <span>{(optimizationStats.optimizedSize / 1024).toFixed(1)} KB</span>
+              <span>{(optimizationStats.optimizedSize / 1024).toFixed(1)} KiB</span>
             </div>
             <div className="flex justify-between font-medium">
-              <span>体积减少:</span>
-              <span>{optimizationStats.reductionPercent}%</span>
+              <span>体积{optimizationStats.reductionPercent >= 0 ? '减少' : '增加'}:</span>
+              <span>{Math.abs(optimizationStats.reductionPercent)}%</span>
             </div>
             <div className="text-text-muted border-t border-border pt-1 mt-1">
               <div>图片优化: {optimizationStats.imagesOptimized} 张</div>
               <div>图片跳过: {optimizationStats.imagesSkipped} 张</div>
+              {(optimizationStats.imagesFailed ?? 0) > 0 && <div className="text-warning">失败并保留原图: {optimizationStats.imagesFailed} 张</div>}
               <div>图片去重: {optimizationStats.imagesDeduplicated} 张</div>
               <div>帧精简: {optimizationStats.framesSimplified}</div>
               <div>处理耗时: {optimizationStats.processingTime}ms</div>
@@ -501,37 +557,68 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
         )}
 
         <div className="border-t border-border pt-3 space-y-2">
-          <p className="text-xs text-text-muted">其他格式</p>
-          
-          <Button
-            variant="secondary"
-            className="w-full"
-            disabled={!canExport || isExporting}
-            onClick={() => handleExport('svga')}
+          <button
+            type="button"
+            className="flex w-full items-center justify-between rounded px-2 py-1.5 text-xs text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+            onClick={() => setShowOtherFormats(!showOtherFormats)}
           >
-            <Icon name="export" size={16} />
-            导出原始 SVGA
-          </Button>
+            <span className="flex items-center gap-1.5">
+              <Icon name={showOtherFormats ? 'chevron-down' : 'chevron-right'} size={12} />
+              其他格式
+            </span>
+            <span className="text-text-muted">PNG / 当前帧</span>
+          </button>
 
-          <Button
-            variant="secondary"
-            className="w-full"
-            disabled={!canExport || isExporting}
-            onClick={() => handleExport('png-sequence')}
-          >
-            <Icon name="image" size={16} />
-            导出 PNG 序列
-          </Button>
+          {showOtherFormats && (
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full"
+                disabled={!canExport || isExporting}
+                onClick={() => handleExport('png-sequence')}
+              >
+                <Icon name="image" size={14} />
+                PNG 序列
+              </Button>
 
-          <Button
-            variant="secondary"
-            className="w-full"
-            disabled={!canExport || isExporting}
-            onClick={() => handleExport('webp')}
+              <Button
+                variant="secondary"
+                size="sm"
+                className="w-full"
+                disabled={!canExport || isExporting}
+                onClick={() => handleExport('webp')}
+              >
+                <Icon name="image" size={14} />
+                当前帧
+              </Button>
+            </div>
+          )}
+
+          <button
+            type="button"
+            className="flex w-full items-center justify-between rounded px-2 py-1.5 text-xs text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+            onClick={() => setShowMoreExports(!showMoreExports)}
           >
-            <Icon name="image" size={16} />
-            导出当前帧
-          </Button>
+            <span className="flex items-center gap-1.5">
+              <Icon name={showMoreExports ? 'chevron-down' : 'chevron-right'} size={12} />
+              更多
+            </span>
+            <span className="text-text-muted">未优化副本</span>
+          </button>
+
+          {showMoreExports && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start"
+              disabled={!canExport || isExporting}
+              onClick={() => handleExport('svga')}
+            >
+              <Icon name="export" size={14} />
+              导出未优化副本
+            </Button>
+          )}
         </div>
       </div>
 
@@ -547,5 +634,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
         </p>
       )}
     </Panel>
+    {showPreview && preview && <ExportPreviewDialog result={preview.result} stale={!previewIsCurrent} saving={isExporting} status={exportStatus} onClose={() => setShowPreview(false)} onSave={handleSavePreview} />}
+    </>
   )
 }

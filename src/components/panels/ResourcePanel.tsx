@@ -1,9 +1,22 @@
 import React from 'react'
-import { Panel, Icon, Button } from '@/components/ui'
+import { Panel, Icon, Button, Modal } from '@/components/ui'
 import { useEditorStore } from '@/stores'
-import { resourceManager } from '@/core'
+import { resourceManager, createSaveFileTarget, saveGeneratedFile } from '@/core'
+import { createResourceArchive, getResourceExtension, getResourceFileName, loadResourceImage } from '@/core/resource-archive'
+import { selectResources, summarizeResources, formatResourceBytes, type ResourceSort } from '@/utils/resource-catalog'
 import type { ImageResource } from '@/types'
 import { cn } from '@/utils/cn'
+import { fitImageToDataUrl, validateReplacementSize, type ImageFitMode } from '@/core/image-fit'
+import { captureReplacementTarget, isReplacementTargetCurrent } from '@/core/replacement-target'
+
+interface ReplacementDraft {
+  key: string
+  url: string
+  width: number
+  height: number
+  mode: ImageFitMode
+  target: ReturnType<typeof captureReplacementTarget>
+}
 
 /**
  * 图片选择信息
@@ -31,7 +44,7 @@ interface ResourcePanelProps {
 }
 
 const RESOURCE_COLUMNS = 2
-const RESOURCE_CARD_HEIGHT = 150
+const RESOURCE_CARD_HEIGHT = 190
 const RESOURCE_OVERSCAN_ROWS = 2
 
 /**
@@ -62,6 +75,45 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   const [renamingKey, setRenamingKey] = React.useState<string | null>(null)
   const [renameValue, setRenameValue] = React.useState('')
   const renameInputRef = React.useRef<HTMLInputElement>(null)
+  const [searchQuery, setSearchQuery] = React.useState('')
+  const [sortOrder, setSortOrder] = React.useState<ResourceSort>('original')
+  const [isExtracting, setIsExtracting] = React.useState(false)
+  const extractingRef = React.useRef(false)
+  const [extractionStatus, setExtractionStatus] = React.useState<string | null>(null)
+  const [pendingReplacement, setPendingReplacement] = React.useState<ReplacementDraft | null>(null)
+  const [replacementPreview, setReplacementPreview] = React.useState<{ draft: ReplacementDraft; dataUrl: string } | null>(null)
+  const [replacementError, setReplacementError] = React.useState<string | null>(null)
+  const mountedRef = React.useRef(true)
+  const selectionIdRef = React.useRef(0)
+  const replacementIsCurrent = !!pendingReplacement && isReplacementTargetCurrent(pendingReplacement.target, useEditorStore.getState())
+  const replacementIsReady = !!pendingReplacement && replacementPreview?.draft === pendingReplacement
+
+  React.useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  React.useEffect(() => {
+    setPendingReplacement(null)
+    selectionIdRef.current++
+  }, [videoItem])
+
+  React.useEffect(() => {
+    const url = pendingReplacement?.url
+    return () => { if (url) URL.revokeObjectURL(url) }
+  }, [pendingReplacement?.url])
+
+  React.useEffect(() => {
+    setReplacementPreview(null)
+    setReplacementError(null)
+    if (!pendingReplacement) return
+    const controller = new AbortController()
+    const draft = pendingReplacement
+    void fitImageToDataUrl(draft.url, draft.width, draft.height, draft.mode, controller.signal)
+      .then(dataUrl => { if (!controller.signal.aborted) setReplacementPreview({ draft, dataUrl }) })
+      .catch(err => { if (!controller.signal.aborted) setReplacementError((err as Error).message) })
+    return () => controller.abort()
+  }, [pendingReplacement])
 
   React.useEffect(() => {
     if (renamingKey && renameInputRef.current) {
@@ -78,6 +130,14 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     }
   }, [videoItem])
 
+  const revokeCachedBufferUrl = React.useCallback((key: string) => {
+    const cachedUrl = objectUrlCacheRef.current.get(key)
+    if (cachedUrl) {
+      URL.revokeObjectURL(cachedUrl)
+      objectUrlCacheRef.current.delete(key)
+    }
+  }, [])
+
   const getCachedBufferUrl = React.useCallback((key: string, buffer: ArrayBuffer, mimeType: string) => {
     const cached = objectUrlCacheRef.current.get(key)
     if (cached) return cached
@@ -87,19 +147,12 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     return url
   }, [])
 
-  React.useEffect(() => {
-    const grid = resourceGridRef.current
-    if (!grid) return
-
-    const updateHeight = () => setResourceViewportHeight(grid.clientHeight)
-    updateHeight()
-    const observer = new ResizeObserver(updateHeight)
-    observer.observe(grid)
-    return () => observer.disconnect()
-  }, [videoItem])
-
   // 合并 SVGA 原始图片和新增图片资源
   const allResources = React.useMemo(() => {
+    const audioKeys = new Set(videoItem?.movie.audios?.map((audio) =>
+      audio.key || ('audioKey' in audio && typeof audio.audioKey === 'string' ? audio.audioKey : '')
+    ).filter(Boolean))
+    const seenKeys = new Set<string>()
     const resources: Array<{
       key: string
       resource?: ImageResource
@@ -114,15 +167,17 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     // 添加 SVGA 原始图片
     if (videoItem?.buffers) {
       Object.entries(videoItem.buffers).forEach(([key, buffer]) => {
+        if (audioKeys.has(key)) return
+        seenKeys.add(key)
         const mimeType = getImageMimeType(buffer)
         const existingResource = imageResources.get(key)
         resources.push({
           key,
           resource: existingResource,
           url: existingResource?.blobUrl,
-          mimeType,
-          width: existingResource?.width,
-          height: existingResource?.height,
+          mimeType: existingResource?.mimeType || mimeType,
+          width: existingResource?.width || videoItem.images?.[key]?.naturalWidth,
+          height: existingResource?.height || videoItem.images?.[key]?.naturalHeight,
           buffer
         })
       })
@@ -131,7 +186,8 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     // 添加新增的图片资源
     imageResources.forEach((resource, key) => {
       // 检查是否已存在（避免重复）
-      if (!resources.find(r => r.key === key)) {
+      if (!seenKeys.has(key) && !audioKeys.has(key)) {
+        seenKeys.add(key)
         resources.push({
           key,
           resource,
@@ -144,8 +200,46 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
       }
     })
 
-    return resources
+    return resources.map((item) => ({
+      ...item,
+      byteSize: item.resource?.data.byteLength || item.buffer?.byteLength || 0
+    }))
   }, [videoItem, imageResources])
+
+  const filteredResources = React.useMemo(
+    () => selectResources(allResources, searchQuery, sortOrder),
+    [allResources, searchQuery, sortOrder]
+  )
+  const resourceStats = React.useMemo(() => summarizeResources(filteredResources), [filteredResources])
+
+  React.useEffect(() => {
+    setSearchQuery('')
+    setSortOrder('original')
+    setExtractionStatus(null)
+  }, [videoItem])
+
+  React.useLayoutEffect(() => {
+    if (resourceGridRef.current) resourceGridRef.current.scrollTop = 0
+    setResourceScrollTop(0)
+  }, [searchQuery, sortOrder, videoItem])
+
+  React.useEffect(() => {
+    const grid = resourceGridRef.current
+    if (!grid) return
+    const updateHeight = () => {
+      setResourceViewportHeight(grid.clientHeight)
+      setResourceScrollTop(grid.scrollTop)
+    }
+    updateHeight()
+    const observer = new ResizeObserver(updateHeight)
+    observer.observe(grid)
+    return () => observer.disconnect()
+  }, [allResources.length])
+
+  React.useLayoutEffect(() => {
+    const grid = resourceGridRef.current
+    if (grid) setResourceScrollTop(grid.scrollTop)
+  }, [filteredResources.length])
 
   // 清理 URL 对象
   React.useEffect(() => {
@@ -159,7 +253,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     }
   }, [allResources])
 
-  const totalResourceItems = allResources.length
+  const totalResourceItems = filteredResources.length
   const resourceRowCount = Math.ceil(totalResourceItems / RESOURCE_COLUMNS)
   const visibleResourceRowStart = Math.max(
     0,
@@ -231,36 +325,81 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     }
   }
 
-  // 导出单张图片
-  const handleExportImage = (key: string, url: string) => {
-    if (!url) {
-      setError('当前图片没有可导出的预览地址')
-      return
+  const loadResourceBlob = async (item: typeof allResources[number]): Promise<Blob> => {
+    const replacement = slotConfigs[item.key]
+    return loadResourceImage({
+      data: item.resource?.data,
+      buffer: item.buffer,
+      mimeType: item.mimeType,
+      replacementUrl: replacement?.type === 'image'
+        ? replacement.imageConfig?.url || String(replacement.value)
+        : undefined
+    })
+  }
+
+  // Extraction preserves original bytes (or the current replacement), never re-encodes images.
+  const handleExtractResources = async () => {
+    if (extractingRef.current || !filteredResources.length) return
+    extractingRef.current = true
+    setIsExtracting(true)
+    setError(null)
+    setExtractionStatus(null)
+    const resources = filteredResources.map((item) => ({ key: item.key, load: () => loadResourceBlob(item) }))
+    try {
+      // Ask for the destination while the click still has browser user activation.
+      const save = await createSaveFileTarget('resources.zip')
+      if (!save) { setExtractionStatus('已取消提取'); return }
+      const blob = await createResourceArchive(resources, (done, total) => setExtractionStatus(`正在提取 ${done} / ${total}`))
+      await save(blob)
+      setExtractionStatus(`已提取 ${resources.length} 张图片（含 Key 对照清单）`)
+    } catch (err) {
+      setExtractionStatus(null)
+      setError((err as Error).message)
+    } finally {
+      extractingRef.current = false
+      setIsExtracting(false)
     }
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${key}.png`
-    a.click()
+  }
+
+  const handleExportImage = async (key: string) => {
+    if (extractingRef.current) return
+    const item = allResources.find((resource) => resource.key === key)
+    if (!item) return
+    extractingRef.current = true
+    setIsExtracting(true)
+    setError(null)
+    try {
+      const blob = await loadResourceBlob(item)
+      if (!blob.size) throw new Error('图片数据为空')
+      const extension = getResourceExtension(new Uint8Array(await blob.arrayBuffer()), blob.type)
+      const saved = await saveGeneratedFile(blob, getResourceFileName(key, extension))
+      setExtractionStatus(saved ? '图片提取完成' : '已取消提取')
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      extractingRef.current = false
+      setIsExtracting(false)
+    }
   }
 
   // 替换图片（插槽功能）
   const handleReplaceImage = (key: string) => {
+    const item = allResources.find((resource) => resource.key === key)
+    try { validateReplacementSize(item?.width ?? 0, item?.height ?? 0) } catch (err) { setError((err as Error).message); return }
+    const target = captureReplacementTarget(useEditorStore.getState(), key)
+    const selectionId = ++selectionIdRef.current
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = 'image/*'
-    input.onchange = async (e) => {
+    input.accept = 'image/png,image/jpeg,image/webp'
+    input.onchange = (e) => {
       const file = (e.target as HTMLInputElement).files?.[0]
       if (file) {
+        if (!mountedRef.current || selectionId !== selectionIdRef.current) return
+        if (!isReplacementTargetCurrent(target, useEditorStore.getState())) { setError('原素材已变化，请重新选择替换目标'); return }
+        if (!file.size || file.size > 32 * 1024 * 1024) { setError('请选择非空且不超过 32 MiB 的图片'); return }
         const url = URL.createObjectURL(file)
-        setSlotConfig(key, {
-          type: 'image',
-          name: key,
-          value: url,
-          imageConfig: {
-            url,
-            scaleMode: 'fit'
-          }
-        })
+        setError(null)
+        setPendingReplacement({ key, url, width: item!.width!, height: item!.height!, mode: 'fit', target })
       }
     }
     input.click()
@@ -271,8 +410,27 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     removeSlotConfig(key)
   }
 
+  const cancelReplacement = () => {
+    setPendingReplacement(null)
+  }
+
+  const confirmReplacement = () => {
+    if (!pendingReplacement || replacementPreview?.draft !== pendingReplacement) return
+    const current = pendingReplacement
+    if (!isReplacementTargetCurrent(current.target, useEditorStore.getState())) { setReplacementError('原素材已变化，请关闭后重新替换'); return }
+    const dataUrl = replacementPreview.dataUrl
+    setSlotConfig(current.key, {
+      type: 'image', name: current.key, value: dataUrl,
+      // Fitting is already baked into the exact preview pixels.
+      imageConfig: { url: dataUrl, scaleMode: 'stretch' }
+    })
+    setExtractionStatus(`已应用替换：${current.key}（${current.mode === 'fit' ? '等比适应' : current.mode === 'fill' ? '裁切填充' : '拉伸'}）`)
+    setPendingReplacement(null)
+  }
+
   // 删除新增的图片资源
   const handleDeleteResource = (key: string) => {
+    revokeCachedBufferUrl(key)
     resourceManager.removeResource(key)
     removeImageResource(key)
   }
@@ -290,6 +448,14 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
       const renamed = renameImageResourceKey(renamingKey, newKey)
       if (!renamed) {
         setError(`无法将资源 Key 修改为 "${newKey}"，请检查是否重名`)
+      } else {
+        const cachedUrl = objectUrlCacheRef.current.get(renamingKey)
+        if (cachedUrl) {
+          objectUrlCacheRef.current.delete(renamingKey)
+          objectUrlCacheRef.current.set(newKey, cachedUrl)
+        }
+
+        resourceManager.renameResource(renamingKey, newKey)
       }
     }
     setRenamingKey(null)
@@ -307,12 +473,24 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   }
 
   return (
+    <>
     <Panel
       title="图片资源"
       icon={<Icon name="image" size={16} />}
       className={className}
-      contentClassName="p-0 overflow-hidden"
+      contentClassName="p-0 overflow-hidden flex flex-col min-h-0"
       headerAction={
+        <div className="flex items-center gap-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleExtractResources}
+          disabled={isExtracting || !filteredResources.length}
+          title="将当前搜索结果中的图片打包为 ZIP，包含当前替换图片"
+        >
+          <Icon name="download" size={14} />
+          {isExtracting ? '提取中' : '提取'}
+        </Button>
         <Button 
           variant="ghost" 
           size="sm" 
@@ -322,6 +500,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
           <Icon name="plus" size={14} />
           添加
         </Button>
+        </div>
       }
     >
       {/* 隐藏的文件输入 */}
@@ -333,6 +512,42 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
         className="hidden"
         onChange={handleFileChange}
       />
+
+      {allResources.length > 0 && (
+        <div className="flex-shrink-0 space-y-1.5 border-b border-border px-2 py-2">
+          <div className="flex gap-1.5">
+            <input
+              type="search"
+              aria-label="搜索图片资源"
+              placeholder="搜索资源 Key"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && ['z', 'y'].includes(e.key.toLowerCase())) e.stopPropagation()
+                if (e.key === 'Escape') { e.stopPropagation(); setSearchQuery('') }
+              }}
+              className="h-7 min-w-0 flex-1 rounded border border-border bg-bg-primary px-2 text-xs focus:border-accent focus:outline-none"
+            />
+            <select
+              aria-label="图片资源排序"
+              value={sortOrder}
+              onChange={(e) => setSortOrder(e.target.value as ResourceSort)}
+              className="h-7 w-[86px] rounded border border-border bg-bg-primary px-1 text-xs focus:border-accent focus:outline-none"
+            >
+              <option value="original">原始顺序</option>
+              <option value="name">名称顺序</option>
+              <option value="size-desc">体积↓</option>
+              <option value="size-asc">体积↑</option>
+            </select>
+          </div>
+          <div className="text-[10px] text-text-muted" title="当前列表的源资源统计，不含插槽替换。体积是编码图片字节之和，不是 SVGA 文件大小；解码估算为宽×高×4，不含帧缓存及 GPU 额外开销。">
+            <div>{filteredResources.length} / {allResources.length} 张 · 源图体积 {formatResourceBytes(resourceStats.encodedBytes)}</div>
+            <div>源图解码估算 {formatResourceBytes(resourceStats.decodedBytes)}{resourceStats.unknownDimensions > 0 && `（${resourceStats.unknownDimensions} 张尺寸未知）`}</div>
+          </div>
+        </div>
+      )}
+
+      {extractionStatus && <p role="status" className="flex-shrink-0 px-2 py-1 text-xs text-text-secondary">{extractionStatus}</p>}
 
       {/* 错误提示 */}
       {error && (
@@ -377,7 +592,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
         <div
           ref={resourceGridRef}
           className={cn(
-            "h-full overflow-y-auto grid grid-cols-2 gap-2 transition-colors rounded-lg p-1",
+            "min-h-0 flex-1 overflow-y-auto grid grid-cols-2 auto-rows-max content-start gap-2 transition-colors rounded-lg p-1",
             dragOver && "bg-accent/10 ring-2 ring-accent ring-dashed"
           )}
           onScroll={(e) => setResourceScrollTop(e.currentTarget.scrollTop)}
@@ -385,13 +600,17 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
-          {Array.from({ length: visibleResourceItemStart }).map((_, index) => (
-            <div key={`resource-before-${index}`} className="h-[142px]" />
-          ))}
-          {allResources.slice(visibleResourceItemStart, visibleResourceItemEnd).map(({ key, resource, url, mimeType, isNew, width, height, buffer }) => {
-            const isReplaced = !!slotConfigs[key]
+          {filteredResources.length === 0 && (
+            <div role="status" className="col-span-2 py-4 text-center text-xs text-text-muted">
+              没有匹配的图片
+              <button type="button" className="ml-2 text-accent hover:underline" onClick={() => setSearchQuery('')}>清除搜索</button>
+            </div>
+          )}
+          {visibleResourceRowStart > 0 && <div className="col-span-2" style={{ height: visibleResourceRowStart * RESOURCE_CARD_HEIGHT - 8 }} />}
+          {filteredResources.slice(visibleResourceItemStart, visibleResourceItemEnd).map(({ key, resource, url, mimeType, isNew, width, height, buffer, byteSize }) => {
+            const isReplaced = slotConfigs[key]?.type === 'image'
             const displayUrl = isReplaced
-              ? (slotConfigs[key].value as string)
+              ? (slotConfigs[key].imageConfig?.url || slotConfigs[key].value as string)
               : url || (buffer ? getCachedBufferUrl(key, buffer, mimeType) : undefined)
             
             // 点击图片卡片创建图层
@@ -410,12 +629,12 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
               <div
                 key={key}
                 className={cn(
-                  "bg-bg-tertiary rounded-lg p-2 hover:bg-border/50 cursor-pointer transition-colors group relative",
+                  "h-[182px] min-w-0 bg-bg-tertiary rounded-lg p-2 hover:bg-border/50 cursor-pointer transition-colors group relative",
                   isNew && "ring-1 ring-accent"
                 )}
                 onClick={handleCardClick}
               >
-                <div className="aspect-square bg-bg-primary rounded overflow-hidden mb-2 relative">
+                <div className="h-[108px] bg-bg-primary rounded overflow-hidden mb-2 relative">
                   <img
                     src={displayUrl}
                     alt={key}
@@ -437,7 +656,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
                   )}
 
                   {/* 悬停操作按钮 */}
-                  <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1">
+                  <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex flex-wrap content-center items-center justify-center gap-1 p-1">
                     <button
                       className="p-1.5 bg-white/20 hover:bg-white/30 rounded text-white"
                       onClick={(e) => {
@@ -470,9 +689,10 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
                     </button>
                     <button
                       className="p-1.5 bg-white/20 hover:bg-white/30 rounded text-white"
+                      disabled={isExtracting}
                       onClick={(e) => {
                         e.stopPropagation()
-                        handleExportImage(key, displayUrl || '')
+                        handleExportImage(key)
                       }}
                       title="导出图片"
                     >
@@ -529,21 +749,20 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
                     {key}
                   </p>
                 )}
-                <p className="text-xs text-text-muted">
+                <p className="truncate text-[10px] text-text-muted">
                   {mimeType.split('/')[1].toUpperCase()}
                   {width && height && ` · ${width}×${height}`}
                 </p>
+                <p className="text-[10px] text-text-muted" title="源图片编码体积，不含插槽替换">源图 {formatResourceBytes(byteSize)}</p>
               </div>
             )
           })}
 
           {/* 添加更多按钮 */}
-          {Array.from({ length: Math.max(0, totalResourceItems - visibleResourceItemEnd) }).map((_, index) => (
-            <div key={`resource-after-${index}`} className="h-[142px]" />
-          ))}
+          {visibleResourceRowEnd < resourceRowCount && <div className="col-span-2" style={{ height: (resourceRowCount - visibleResourceRowEnd) * RESOURCE_CARD_HEIGHT - 8 }} />}
 
           <div
-            className="aspect-square border-2 border-dashed border-border hover:border-accent/50 rounded-lg flex items-center justify-center cursor-pointer transition-colors"
+            className="h-[182px] border-2 border-dashed border-border hover:border-accent/50 rounded-lg flex items-center justify-center cursor-pointer transition-colors"
             onClick={handleAddClick}
           >
             <div className="text-center text-text-muted">
@@ -554,6 +773,32 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
         </div>
       )}
     </Panel>
+      <Modal
+        isolateKeyboard
+        isOpen={Boolean(pendingReplacement)}
+        onClose={cancelReplacement}
+        title="预览素材替换"
+        footer={<>
+          <Button variant="ghost" onClick={cancelReplacement}>取消</Button>
+          <Button variant="primary" disabled={!replacementIsReady || !replacementIsCurrent} onClick={confirmReplacement}>确认替换</Button>
+        </>}
+      >
+        {pendingReplacement && <div className="space-y-3">
+          <p className="text-xs text-text-muted">{pendingReplacement.key} · 目标尺寸 {pendingReplacement.width}×{pendingReplacement.height}</p>
+          {!replacementIsCurrent && <p role="alert" className="text-sm text-warning">原素材或替换配置已变化，不能应用旧预览。请取消后重新操作。</p>}
+          {replacementError && <p role="alert" className="text-sm text-error">{replacementError}</p>}
+          <div className="flex h-56 items-center justify-center overflow-hidden rounded border border-border" style={{ backgroundColor: '#d1d5db', backgroundImage: 'conic-gradient(#f3f4f6 25%, transparent 0 50%, #f3f4f6 0 75%, transparent 0)', backgroundSize: '20px 20px' }}>
+            {replacementIsReady ? <img src={replacementPreview!.dataUrl} alt="替换预览" className="max-h-full max-w-full object-contain ring-1 ring-accent/60" /> : <span role="status" className="text-sm text-gray-700">{replacementError ? '无法生成预览' : '正在生成预览…'}</span>}
+          </div>
+          <div className="grid grid-cols-3 gap-2" role="group" aria-label="图片适配方式">
+            {(['fit', 'fill', 'stretch'] as const).map((mode) => <button key={mode} type="button" aria-pressed={pendingReplacement.mode === mode} onClick={() => setPendingReplacement({ ...pendingReplacement, mode })} className={cn('rounded border px-2 py-2 text-xs', pendingReplacement.mode === mode ? 'border-accent bg-accent/15 text-accent' : 'border-border text-text-secondary hover:border-accent/50')}>
+              {mode === 'fit' ? '等比适应' : mode === 'fill' ? '裁切填充' : '拉伸'}
+            </button>)}
+          </div>
+          <p className="text-xs text-text-muted">等比适应完整显示图片，空白区域保持透明；裁切填充居中铺满；拉伸强制匹配目标比例。确认将应用上方同一张静态 PNG，不改变原素材尺寸或图层动画；动态图片会定格为解码时的一帧。</p>
+        </div>}
+      </Modal>
+    </>
   )
 }
 

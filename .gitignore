@@ -24,3 +24,5 @@ public/debug-*.js
 public/test-*.html
 public/test*.svga
 public/svga-diagnostic.html
+.playwright-cli/
+output/playwright/

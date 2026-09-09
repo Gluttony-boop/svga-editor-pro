@@ -4,6 +4,8 @@ import { useEditorStore } from '@/stores'
 import { HighPerformanceRenderer, OfficialSvgRenderer } from '@/core'
 import type { SVGAPixiRenderer as SVGAPixiRendererType } from '@/rendering/svga-pixi-renderer'
 import { cn } from '@/utils/cn'
+import { calculatePreviewZoom, previewFileName } from '@/utils/preview-view'
+import { formatResourceBytes } from '@/utils/resource-catalog'
 
 interface CanvasPreviewProps {
   className?: string
@@ -11,6 +13,34 @@ interface CanvasPreviewProps {
   usePixiRenderer?: boolean // 是否使用 PixiJS 渲染器
   onOpenFile?: () => void
   onSvgaDrop?: (file: File) => void | Promise<void>
+  immersive?: boolean
+  onToggleImmersive?: () => void
+}
+
+const paintPreviewBackground = (canvas: HTMLCanvasElement | null, backgroundColor: string) => {
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+
+  ctx.save()
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.globalAlpha = 1
+  ctx.globalCompositeOperation = 'destination-over'
+
+  if (backgroundColor === 'transparent') {
+    const size = 20
+    for (let y = 0; y < canvas.height; y += size) {
+      for (let x = 0; x < canvas.width; x += size) {
+        ctx.fillStyle = ((x / size + y / size) % 2 === 0) ? '#ffffff' : '#d1d5db'
+        ctx.fillRect(x, y, size, size)
+      }
+    }
+  } else {
+    ctx.fillStyle = backgroundColor
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+  }
+
+  ctx.restore()
 }
 
 export const CanvasPreview: React.FC<CanvasPreviewProps> = ({ 
@@ -18,18 +48,28 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   enableWorker = true,
   usePixiRenderer = false,
   onOpenFile,
-  onSvgaDrop
+  onSvgaDrop,
+  immersive = false,
+  onToggleImmersive
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const previewToolsRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<HighPerformanceRenderer | OfficialSvgRenderer | SVGAPixiRendererType | null>(null)
   const rendererKindRef = useRef<'high-performance' | 'official' | 'pixi' | null>(null)
   
   // 渲染器模式：从 store 读取，支持用户切换
   const rendererMode = useEditorStore((s) => s.rendererMode || 'high-performance')
   const setRendererMode = useEditorStore((s) => s.setRendererMode)
-  const useOfficialRenderer = rendererMode === 'official'
-  const usePixi = usePixiRenderer || rendererMode === 'pixi'
+  const effectiveRendererMode = rendererMode === 'pixi' ? 'official' : rendererMode
+  const useOfficialRenderer = effectiveRendererMode === 'official'
+  const usePixi = usePixiRenderer
+
+  useEffect(() => {
+    if (rendererMode === 'pixi') {
+      setRendererMode('official')
+    }
+  }, [rendererMode, setRendererMode])
   
   // 拖动状态
   const [isDragging, setIsDragging] = useState(false)
@@ -61,8 +101,30 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   const setZoom = useEditorStore((s) => s.setZoom)
   const canvasOffset = useEditorStore((s) => s.canvasOffset)
   const setCanvasOffset = useEditorStore((s) => s.setCanvasOffset)
+  const previewBackgroundColor = useEditorStore((s) => s.previewBackgroundColor)
+  const setPreviewBackgroundColor = useEditorStore((s) => s.setPreviewBackgroundColor)
   const showGrid = useEditorStore((s) => s.showGrid)
-  
+  const source = useEditorStore((s) => s.currentSource)
+  const originalBytes = useEditorStore((s) => s.originalBuffer?.byteLength ?? 0)
+  const fps = useEditorStore((s) => s.playback.fps)
+  const totalFrames = useEditorStore((s) => s.playback.totalFrames)
+  const savedViewportRef = useRef<{ video: typeof videoItem; zoom: number; offset: { x: number; y: number } } | null>(null)
+  const previewBackgroundColorRef = useRef(previewBackgroundColor)
+
+  useEffect(() => {
+    previewBackgroundColorRef.current = previewBackgroundColor
+    if (rendererRef.current) {
+      const state = useEditorStore.getState()
+      rendererRef.current.renderFrame(state.playback.currentFrame, {
+        slotConfigs: state.slotConfigs,
+        layers: state.layers,
+        applySlots: true,
+        useFrameCache: false
+      })
+    }
+    paintPreviewBackground(canvasRef.current, previewBackgroundColor)
+  }, [previewBackgroundColor])
+
   // 播放循环内部直接读取 store，避免每帧触发 React 更新
   // 手动帧索引 - 使用本地状态，不订阅 store，避免动画时重渲染
   const manualFrameRef = useRef(0)
@@ -84,6 +146,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           layers: state.layers,
           applySlots: true
         })
+        paintPreviewBackground(canvasRef.current, previewBackgroundColorRef.current)
       }
     }
     
@@ -143,6 +206,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
             layers: s.layers,
             applySlots: true
           })
+          paintPreviewBackground(canvasRef.current, previewBackgroundColorRef.current)
           setRendererReady(true)
         }
       } else {
@@ -169,6 +233,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
             layers: state.layers,
             applySlots: true
           })
+          paintPreviewBackground(canvasRef.current, previewBackgroundColorRef.current)
         } finally {
           setRendererReady(true)
         }
@@ -287,6 +352,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
             applySlots: true,
             useFrameCache: false
           })
+          paintPreviewBackground(canvasRef.current, previewBackgroundColorRef.current)
           renderedFrames++
         }
         
@@ -389,15 +455,9 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
     if (!containerRef.current || !params) return
 
     const container = containerRef.current
-    const containerWidth = container.clientWidth - 80
-    const containerHeight = container.clientHeight - 80
-
-    const scaleX = containerWidth / params.viewBoxWidth
-    const scaleY = containerHeight / params.viewBoxHeight
-    const scale = Math.min(scaleX, scaleY) * 0.95
-
-    setZoom(scale)
-    setCanvasOffset({ x: 0, y: 0 })
+    const toolsHeight = previewToolsRef.current?.offsetHeight ?? 48
+    setZoom(calculatePreviewZoom(container.clientWidth, Math.max(1, container.clientHeight - toolsHeight), params.viewBoxWidth, params.viewBoxHeight))
+    setCanvasOffset({ x: 0, y: -toolsHeight / 2 })
   }, [params, setZoom, setCanvasOffset])
 
   // 初始适应
@@ -405,7 +465,47 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
     fitToContainer()
   }, [fitToContainer])
 
+  useEffect(() => {
+    if (immersive && videoItem) {
+      if (!savedViewportRef.current || savedViewportRef.current.video !== videoItem) {
+        const state = useEditorStore.getState()
+        savedViewportRef.current = { video: videoItem, zoom: state.zoom, offset: { ...state.canvasOffset } }
+      }
+      fitToContainer()
+      // Refit when the window size changes, without resetting the playhead or renderer.
+      const observer = new ResizeObserver(fitToContainer)
+      if (containerRef.current) observer.observe(containerRef.current)
+      return () => observer.disconnect()
+    }
+    const saved = savedViewportRef.current
+    if (saved?.video === videoItem) {
+      setZoom(saved.zoom)
+      setCanvasOffset(saved.offset)
+    }
+    savedViewportRef.current = null
+  }, [immersive, videoItem, fitToContainer, setZoom, setCanvasOffset])
+
   // 计算画布样式
+  const colorInputValue = previewBackgroundColor === 'transparent' ? '#000000' : previewBackgroundColor
+
+  const previewBackgroundStyle = useMemo(() => {
+    const transparentPreview = previewBackgroundColor === 'transparent'
+
+    return {
+      backgroundColor: transparentPreview ? '#ffffff' : previewBackgroundColor,
+      backgroundImage: transparentPreview
+        ? `
+          linear-gradient(45deg, #d1d5db 25%, transparent 25%),
+          linear-gradient(-45deg, #d1d5db 25%, transparent 25%),
+          linear-gradient(45deg, transparent 75%, #d1d5db 75%),
+          linear-gradient(-45deg, transparent 75%, #d1d5db 75%)
+        `
+        : undefined,
+      backgroundSize: transparentPreview ? '20px 20px' : undefined,
+      backgroundPosition: transparentPreview ? '0 0, 0 10px, 10px -10px, -10px 0px' : undefined
+    }
+  }, [previewBackgroundColor])
+
   const canvasContainerStyle = useMemo(() => {
     if (!params) return {}
     
@@ -415,10 +515,11 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
       top: '50%',
       width: params.viewBoxWidth,
       height: params.viewBoxHeight,
+      ...previewBackgroundStyle,
       transform: `translate(-50%, -50%) translate(${canvasOffset.x}px, ${canvasOffset.y}px) scale(${zoom})`,
       transformOrigin: 'center center'
     }
-  }, [params, zoom, canvasOffset])
+  }, [params, zoom, canvasOffset, previewBackgroundStyle])
   
   // canvas 元素样式
   const canvasStyle = useMemo(() => {
@@ -427,9 +528,10 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
     return {
       width: params.viewBoxWidth,
       height: params.viewBoxHeight,
-      display: 'block'
+      display: 'block',
+      ...previewBackgroundStyle
     }
-  }, [params])
+  }, [params, previewBackgroundStyle])
 
   // 鼠标拖动开始
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -466,7 +568,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
     <div 
       ref={containerRef}
       className={cn(
-        'relative flex-1 bg-bg-tertiary overflow-hidden',
+        'relative flex-1 bg-bg-primary overflow-hidden',
         isDragging && 'cursor-grabbing',
         className
       )}
@@ -477,7 +579,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
       onWheel={handleWheel}
     >
       {/* 网格背景 */}
-      {showGrid && (
+      {showGrid && !immersive && (
         <div
           className="absolute inset-0 opacity-10 pointer-events-none"
           style={{
@@ -493,7 +595,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
       {/* 画布容器 */}
       {videoItem && params ? (
         <div 
-          className="relative bg-white rounded shadow-2xl overflow-hidden"
+          className="relative rounded shadow-2xl overflow-hidden"
           style={canvasContainerStyle}
         >
           {usePixi ? (
@@ -506,7 +608,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           )}
         </div>
       ) : (
-        <DropZone onOpenFile={onOpenFile} onSvgaDrop={onSvgaDrop} />
+        <div className="absolute inset-0 flex items-center justify-center p-6"><DropZone onOpenFile={onOpenFile} onSvgaDrop={onSvgaDrop} /></div>
       )}
 
       {pixiLoading && (
@@ -515,8 +617,19 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
         </div>
       )}
 
+      {immersive && params && (
+        <div className="absolute left-4 right-4 top-4 z-10 flex items-start justify-between gap-4" onMouseDown={e => e.stopPropagation()}>
+          <div className="min-w-0 rounded-lg bg-bg-secondary/90 px-3 py-2 text-xs backdrop-blur">
+            <p className="truncate text-sm text-text-primary" title={previewFileName(source)}>{previewFileName(source)}</p>
+            <p className="mt-1 text-text-muted">{params.viewBoxWidth} × {params.viewBoxHeight} · {fps} FPS · {totalFrames} 帧 · {fps > 0 ? (totalFrames / fps).toFixed(2) : '—'} 秒 · 源文件 {formatResourceBytes(originalBytes)}</p>
+          </div>
+          <Button className="flex-shrink-0" onClick={onToggleImmersive} title="退出沉浸预览（Esc / F9）">退出沉浸预览</Button>
+        </div>
+      )}
+      {!immersive && videoItem && params && <div className="pointer-events-none absolute left-4 top-3 flex items-center gap-2 text-xs text-text-muted"><span className="font-medium text-text-secondary">画布预览</span><span className="text-border-light">/</span><span>{params.viewBoxWidth} × {params.viewBoxHeight}</span></div>}
+
       {/* 缩放控制 */}
-      <div className="absolute bottom-4 right-4 flex items-center gap-2 bg-bg-secondary/90 backdrop-blur rounded-lg p-2">
+      <div ref={previewToolsRef} aria-label="画布工具" className="absolute bottom-4 right-4 flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-end gap-2 bg-bg-secondary/90 backdrop-blur rounded-lg border border-border/60 p-2" onMouseDown={e => e.stopPropagation()}>
         <Button 
           variant="ghost" 
           size="sm"
@@ -535,13 +648,63 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           <Icon name="plus" size={16} />
         </Button>
         <div className="w-px h-4 bg-border mx-1" />
+        <label
+          className="relative grid h-8 w-8 cursor-pointer place-items-center rounded hover:bg-white/10"
+          title="预览背景色"
+        >
+          <span
+            className={cn(
+              'h-4 w-4 rounded border border-white/40 shadow-inner',
+              previewBackgroundColor === 'transparent' &&
+                'bg-[linear-gradient(45deg,#9ca3af_25%,transparent_25%),linear-gradient(-45deg,#9ca3af_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#9ca3af_75%),linear-gradient(-45deg,transparent_75%,#9ca3af_75%)] bg-[length:8px_8px] bg-[position:0_0,0_4px,4px_-4px,-4px_0px]'
+            )}
+            style={{ backgroundColor: previewBackgroundColor === 'transparent' ? '#ffffff' : previewBackgroundColor }}
+          />
+          <input
+            type="color"
+            value={colorInputValue}
+            onChange={(e) => setPreviewBackgroundColor(e.target.value)}
+            className="absolute inset-0 cursor-pointer opacity-0"
+            aria-label="预览背景色"
+          />
+        </label>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            className={cn(
+              'h-4 w-4 rounded-full border border-white/50 bg-[linear-gradient(45deg,#9ca3af_25%,transparent_25%),linear-gradient(-45deg,#9ca3af_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#9ca3af_75%),linear-gradient(-45deg,transparent_75%,#9ca3af_75%)] bg-white bg-[length:8px_8px] bg-[position:0_0,0_4px,4px_-4px,-4px_0px] transition-transform hover:scale-110',
+              previewBackgroundColor === 'transparent' && 'ring-1 ring-accent ring-offset-1 ring-offset-bg-secondary'
+            )}
+            onClick={() => setPreviewBackgroundColor('transparent')}
+            title="背景透明"
+            aria-label="背景透明"
+          />
+          {['#000000', '#ffffff', '#cfe8ff', '#1e293b'].map((color) => (
+            <button
+              key={color}
+              type="button"
+              className={cn(
+                'h-4 w-4 rounded-full border transition-transform hover:scale-110',
+                previewBackgroundColor.toLowerCase() === color && 'ring-1 ring-accent ring-offset-1 ring-offset-bg-secondary'
+              )}
+              style={{ backgroundColor: color, borderColor: color === '#ffffff' ? '#94a3b8' : color }}
+              onClick={() => setPreviewBackgroundColor(color)}
+              title={`背景色 ${color}`}
+              aria-label={`背景色 ${color}`}
+            />
+          ))}
+        </div>
+        <div className="w-px h-4 bg-border mx-1" />
         <Button 
           variant="ghost" 
           size="sm"
           onClick={fitToContainer}
+          title="适应画布"
         >
           <Icon name="fit" size={16} />
         </Button>
+        <Button variant="ghost" size="sm" onClick={() => { setZoom(1); setCanvasOffset({ x: 0, y: 0 }) }} title="原始尺寸（100%）" disabled={!videoItem}>1:1</Button>
+        {!immersive && onToggleImmersive && <Button variant="ghost" size="sm" onClick={onToggleImmersive} disabled={!videoItem} title="沉浸预览（F9）" aria-label="沉浸预览"><Icon name="fullscreen" size={16} /></Button>}
         <div className="w-px h-4 bg-border mx-1" />
         <Button 
           variant="ghost" 
@@ -556,22 +719,16 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           variant="ghost" 
           size="sm"
           aria-label={
-            usePixi ? '当前：WebGL 极速渲染器（点击切换为官方兼容）' :
             useOfficialRenderer ? '当前：官方兼容渲染器（点击切换为 Canvas 高性能）' :
-            '当前：Canvas 高性能渲染器（点击切换为 WebGL 极速）'
+            '当前：Canvas 高性能渲染器（点击切换为官方兼容）'
           }
           onClick={() => {
-            const nextMode = rendererMode === 'pixi'
-              ? 'official'
-              : rendererMode === 'official'
-                ? 'high-performance'
-                : 'pixi'
+            const nextMode = effectiveRendererMode === 'official' ? 'high-performance' : 'official'
             setRendererMode(nextMode)
           }}
           title={
-            usePixi ? '当前：WebGL 极速渲染器（点击切换为 Canvas 高性能）' :
-            useOfficialRenderer ? '当前：官方渲染器（点击切换为 WebGL 极速）' :
-            '当前：Canvas 高性能渲染器（点击切换为官方）'
+            useOfficialRenderer ? '当前：官方兼容渲染器（点击切换为 Canvas 高性能）' :
+            '当前：Canvas 高性能渲染器（点击切换为官方兼容）'
           }
         >
           <Icon name={useOfficialRenderer ? 'layers' : 'zap'} size={16} />
@@ -653,7 +810,7 @@ const DropZone: React.FC<{
   return (
     <div
       className={cn(
-        'border-2 border-dashed rounded-xl p-12 transition-colors cursor-pointer',
+        'w-full max-w-sm border border-dashed rounded-2xl px-6 py-10 transition-colors cursor-pointer bg-bg-secondary/40',
         isDragOver 
           ? 'border-accent bg-accent/10' 
           : 'border-border hover:border-accent/50'
@@ -662,6 +819,10 @@ const DropZone: React.FC<{
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       onClick={onOpenFile}
+      role="button"
+      tabIndex={0}
+      aria-label="选择 SVGA 文件"
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onOpenFile?.() } }}
     >
       <div className="text-center">
         <Icon 
@@ -672,12 +833,15 @@ const DropZone: React.FC<{
             isDragOver ? 'text-accent' : 'text-text-muted'
           )} 
         />
-        <p className="text-text-primary mb-2">
-          拖拽 SVGA 文件到此处
+        <p className="text-lg font-medium text-text-primary mb-2">
+          开始编辑你的动画
         </p>
         <p className="text-text-muted text-sm">
-          或使用菜单 打开文件 / 打开 URL
+          拖入 SVGA 文件，或点击选择
         </p>
+        <div className="mt-6 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-[#21131a]"><Icon name="folder-open" size={16} />选择 SVGA 文件</div>
+        <p className="mt-5 text-xs text-text-muted">图层编辑 · 素材替换 · 压缩导出</p>
+        <p className="mt-2 text-xs text-text-muted">也可以按 <kbd className="rounded border border-border px-1 py-0.5 font-mono">Ctrl+O</kbd> 打开文件</p>
       </div>
     </div>
   )

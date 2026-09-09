@@ -201,6 +201,7 @@ export class CanvasRenderer {
     
     imageResources.forEach((resource, key) => {
       if (!this.newImageCache.has(key)) {
+        const shouldRevokeUrl = !resource.blobUrl
         const url = resource.blobUrl || URL.createObjectURL(new Blob([resource.data.buffer as ArrayBuffer]))
         loadPromises.push(
           loadImage(url)
@@ -209,6 +210,11 @@ export class CanvasRenderer {
             })
             .catch(err => {
               console.warn('[Renderer] Failed to preload new image:', key, err)
+            })
+            .finally(() => {
+              if (shouldRevokeUrl) {
+                URL.revokeObjectURL(url)
+              }
             })
         )
       }

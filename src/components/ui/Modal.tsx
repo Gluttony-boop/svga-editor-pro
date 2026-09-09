@@ -8,6 +8,7 @@ export interface ModalProps {
   children: React.ReactNode
   footer?: React.ReactNode
   className?: string
+  isolateKeyboard?: boolean
 }
 
 export const Modal: React.FC<ModalProps> = ({
@@ -16,11 +17,19 @@ export const Modal: React.FC<ModalProps> = ({
   title,
   children,
   footer,
-  className
+  className,
+  isolateKeyboard = false
 }) => {
+  const dialogRef = React.useRef<HTMLDivElement>(null)
+  React.useEffect(() => {
+    if (!isOpen || !isolateKeyboard) return
+    const previous = document.activeElement as HTMLElement | null
+    dialogRef.current?.focus()
+    return () => { if (previous?.isConnected) previous.focus() }
+  }, [isOpen, isolateKeyboard])
   React.useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') { e.stopPropagation(); onClose() }
     }
     
     if (isOpen) {
@@ -42,12 +51,29 @@ export const Modal: React.FC<ModalProps> = ({
       onClick={onClose}
     >
       <div 
+        ref={dialogRef}
+        tabIndex={isolateKeyboard ? -1 : undefined}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
         className={cn(
           'bg-bg-secondary border border-border rounded-xl shadow-2xl',
           'max-w-lg w-full animate-fade-in',
           className
         )}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (!isolateKeyboard || e.key === 'Escape') return
+          e.stopPropagation()
+          if ((e.ctrlKey || e.metaKey) && ['s', 'o', 'e', 'z', 'y'].includes(e.key.toLowerCase())) e.preventDefault()
+          if (e.key === 'Tab') {
+            const elements = dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]')
+            if (!elements?.length) return
+            const first = elements[0], last = elements[elements.length - 1]
+            if (e.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) { e.preventDefault(); last.focus() }
+            if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+          }
+        }}
       >
         {title && (
           <div className="px-6 py-4 border-b border-border flex items-center justify-between">

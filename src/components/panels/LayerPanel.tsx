@@ -4,6 +4,7 @@ import { useEditorStore } from '@/stores'
 import { LayerUtils } from '@/core'
 import type { AnimationPreset, ImageResource, Layer, VideoItem } from '@/types'
 import { cn } from '@/utils/cn'
+import { filterLayers, type LayerFilter } from '@/utils/layer-filter'
 
 const getLayerThumbnail = (
   layer: Layer,
@@ -194,6 +195,44 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   const [scrollTop, setScrollTop] = React.useState(0)
   const [viewportHeight, setViewportHeight] = React.useState(0)
   const [pendingDeleteLayerId, setPendingDeleteLayerId] = React.useState<string | null>(null)
+  const [searchQuery, setSearchQuery] = React.useState('')
+  const [statusFilter, setStatusFilter] = React.useState<LayerFilter>('all')
+  const [revealLayerId, setRevealLayerId] = React.useState<string | null>(null)
+  const filteredLayers = React.useMemo(
+    () => filterLayers(layers, searchQuery, statusFilter),
+    [layers, searchQuery, statusFilter]
+  )
+  const isFiltered = searchQuery.trim().length > 0 || statusFilter !== 'all'
+
+  React.useEffect(() => {
+    setSearchQuery('')
+    setStatusFilter('all')
+    setRevealLayerId(null)
+  }, [videoItem])
+
+  React.useLayoutEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = 0
+    setScrollTop(0)
+    setDraggedIndex(null)
+    setShowActionMenu(null)
+    setShowAnimationMenu(null)
+  }, [searchQuery, statusFilter, videoItem])
+
+  React.useLayoutEffect(() => {
+    const list = listRef.current
+    if (!list) return
+    // Clamp after deleting/filtering rows at the end of a virtualized list.
+    const maxScroll = Math.max(0, filteredLayers.length * LAYER_ROW_HEIGHT + 16 - list.clientHeight)
+    if (list.scrollTop > maxScroll) list.scrollTop = maxScroll
+    if (revealLayerId) {
+      const index = filteredLayers.findIndex(({ layer }) => layer.id === revealLayerId)
+      if (index >= 0) {
+        list.scrollTop = Math.max(0, index * LAYER_ROW_HEIGHT + 8 - (list.clientHeight - LAYER_ROW_HEIGHT) / 2)
+      }
+      setRevealLayerId(null)
+    }
+    setScrollTop(list.scrollTop)
+  }, [filteredLayers, revealLayerId, viewportHeight])
 
   React.useEffect(() => {
     const handleFrameUpdate = (e: CustomEvent<{ frameIndex: number }>) => {
@@ -230,10 +269,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
     Math.floor(scrollTop / LAYER_ROW_HEIGHT) - LAYER_OVERSCAN
   )
   const visibleEnd = Math.min(
-    layers.length,
+    filteredLayers.length,
     Math.ceil((scrollTop + Math.max(viewportHeight, LAYER_ROW_HEIGHT)) / LAYER_ROW_HEIGHT) + LAYER_OVERSCAN
   )
-  const visibleLayers = layers.slice(visibleStart, visibleEnd)
+  const visibleLayers = filteredLayers.slice(visibleStart, visibleEnd)
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId)
   const pendingDeleteLayer = layers.find((layer) => layer.id === pendingDeleteLayerId)
   const renamedCount = layers.filter((layer) => {
@@ -305,7 +344,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
 
   const handleDrop = (e: React.DragEvent, index: number) => {
     e.preventDefault()
-    if (draggedIndex !== null && draggedIndex !== index) {
+    if (!isFiltered && draggedIndex !== null && draggedIndex !== index) {
       reorderLayers(draggedIndex, index)
     }
     setDraggedIndex(null)
@@ -333,11 +372,41 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
                 已改名 {renamedCount}
               </span>
             )}
-            <span>{layers.length} 层</span>
+            <span>{isFiltered ? `${filteredLayers.length} / ${layers.length}` : layers.length} 层</span>
           </div>
         }
       >
         <div className="flex h-full min-h-0 flex-col">
+          <div className="flex flex-shrink-0 items-center gap-1.5 border-b border-border/70 px-2 py-2">
+            <input
+              type="search"
+              aria-label="搜索图层名称或资源名"
+              placeholder="搜索名称 / 资源名"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                // Preserve native text undo inside the search field.
+                if ((e.ctrlKey || e.metaKey) && ['z', 'y'].includes(e.key.toLowerCase())) e.stopPropagation()
+                if (e.key === 'Escape') {
+                  e.stopPropagation()
+                  setSearchQuery('')
+                }
+              }}
+              className="h-7 min-w-0 flex-1 rounded border border-border bg-bg-primary px-2 text-xs text-text-primary placeholder-text-muted focus:border-accent focus:outline-none"
+            />
+            <select
+              aria-label="筛选图层状态"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as LayerFilter)}
+              className="h-7 w-[72px] flex-shrink-0 rounded border border-border bg-bg-primary px-1 text-xs text-text-secondary focus:border-accent focus:outline-none"
+            >
+              <option value="all">全部</option>
+              <option value="visible">已显示</option>
+              <option value="hidden">已隐藏</option>
+              <option value="locked">已锁定</option>
+              <option value="unlocked">未锁定</option>
+            </select>
+          </div>
           <div className="flex h-10 flex-shrink-0 items-center justify-between border-b border-border/70 px-3 text-xs">
             <div className="min-w-0 text-text-muted">
               {selectedLayer ? (
@@ -348,10 +417,36 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
                 <span>未选择图层</span>
               )}
             </div>
-            <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
+            <div className="flex flex-shrink-0 items-center gap-1.5 text-[10px] text-text-muted">
+              <button
+                type="button"
+                disabled={!selectedLayer}
+                title="清除筛选并定位当前选中图层"
+                className="rounded px-1 py-1 text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={() => {
+                  setSearchQuery('')
+                  setStatusFilter('all')
+                  setRevealLayerId(selectedLayerId)
+                }}
+              >
+                定位
+              </button>
               <span>帧 {currentFrame + 1}</span>
             </div>
           </div>
+
+          {isFiltered && (
+            <div className="flex flex-shrink-0 items-center justify-between px-3 py-1 text-[10px] text-text-muted">
+              <span>筛选中，拖拽排序已暂停</span>
+              <button
+                type="button"
+                className="text-accent hover:underline"
+                onClick={() => { setSearchQuery(''); setStatusFilter('all') }}
+              >
+                清除筛选
+              </button>
+            </div>
+          )}
 
           <div
             ref={listRef}
@@ -366,13 +461,17 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
                 <p className="text-text-secondary">打开 SVGA 文件或添加图片</p>
                 <p className="mt-1 text-xs">图层会显示在这里</p>
               </div>
+            ) : filteredLayers.length === 0 ? (
+              <div className="flex h-full min-h-[72px] items-center justify-center px-3 text-center text-xs text-text-muted" role="status">
+                没有匹配的图层，请调整搜索或筛选条件
+              </div>
             ) : (
               <div
                 className="relative"
-                style={{ height: layers.length * LAYER_ROW_HEIGHT }}
+                style={{ height: filteredLayers.length * LAYER_ROW_HEIGHT }}
               >
-                {visibleLayers.map((layer, offset) => {
-                  const index = visibleStart + offset
+                {visibleLayers.map(({ layer, index }, offset) => {
+                  const displayIndex = visibleStart + offset
                   const { inRange, hasAnimation } = getLayerStatus(layer)
                   const thumbnailUrl = getLayerThumbnail(
                     layer,
@@ -385,11 +484,12 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
                     <div
                       key={layer.id}
                       className="absolute left-0 right-0 px-0.5 py-1"
-                      style={{ top: index * LAYER_ROW_HEIGHT, height: LAYER_ROW_HEIGHT }}
+                      style={{ top: displayIndex * LAYER_ROW_HEIGHT, height: LAYER_ROW_HEIGHT }}
                     >
                       <LayerItem
                         layer={layer}
                         index={index}
+                        canReorder={!isFiltered}
                         selected={selectedLayerId === layer.id}
                         inRange={inRange}
                         hasAnimation={hasAnimation}
@@ -463,6 +563,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
 interface LayerItemProps {
   layer: Layer
   index: number
+  canReorder: boolean
   selected: boolean
   inRange: boolean
   hasAnimation: boolean
@@ -496,6 +597,7 @@ interface LayerItemProps {
 const LayerItem: React.FC<LayerItemProps> = ({
   layer,
   index,
+  canReorder,
   selected,
   inRange,
   hasAnimation,
@@ -548,27 +650,27 @@ const LayerItem: React.FC<LayerItemProps> = ({
       className={cn(
         'group relative h-full rounded border transition-all',
         selected
-          ? 'border-accent/60 bg-accent/15 shadow-[inset_3px_0_0_rgba(233,69,96,0.9)]'
+          ? 'border-accent/50 bg-accent/10 shadow-[inset_2px_0_0_var(--color-accent)]'
           : 'border-border/40 bg-bg-secondary hover:border-border-light hover:bg-bg-tertiary/70',
         !inRange && 'opacity-60',
         isDragging && 'opacity-30'
       )}
       onClick={onClick}
-      draggable={!isEditing}
+      draggable={!isEditing && canReorder}
       onDragStart={handleDragStart}
       onDragOver={onDragOver}
       onDrop={onDrop}
       onDragEnd={onDragEnd}
     >
-      <div className="flex h-full items-center gap-2 px-2">
+      <div className="flex h-full items-center gap-1.5 px-2">
         <div
-          className="grid h-10 w-4 flex-shrink-0 cursor-grab place-items-center text-text-muted transition-colors group-hover:text-text-secondary"
-          title="拖拽排序"
+          className={cn('grid h-10 w-3 flex-shrink-0 place-items-center text-text-muted transition-colors', canReorder ? 'cursor-grab group-hover:text-text-secondary' : 'opacity-30')}
+          title={canReorder ? '拖拽排序' : '清除筛选后可拖拽排序'}
         >
           <Icon name="grip-vertical" size={14} />
         </div>
 
-        <div className="relative grid h-11 w-11 flex-shrink-0 place-items-center overflow-hidden rounded border border-border bg-bg-tertiary">
+        <div className="relative grid h-9 w-9 flex-shrink-0 place-items-center overflow-hidden rounded-md border border-border bg-bg-primary">
           {thumbnailUrl ? (
             <img
               src={thumbnailUrl}
@@ -627,7 +729,7 @@ const LayerItem: React.FC<LayerItemProps> = ({
             )}
           </div>
 
-          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-text-muted">
+          <div className="mt-1 flex min-w-0 items-center gap-1 text-[10px] text-text-muted overflow-hidden whitespace-nowrap">
             <span className="rounded bg-bg-primary px-1.5 py-0.5 font-mono uppercase">
               {String(index + 1).padStart(2, '0')}
             </span>
@@ -639,7 +741,7 @@ const LayerItem: React.FC<LayerItemProps> = ({
           </div>
         </div>
 
-        <div className="flex w-[92px] flex-shrink-0 items-center justify-end gap-1">
+        <div className="flex w-[72px] flex-shrink-0 items-center justify-end">
           <IconButton
             title={layer.visible ? '隐藏' : '显示'}
             active={layer.visible}
@@ -813,7 +915,7 @@ const IconButton: React.FC<IconButtonProps> = ({
       type="button"
       title={title}
       className={cn(
-        'grid h-7 w-7 place-items-center rounded transition-colors',
+        'grid h-7 w-6 place-items-center rounded transition-colors',
         active ? 'bg-white/5' : 'hover:bg-white/10',
         danger ? 'hover:bg-error/15' : 'hover:text-text-primary'
       )}

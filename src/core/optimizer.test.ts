@@ -5,7 +5,8 @@ describe('optimization presets', () => {
   it('exposes the default balanced preset', () => {
     const preset = getPreset('balanced')
 
-    expect(preset?.name).toBe('均衡优化')
+    expect(preset?.name).toBe('均衡 PNG · 256 色')
+    expect(preset?.config.image.pngColors).toBe(256)
     expect(preset?.config.enabled).toBe(true)
     expect(preset?.config.image.format).toBe('png')
   })

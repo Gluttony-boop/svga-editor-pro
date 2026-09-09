@@ -4,17 +4,36 @@
 
 /* 自定义样式 */
 :root {
-  --color-bg-primary: #1a1a2e;
-  --color-bg-secondary: #16213e;
-  --color-accent: #e94560;
-  --color-text-primary: #ffffff;
-  --color-text-secondary: #a0a0a0;
+  color-scheme: dark;
+  --color-bg-primary: #101419;
+  --color-bg-secondary: #1a2028;
+  --color-accent: #f08095;
+  --color-text-primary: #e9edf4;
+  --color-text-secondary: #b6c0ce;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input, select, textarea { font: inherit; }
+button { touch-action: manipulation; }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+::selection { background: #f0809540; color: #fff; }
+.editor-shell .bg-accent.text-white { color: #21131a; }
+.inspector-view > .ui-panel > .ui-panel-header { display: none; }
+.inspector-view > .ui-panel > .ui-panel-content { padding: 18px 16px; }
+.inspector-tabs { scrollbar-width: none; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
 
 /* 滚动条样式 */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -22,12 +41,12 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3d3d5c;
+  background: #3d4959;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #4d4d6c;
+  background: #56667c;
 }
 
 /* 按钮基础样式 */
@@ -128,7 +147,7 @@ input[type="range"] {
 
 input[type="range"]::-webkit-slider-thumb {
   @apply appearance-none w-3 h-3 bg-accent rounded-full cursor-pointer;
-  box-shadow: 0 0 10px rgba(233, 69, 96, 0.5);
+  box-shadow: 0 0 0 3px rgba(240, 128, 149, 0.12);
 }
 
 /* 动画 */
