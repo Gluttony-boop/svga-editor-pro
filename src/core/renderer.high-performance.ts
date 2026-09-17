@@ -937,6 +937,7 @@ export class HighPerformanceRenderer {
         layer.clip.duration,
         getLayerTimeOffset(layer),
         JSON.stringify(layer.canvasTransform || null),
+        JSON.stringify(layer.animationTracks || null),
         JSON.stringify(layer.tracks)
       ].join(':'))
       .join('|')

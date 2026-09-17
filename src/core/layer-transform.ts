@@ -1,6 +1,7 @@
 import type { CanvasTransform, FrameData, Layer, Transform, VideoItem } from '@/types'
 import { AnimationEngine } from './animation-engine'
 import { getLayerSourceFrame } from './layer-time'
+import { resolveCanvasTransform, resolveLayerOpacity } from './keyframe-editing'
 
 export interface LayerImageSize { width: number; height: number }
 export interface CanvasPoint { x: number; y: number }
@@ -107,9 +108,9 @@ export function applyImportedTrackOverlay(frame: FrameData, layer: Layer, source
 export function applyLayerFrameEdits(frame: FrameData, layer: Layer, frameIndex: number, imageSize?: LayerImageSize): FrameData {
   const sourceFrame = getLayerSourceFrame(layer, frameIndex)
   const tracked = applyImportedTrackOverlay(frame, layer, sourceFrame, imageSize)
-  const transformed = applyCanvasTransform(tracked, layer.canvasTransform, imageSize)
+  const transformed = applyCanvasTransform(tracked, resolveCanvasTransform(layer, frameIndex), imageSize)
   const outsideClip = sourceFrame < 0 || sourceFrame < layer.clip.startFrame || sourceFrame >= layer.clip.startFrame + layer.clip.duration
-  const opacity = Math.max(0, Math.min(1, finite(layer.opacity, 1)))
+  const opacity = resolveLayerOpacity(layer, frameIndex)
   if (layer.visible !== false && !outsideClip && opacity === 1) return transformed
   const sourceAlpha = getFrameAlpha(transformed)
   return { ...transformed, alpha: layer.visible === false || outsideClip ? 0 : sourceAlpha * opacity }
@@ -151,12 +152,13 @@ export function getLayerBaseFrame(
   if (!Number.isFinite(frameIndex) || frameIndex < 0) return null
   const index = getLayerSourceFrame(layer, frameIndex)
   if (index < 0 || index < layer.clip.startFrame || index >= layer.clip.startFrame + layer.clip.duration) return null
-  if (!layer.isNew) {
+  if (layer.sprites || !layer.isNew) {
     const spriteIndex = getOriginalLayerIndex(layer)
     const sprite = layer.sprites || (spriteIndex === null ? undefined : videoItem?.movie.sprites?.[spriteIndex])
     if (!sprite?.frames?.length) return null
     const frame = sprite.frames[index]
-    return frame ? applyImportedTrackOverlay(frame, layer, index, getLayerImageSize(layer, videoItem, imageResources)) : null
+    // 导入图层的副本也保留原始逐帧动画，后续新层渲染不再重复应用旧轨道。
+    return frame ? applyImportedTrackOverlay(frame, layer.isNew ? { ...layer, isNew: false } : layer, index, getLayerImageSize(layer, videoItem, imageResources)) : null
   }
   const props = AnimationEngine.getLayerPropertiesAtFrame(layer, index)
   const { width, height } = getLayerImageSize(layer, videoItem, imageResources)
@@ -182,7 +184,7 @@ export function getLayerGeometry(
   videoItem?: VideoItem | null,
   imageResources?: ReadonlyMap<string, LayerImageSize>
 ) {
-  if (!layer.visible || layer.opacity <= 0) return null
+  if (!layer.visible || resolveLayerOpacity(layer, frameIndex) <= 0) return null
   const baseFrame = getLayerBaseFrame(layer, frameIndex, videoItem, imageResources)
   if (!baseFrame || (baseFrame.alpha ?? 1) <= 0) return null
   const size = getFrameImageSize(baseFrame, getLayerImageSize(layer, videoItem, imageResources))
@@ -193,7 +195,7 @@ export function getLayerGeometry(
   const baseQuad = corners.map(point => transformCanvasPoint(baseMatrix, point))
   const xs = baseQuad.map(point => point.x)
   const ys = baseQuad.map(point => point.y)
-  const frame = applyCanvasTransform(baseFrame, layer.canvasTransform, size)
+  const frame = applyCanvasTransform(baseFrame, resolveCanvasTransform(layer, frameIndex), size)
   const matrix = getFrameTransform(frame)
   return {
     baseBounds: { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) },

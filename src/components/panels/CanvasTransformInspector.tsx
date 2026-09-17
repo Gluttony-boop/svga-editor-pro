@@ -3,95 +3,9 @@ import { Icon } from '@/components/ui'
 import { getLayerGeometry, hasCanvasTransform, normalizeCanvasTransform } from '@/core/layer-transform'
 import { useEditorStore } from '@/stores'
 import type { CanvasTransform, Layer } from '@/types'
+import { CommitNumberField } from '@/components/ui/CommitNumberField'
+import { resolveCanvasTransform } from '@/core/keyframe-editing'
 
-interface CommitNumberFieldProps {
-  label: string
-  accessibleLabel: string
-  value: number
-  unit: string
-  disabled?: boolean
-  min?: number
-  max?: number
-  context: unknown
-  onStart: () => void
-  onCommit: (value: number) => void
-}
-
-const formatNumber = (value: number) => String(Math.round(value * 100) / 100)
-
-/** 输入期间保留草稿；失焦或回车只提交一次，Escape 放弃本次输入。 */
-function CommitNumberField({ label, accessibleLabel, value, unit, disabled, min, max, context, onStart, onCommit }: CommitNumberFieldProps) {
-  const [draft, setDraft] = React.useState(() => formatNumber(value))
-  const editing = React.useRef(false)
-  const changed = React.useRef(false)
-  const source = React.useRef(context)
-
-  React.useEffect(() => {
-    if (source.current !== context) {
-      editing.current = false
-      source.current = context
-    }
-    if (!editing.current) setDraft(formatNumber(value))
-  }, [value, context])
-
-  return (
-    <label className="block min-w-0">
-      <span className="mb-1 flex items-center justify-between text-[11px] text-text-secondary">
-        <span>{label}</span><span className="text-text-muted">{unit}</span>
-      </span>
-      <input
-        type="number"
-        aria-label={accessibleLabel}
-        title="回车或失焦应用，Esc 取消"
-        value={draft}
-        min={min}
-        max={max}
-        step={0.1}
-        disabled={disabled}
-        className="w-full rounded border border-border bg-bg-tertiary px-2 py-1.5 text-xs font-mono text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
-        onFocus={() => {
-          editing.current = true
-          changed.current = false
-          source.current = context
-          onStart()
-        }}
-        onChange={event => {
-          changed.current = true
-          setDraft(event.target.value)
-        }}
-        onBlur={() => {
-          if (!editing.current || source.current !== context) return
-          editing.current = false
-          if (disabled || !changed.current) {
-            setDraft(formatNumber(value))
-            return
-          }
-          const number = draft.trim() === '' ? NaN : Number(draft)
-          if (!Number.isFinite(number)) {
-            setDraft(formatNumber(value))
-            return
-          }
-          const next = Math.max(min ?? -Infinity, Math.min(max ?? Infinity, number))
-          setDraft(formatNumber(next))
-          if (next !== value) onCommit(next)
-        }}
-        onKeyDown={event => {
-          event.stopPropagation()
-          if (event.key === 'Enter') {
-            event.preventDefault()
-            event.currentTarget.blur()
-          }
-          if (event.key === 'Escape') {
-            event.preventDefault()
-            editing.current = false
-            setDraft(formatNumber(value))
-            event.currentTarget.blur()
-          }
-        }}
-      />
-    </label>
-  )
-}
 
 export function CanvasTransformInspector({ layer }: { layer: Layer }) {
   const videoItem = useEditorStore(state => state.videoItem)
@@ -101,6 +15,8 @@ export function CanvasTransformInspector({ layer }: { layer: Layer }) {
   const linkedScale = useEditorStore(state => state.canvasKeepRatio)
   const setLinkedScale = useEditorStore(state => state.setCanvasKeepRatio)
   const transform = normalizeCanvasTransform(layer.canvasTransform)
+  const effectiveTransform = resolveCanvasTransform(layer, currentFrame)
+  const context = React.useMemo(() => ({ videoItem, layerId: layer.id, currentFrame }), [videoItem, layer.id, currentFrame])
   const geometry = getLayerGeometry(layer, currentFrame, videoItem, imageResources)
   const unsupported = layer.type !== 'image' && layer.type !== 'shape'
   const disabled = layer.locked || !layer.visible || unsupported
@@ -124,7 +40,11 @@ export function CanvasTransformInspector({ layer }: { layer: Layer }) {
     if (!latest) return
     const state = useEditorStore.getState()
     const currentGeometry = getLayerGeometry(latest, state.playback.currentFrame, state.videoItem, state.imageResources)
-    if (currentGeometry) commitTransform({ [axis]: value - currentGeometry.center[axis] })
+    if (currentGeometry) {
+      const effective = resolveCanvasTransform(latest, state.playback.currentFrame)
+      const baseline = normalizeCanvasTransform(latest.canvasTransform)
+      commitTransform({ [axis]: baseline[axis] + value - currentGeometry.center[axis] - effective[axis] })
+    }
   }
 
   const commitScale = (axis: 'scaleX' | 'scaleY', percent: number) => {
@@ -139,7 +59,7 @@ export function CanvasTransformInspector({ layer }: { layer: Layer }) {
 
   const fieldDefaults = {
     disabled,
-    context: videoItem,
+    context,
     onStart: () => setPlaying(false)
   }
 
@@ -160,7 +80,7 @@ export function CanvasTransformInspector({ layer }: { layer: Layer }) {
       </div>
 
       <p className="rounded border border-accent/20 bg-accent/5 px-2 py-1.5 text-[10px] leading-relaxed text-text-secondary">
-        保留原始运动，调整作用于整段动画。缩放和旋转围绕每帧中心，不创建关键帧。
+        保留原始运动与编辑关键帧，调整整段基准变换。缩放和旋转围绕每帧中心，不创建关键帧。
       </p>
 
       {disabled && <p className="text-[11px] text-text-muted">{layer.locked ? '图层已锁定，解锁后可调整。' : !layer.visible ? '图层已隐藏，显示后可调整。' : '此类图层暂不支持画布变换。'}</p>}
@@ -171,8 +91,8 @@ export function CanvasTransformInspector({ layer }: { layer: Layer }) {
           <span className="font-mono">{currentFrame + 1} F</span>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <CommitNumberField {...fieldDefaults} label="X" accessibleLabel="图层位置 X" value={(geometry?.center.x ?? 0) + transform.x} unit="px" disabled={positionDisabled} onCommit={value => commitPosition('x', value)} />
-          <CommitNumberField {...fieldDefaults} label="Y" accessibleLabel="图层位置 Y" value={(geometry?.center.y ?? 0) + transform.y} unit="px" disabled={positionDisabled} onCommit={value => commitPosition('y', value)} />
+          <CommitNumberField {...fieldDefaults} label="X" accessibleLabel="图层位置 X" value={(geometry?.center.x ?? 0) + effectiveTransform.x} unit="px" disabled={positionDisabled} onCommit={value => commitPosition('x', value)} />
+          <CommitNumberField {...fieldDefaults} label="Y" accessibleLabel="图层位置 Y" value={(geometry?.center.y ?? 0) + effectiveTransform.y} unit="px" disabled={positionDisabled} onCommit={value => commitPosition('y', value)} />
         </div>
         {!geometry && !disabled && <p className="mt-1 text-[10px] text-text-muted">当前帧无可见图像，切换到可见帧后调整位置。</p>}
       </div>

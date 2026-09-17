@@ -1,8 +1,21 @@
 name: Package Windows Installer
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.request_id != '' && format('Windows package [{0}]', inputs.request_id) || format('Windows package {0}', github.sha) }}
+
+permissions:
+  contents: read
 
 on:
   push: {}
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 一键打包脚本的唯一请求 ID（网页手动运行可留空）
+        required: false
+        type: string
+      expected_sha:
+        description: 要打包的完整提交 SHA（网页手动运行可留空）
+        required: false
+        type: string
   repository_dispatch:
     types:
       - package-windows
@@ -13,6 +26,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify requested commit
+        if: github.event_name == 'workflow_dispatch' && inputs.expected_sha != ''
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($env:EXPECTED_SHA -notmatch '^[0-9a-fA-F]{40}$' -or $actual -ne $env:EXPECTED_SHA) {
+            throw "请求提交与当前分支提交不一致，已停止打包。expected=$env:EXPECTED_SHA actual=$actual"
+          }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -49,12 +73,29 @@ jobs:
       - name: Test
         run: npm run test:run
 
+      - name: Test packaging script
+        run: npm run test:packaging
+
       - name: Build Windows installer
         run: npm run build:win
+
+      - name: Generate installer checksum
+        shell: pwsh
+        run: |
+          $bundleDir = 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $installers = @(Get-ChildItem -LiteralPath $bundleDir -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw '应生成且仅生成一个 Windows 安装包。' }
+          $checksums = @($installers | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          })
+          [System.IO.File]::WriteAllLines("$bundleDir/SHA256SUMS.txt", $checksums, [System.Text.UTF8Encoding]::new($false))
 
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
         with:
           name: svga-editor-pro-windows-installer
-          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/SHA256SUMS.txt
           if-no-files-found: error

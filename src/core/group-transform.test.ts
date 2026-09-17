@@ -29,6 +29,33 @@ const video = (): VideoItem => ({
 })
 
 describe('多图层选区快照', () => {
+  it('带关键帧的图层整组旋转缩放以当前动画中心为基准，不改写动画轨道', () => {
+    const first = layer('0', { canvasTransform: transform({ x: 9, y: -3, scaleX: 1.2, scaleY: 0.8, rotation: 0.3 }) })
+    const second = layer('1', { canvasTransform: transform({ x: 120, y: 80 }) })
+    for (const [index, item] of [first, second].entries()) {
+      item.animationTracks = createDefaultTracks()
+      item.animationTracks.position.keyframes = [{ id: `p${index}`, frameIndex: 0, value: { x: 60 - index * 35, y: 15 + index * 10 }, easing: 'linear' }]
+      item.animationTracks.scale.keyframes = [{ id: `s${index}`, frameIndex: 0, value: { scaleX: 1.7, scaleY: 0.6 }, easing: 'linear' }]
+      item.animationTracks.rotation.keyframes = [{ id: `r${index}`, frameIndex: 0, value: 20, easing: 'linear' }]
+    }
+    const snapshot = captureGroupTransform([first, second], 0)!
+    const delta = { x: 11, y: -19, scale: 1.4, rotation: 0.7 }
+    const result = applyGroupTransform(snapshot, delta)
+    const c = Math.cos(delta.rotation) * delta.scale
+    const s = Math.sin(delta.rotation) * delta.scale
+    for (const item of [first, second]) {
+      const before = getLayerGeometry(item, 0)!
+      const updated = { ...item, canvasTransform: result[item.id] }
+      const after = getLayerGeometry(updated, 0)!
+      before.quad.forEach((point, index) => {
+        const x = point.x - snapshot.center.x, y = point.y - snapshot.center.y
+        expect(after.quad[index].x).toBeCloseTo(snapshot.center.x + c * x - s * y + delta.x)
+        expect(after.quad[index].y).toBeCloseTo(snapshot.center.y + s * x + c * y + delta.y)
+      })
+      expect(updated.animationTracks).toBe(item.animationTracks)
+    }
+  })
+
   it('边界使用已旋转缩放后的世界四角，中心保留每层未叠加画布变换的基准', () => {
     const first = layer('0', { canvasTransform: transform({ x: 10, y: 20, scaleX: 2, rotation: Math.PI / 2 }) })
     const second = layer('1', { sprites: { imageKey: 'shared', matteKey: null, frames: [frame(200, 20)] } })

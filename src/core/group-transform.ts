@@ -1,5 +1,6 @@
 import type { CanvasTransform, Layer, VideoItem } from '@/types'
 import { getLayerGeometry, normalizeCanvasTransform, type CanvasPoint, type LayerImageSize } from './layer-transform'
+import { sampleAnimationValues } from './keyframe-editing'
 
 export interface GroupTransformItem {
   id: string
@@ -43,9 +44,11 @@ export function captureGroupTransform(
     if (!geometry || !isFinitePoint(geometry.center) || !geometry.quad.every(isFinitePoint)) continue
 
     ids.add(layer.id)
+    const animation = sampleAnimationValues(layer, frameIndex)
     items.push({
       id: layer.id,
-      baseCenter: { ...geometry.center },
+      // 整组操作修改基准变换，中心仍要包含当前帧的动画位置偏移。
+      baseCenter: { x: geometry.center.x + animation.position.x, y: geometry.center.y + animation.position.y },
       transform: normalizeCanvasTransform(layer.canvasTransform)
     })
     for (const point of geometry.quad) {

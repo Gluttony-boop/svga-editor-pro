@@ -8,7 +8,7 @@
 /**
  * 缓动类型
  */
-export type EasingType = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'bezier'
+export type EasingType = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'bezier' | 'hold'
 
 /**
  * 图层类型
@@ -270,6 +270,9 @@ export interface Layer {
   
   // 动画轨道
   tracks: LayerTracks
+
+  /** 用户编辑的附加关键帧；使用源时间，独立于原动画及已有预设。 */
+  animationTracks?: LayerTracks
 
   /** 独立于原始逐帧动画，预览与导出使用同一矩阵合成。 */
   canvasTransform?: CanvasTransform

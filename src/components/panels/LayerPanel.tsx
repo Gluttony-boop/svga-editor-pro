@@ -9,6 +9,7 @@ import { listenForLayerReveal } from '@/utils/layer-navigation'
 import { detectImageMime } from '@/utils/image-mime'
 import { getLayerOutputRange, getLayerSourceFrame, getLayerTimeOffset } from '@/core/layer-time'
 import { getSelectedLayerIds } from '@/utils/layer-selection'
+import { getLayerDuplicateError } from '@/core/keyframe-editing'
 
 const getLayerThumbnail = (
   layer: Layer,
@@ -366,7 +367,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
 
   const getLayerStatus = (layer: Layer) => {
     const inRange = LayerUtils.isLayerVisibleAtFrame(layer, getLayerSourceFrame(layer, currentFrame))
-    const hasAnimation = Object.values(layer.tracks).some(
+    const hasAnimation = [...Object.values(layer.tracks), ...Object.values(layer.animationTracks || {})].some(
       (track) => track.keyframes.length > 0
     )
     return { inRange, hasAnimation }
@@ -522,6 +523,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
                         onToggleLock={() => handleToggleLock(layer.id, layer.locked)}
                         onDelete={() => handleDeleteLayer(layer.id)}
                         onDuplicate={() => duplicateLayer(layer.id)}
+                        duplicateError={getLayerDuplicateError(layer, layers, videoItem)}
                         onShowAnimationMenu={() => {
                           setShowActionMenu(null)
                           setShowAnimationMenu(showAnimationMenu === layer.id ? null : layer.id)
@@ -599,6 +601,7 @@ interface LayerItemProps {
   onToggleLock: () => void
   onDelete: () => void
   onDuplicate: () => void
+  duplicateError: string | null
   onShowAnimationMenu: () => void
   onShowActionMenu: () => void
   onApplyAnimation: (preset: AnimationPreset) => void
@@ -634,6 +637,7 @@ const LayerItem: React.FC<LayerItemProps> = ({
   onToggleLock,
   onDelete,
   onDuplicate,
+  duplicateError,
   onShowAnimationMenu,
   onShowActionMenu,
   onApplyAnimation,
@@ -825,6 +829,8 @@ const LayerItem: React.FC<LayerItemProps> = ({
           <MenuActionButton
             icon="copy"
             label="复制图层"
+            disabled={!!duplicateError}
+            title={duplicateError || '复制原逐帧动画与编辑关键帧'}
             onClick={() => {
               onCloseActionMenu()
               onDuplicate()
@@ -905,6 +911,8 @@ interface MenuActionButtonProps {
   icon: string
   label: string
   danger?: boolean
+  disabled?: boolean
+  title?: string
   onClick: () => void
 }
 
@@ -912,13 +920,17 @@ const MenuActionButton: React.FC<MenuActionButtonProps> = ({
   icon,
   label,
   danger = false,
+  disabled = false,
+  title,
   onClick
 }) => {
   return (
     <button
       type="button"
+      disabled={disabled}
+      title={title}
       className={cn(
-        'flex h-8 w-full items-center gap-2 px-3 text-left text-xs transition-colors',
+        'flex h-8 w-full items-center gap-2 px-3 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-40',
         danger
           ? 'text-error hover:bg-error/15'
           : 'text-text-secondary hover:bg-accent/15 hover:text-text-primary'

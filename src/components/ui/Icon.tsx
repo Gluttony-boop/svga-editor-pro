@@ -9,6 +9,12 @@ export interface IconProps {
 
 export const Icon: React.FC<IconProps> = ({ name, size = 20, className }) => {
   const icons: Record<string, React.ReactNode> = {
+    history: (
+      <path d="M13 3a9 9 0 1 1-8.49 12h2.16A7 7 0 1 0 6 9H9v2H2V4h2v3.35A8.97 8.97 0 0 1 13 3zm-1 4h2v5.17l3.41 2.05-1.03 1.72L12 13.3V7z" fill="currentColor" />
+    ),
+    camera: (
+      <path d="M9 3 7.2 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3H9zm3 4a6 6 0 1 1 0 12 6 6 0 0 1 0-12zm0 2a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" fill="currentColor" />
+    ),
     play: (
       <path d="M8 5v14l11-7z" fill="currentColor" />
     ),

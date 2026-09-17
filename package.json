@@ -11,6 +11,8 @@
     "build": "tauri build",
     "build:web": "vite build",
     "build:win": "tauri build --target x86_64-pc-windows-msvc",
+    "package:github": "node scripts/package-github.mjs",
+    "test:packaging": "node --test scripts/package-github.node-test.mjs scripts/publish-workspace.node-test.mjs",
     "build:mac": "tauri build --target universal-apple-darwin",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

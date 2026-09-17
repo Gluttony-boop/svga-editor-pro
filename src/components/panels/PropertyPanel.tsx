@@ -6,6 +6,7 @@ import { MultiSelectionInspector } from './MultiSelectionInspector'
 import { getSelectedLayerIds } from '@/utils/layer-selection'
 import { LayerLayoutInspector } from './LayerLayoutInspector'
 import { LayerTimingInspector } from './LayerTimingInspector'
+import { AnimationKeyframeInspector } from './AnimationKeyframeInspector'
 
 interface PropertyPanelProps {
   className?: string
@@ -25,6 +26,8 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
   const selectedLayerIds = useEditorStore((s) => s.selectedLayerIds)
   const selectLayer = useEditorStore((s) => s.selectLayer)
   const renameImageKey = useEditorStore((s) => s.renameImageKey)
+  const editMode = useEditorStore(s => s.transformEditMode)
+  const setEditMode = useEditorStore(s => s.setTransformEditMode)
 
   const selectedLayer = layers.find((l) => l.id === selectedLayerId)
   const selection = React.useMemo(
@@ -140,13 +143,21 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
           </div>
         )}
 
+        {selectedLayer && <div role="group" aria-label="变换编辑模式" className="grid grid-cols-2 gap-1 rounded border border-border bg-bg-primary p-1">
+          {([['whole', '整段调整'], ['keyframe', '◆ 关键帧']] as const).map(([mode, label]) => <button key={mode} type="button" aria-pressed={editMode === mode} onClick={() => setEditMode(mode)}
+            className={`rounded px-2 py-1.5 text-xs ${editMode === mode ? 'bg-accent/15 text-accent' : 'text-text-muted hover:text-text-primary'}`}>{label}</button>)}
+        </div>}
+
         {isMultiSelection ? (
           <MultiSelectionInspector
             layers={selectedLayers}
             primaryLayer={selectedLayer}
             onKeepPrimary={() => selectedLayer && selectLayer(selectedLayer.id)}
           />
-        ) : selectedLayer && <CanvasTransformInspector key={selectedLayer.id} layer={selectedLayer} />}
+        ) : selectedLayer && (editMode === 'keyframe'
+          ? <AnimationKeyframeInspector key={selectedLayer.id} layer={selectedLayer} />
+          : <CanvasTransformInspector key={selectedLayer.id} layer={selectedLayer} />)}
+        {isMultiSelection && editMode === 'keyframe' && <p className="text-xs text-amber-300">时间轴可为所选图层批量插入关键帧。画布关键帧手势请仅选择一层，整组操作请切回整段调整。</p>}
 
         {selectedLayers.length > 0 && <>
           <LayerTimingInspector />
@@ -196,7 +207,7 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
           </div>
         </div>
 
-        <p className="text-xs text-text-muted">压缩配置已统一到下方「导出」面板，请在那里选择保真、PNG 量化或 WebP。</p>
+        <p className="text-xs text-text-muted">压缩配置在检查器的「导出」标签中，可选择保真、PNG 量化或 WebP。</p>
       </div>
     </Panel>
   )

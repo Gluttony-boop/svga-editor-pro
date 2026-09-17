@@ -797,7 +797,7 @@ export class OfficialSvgRenderer {
 
   private createRenderSignature(slots: Record<string, SlotConfig>, layers: Layer[], applySlots: boolean): string {
     return JSON.stringify({
-      layers: layers.map(layer => [layer.id, layer.editableIndex, layer.imageKey, layer.visible, layer.opacity, layer.clip, getLayerTimeOffset(layer), layer.canvasTransform, layer.tracks]),
+      layers: layers.map(layer => [layer.id, layer.editableIndex, layer.imageKey, layer.visible, layer.opacity, layer.clip, getLayerTimeOffset(layer), layer.canvasTransform, layer.animationTracks, layer.tracks]),
       slots: applySlots ? Object.entries(slots).map(([key, slot]) => [key, slot.type, slot.imageConfig?.url || slot.value]) : []
     })
   }

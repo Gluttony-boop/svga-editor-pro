@@ -1,14 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon, Button, Modal, PanelSplitter } from '@/components/ui'
 import { CanvasPreview, PlaybackControls, Timeline } from '@/components/editor'
-import { LayerPanel, ResourcePanel, SlotPanel, PropertyPanel, ExportPanel } from '@/components/panels'
+import { LayerPanel, ResourcePanel, SlotPanel, PropertyPanel, ExportPanel, HistoryPanel } from '@/components/panels'
 import type { ImageSelectInfo } from '@/components/panels'
 import { useEditorStore } from '@/stores'
 import { svgaParser, LayerFactory, ExportEngine, saveGeneratedFile, svgaBuilder } from '@/core'
 import { tauriAPI, createNativeAPI } from '@/lib/tauri-api'
 import type { SvgaData } from '@/lib/tauri-api'
 import { cn } from '@/utils/cn'
-import type { ImageResource, Layer, VideoItem } from '@/types'
+import type { AudioResource, ImageResource, Layer, VideoItem } from '@/types'
 import { previewFileName } from '@/utils/preview-view'
 import { createWindowCloseHandler } from '@/lib/window-close'
 import { historyActionLabel } from '@/utils/history-label'
@@ -227,6 +227,8 @@ interface MenuBarProps {
   onExport: () => void
   onUndo: () => void
   onRedo: () => void
+  showHistory: boolean
+  onToggleHistory: () => void
   onShowAbout: () => void
 }
 
@@ -240,6 +242,8 @@ const MenuBar: React.FC<MenuBarProps> = ({
   onExport,
   onUndo,
   onRedo,
+  showHistory,
+  onToggleHistory,
   onShowAbout
 }) => {
   const videoItem = useEditorStore((s) => s.videoItem)
@@ -248,8 +252,8 @@ const MenuBar: React.FC<MenuBarProps> = ({
   const canUndo = useEditorStore((s) => s.canUndo)
   const canRedo = useEditorStore((s) => s.canRedo)
   const showGrid = useEditorStore((s) => s.showGrid)
-  const undoLabel = useEditorStore((s) => historyActionLabel('撤销', s.history.past[s.history.past.length - 1]))
-  const redoLabel = useEditorStore((s) => historyActionLabel('重做', s.history.future[0]))
+  const undoLabel = useEditorStore((s) => s.history.timelineSnapshot ? '撤销：选择快照' : historyActionLabel('撤销', s.history.past[s.history.past.length - 1]))
+  const redoLabel = useEditorStore((s) => s.history.timelineSnapshot ? '重做' : historyActionLabel('重做', s.history.future[0]))
   const rendererMode = useEditorStore((s) => s.rendererMode)
   const toggleGrid = useEditorStore((s) => s.toggleGrid)
   const setRendererMode = useEditorStore((s) => s.setRendererMode)
@@ -295,6 +299,7 @@ const MenuBar: React.FC<MenuBarProps> = ({
       { label: videoItem ? '请选择图层后使用图层面板编辑' : '打开文件后可编辑图层', disabled: true }
     ],
     view: [
+      { label: `${showHistory ? '隐藏' : '显示'}历史记录`, onSelect: onToggleHistory },
       { label: `${showGrid ? '隐藏' : '显示'}网格`, onSelect: toggleGrid },
       {
         label: `渲染器：${rendererMode === 'high-performance' ? 'Canvas 高性能' : '官方兼容'}`,
@@ -442,6 +447,9 @@ export const App: React.FC = () => {
   const [leftPanelWidth, setLeftPanelWidth] = useState(320)
   const [rightPanelWidth, setRightPanelWidth] = useState(340)
   const [layerPanelHeight, setLayerPanelHeight] = useState(340)
+  const [historyPanelHeight, setHistoryPanelHeight] = useState(280)
+  const [showHistory, setShowHistory] = useState(true)
+  const [historyCollapsed, setHistoryCollapsed] = useState(false)
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('properties')
   const [isImmersive, setIsImmersive] = useState(false)
   const previewVideoItem = useEditorStore((s) => s.videoItem)
@@ -449,6 +457,11 @@ export const App: React.FC = () => {
     if (useEditorStore.getState().videoItem) setIsImmersive(value => !value)
   }, [])
   useEffect(() => { setIsImmersive(false) }, [previewVideoItem])
+  const toggleHistory = useCallback(() => {
+    setIsImmersive(false)
+    setShowHistory(value => !value)
+    setHistoryCollapsed(false)
+  }, [])
 
   const setVideoItem = useEditorStore((s) => s.setVideoItem)
   const setSource = useEditorStore((s) => s.setSource)
@@ -459,8 +472,8 @@ export const App: React.FC = () => {
   const reset = useEditorStore((s) => s.reset)
   const undo = useEditorStore((s) => s.undo)
   const redo = useEditorStore((s) => s.redo)
-  const undoLabel = useEditorStore((s) => historyActionLabel('撤销', s.history.past[s.history.past.length - 1]))
-  const redoLabel = useEditorStore((s) => historyActionLabel('重做', s.history.future[0]))
+  const undoLabel = useEditorStore((s) => s.history.timelineSnapshot ? '撤销：选择快照' : historyActionLabel('撤销', s.history.past[s.history.past.length - 1]))
+  const redoLabel = useEditorStore((s) => s.history.timelineSnapshot ? '重做' : historyActionLabel('重做', s.history.future[0]))
   const canUndo = useEditorStore((s) => s.canUndo)
   const canRedo = useEditorStore((s) => s.canRedo)
   
@@ -543,25 +556,25 @@ export const App: React.FC = () => {
       const slots = svgaParser.detectSlots(videoItem.movie)
       const hasMatte = videoItem.movie.sprites?.some((sprite) => Boolean(sprite.matteKey))
 
+      // 先完成异步资源解析，再一次性建立打开状态，避免初始化期间的编辑被清空。
+      let parsedAudioResources = new Map<string, AudioResource>()
+      try {
+        const resources = await svgaParser.parseAudios(videoItem.movie)
+        parsedAudioResources = new Map(resources.map(resource => [resource.key, resource]))
+      } catch (audioErr) {
+        console.warn('[App] 音频解析失败，不影响主流程:', audioErr)
+      }
+
       setVideoItem(videoItem)
       setSource(source, type)
       setOriginalBuffer(buffer)
       setDetectedSlots(slots)
+      setAudioResources(parsedAudioResources)
       if (hasMatte) {
         setRendererMode('official')
       }
 
-      // 解析音频轨道（如果有）
-      try {
-        const audioResources = await svgaParser.parseAudios(videoItem.movie)
-        if (audioResources.length > 0) {
-          const audioMap = new Map<string, typeof audioResources[0]>()
-          audioResources.forEach(r => audioMap.set(r.key, r))
-          setAudioResources(audioMap)
-        }
-      } catch (audioErr) {
-        console.warn('[App] 音频解析失败，不影响主流程:', audioErr)
-      }
+      useEditorStore.getState().initializeHistory()
     } catch (err) {
       console.error('[App] Load error:', err)
       setError(`加载失败: ${(err as Error).message}`)
@@ -601,6 +614,7 @@ export const App: React.FC = () => {
           if (hasMatte) {
             setRendererMode('official')
           }
+          useEditorStore.getState().initializeHistory()
           return
         }
       } catch (rustErr) {
@@ -1011,6 +1025,7 @@ export const App: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing) return
       const hasDialog = !!document.querySelector('[role="dialog"]')
+      if (hasDialog) return
       if (!hasDialog && e.key === 'F9' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault()
         toggleImmersive()
@@ -1082,6 +1097,8 @@ export const App: React.FC = () => {
         onExport={handleFocusExportPanel}
         onUndo={undo}
         onRedo={redo}
+        showHistory={showHistory}
+        onToggleHistory={toggleHistory}
         onShowAbout={() => setShowAboutModal(true)}
       />
 
@@ -1111,6 +1128,11 @@ export const App: React.FC = () => {
           <Button variant="ghost" size="sm" onClick={redo} disabled={!canRedo} aria-label={redoLabel} title={`${redoLabel} (Ctrl+Shift+Z / Ctrl+Y)`}>
             <Icon name="redo" size={16} />
           </Button>
+          <div className="mx-1 h-5 w-px bg-border" />
+          <Button variant="ghost" size="sm" onClick={toggleHistory} aria-label="历史记录面板" aria-pressed={showHistory} aria-controls="history-panel" title="显示或隐藏历史记录" className={showHistory ? 'bg-accent/10 text-accent' : undefined}>
+            <Icon name="history" size={16} />
+            <span className="hidden xl:inline">历史记录</span>
+          </Button>
         </div>
 
         <div className="flex min-w-0 items-center gap-2">
@@ -1123,7 +1145,7 @@ export const App: React.FC = () => {
           {error && (
             <span role="alert" className="max-w-[220px] truncate text-sm text-error" title={error}>{error}</span>
           )}
-          <Button variant="ghost" size="sm" title="重置面板宽度和高度" onClick={() => { setLeftPanelWidth(320); setRightPanelWidth(340); setLayerPanelHeight(340) }}>
+          <Button variant="ghost" size="sm" title="重置面板宽度和高度" onClick={() => { setLeftPanelWidth(320); setRightPanelWidth(340); setLayerPanelHeight(340); setHistoryPanelHeight(280); setHistoryCollapsed(false); setShowHistory(true) }}>
             <Icon name="refresh" size={15} />
             <span className="hidden xl:inline">重置面板</span>
           </Button>
@@ -1218,6 +1240,12 @@ export const App: React.FC = () => {
           <div role="tabpanel" id="inspector-view-export" aria-labelledby="inspector-tab-export" hidden={inspectorTab !== 'export'} ref={exportPanelRef} className={cn('inspector-view flex-1 min-h-0', inspectorTab !== 'export' && '!hidden')}>
             <ExportPanel className="h-full rounded-none border-0" collapsible={false} />
           </div>
+          {showHistory && (
+            <>
+              {!historyCollapsed && <PanelSplitter direction="vertical" onDrag={delta => setHistoryPanelHeight(height => Math.max(180, Math.min(520, height - delta)))} />}
+              <HistoryPanel collapsed={historyCollapsed} onToggleCollapsed={() => setHistoryCollapsed(value => !value)} onHide={() => setShowHistory(false)} disabled={loading} style={{ height: historyCollapsed ? 36 : historyPanelHeight, maxHeight: historyCollapsed ? 36 : '48%' }} />
+            </>
+          )}
         </div>
       </div>
 

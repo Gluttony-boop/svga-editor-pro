@@ -82,7 +82,7 @@ export class SVGABuilder {
     const movie = this.buildMovie(config)
 
     // 2. 编码为 protobuf
-    const encoded = this.MovieEntity.encode(movie).finish()
+    const encoded = this.MovieEntity.encode(this.MovieEntity.fromObject(movie)).finish()
 
     // 3. 官方 SVGA 2.0 是 zlib 压缩后的 protobuf MovieEntity。
     const compressed = pako.deflate(encoded, { level: 6 })
@@ -168,6 +168,14 @@ export class SVGABuilder {
     imageSize?: { width: number; height: number },
     exportImageKey?: string
   ): Sprite {
+    // 导入层的副本有独立身份，但仍沿用原逐帧运动，不应当作静态新图片重建。
+    if (layer.sprites) {
+      return {
+        ...layer.sprites,
+        imageKey: exportImageKey || layer.imageKey || layer.sprites.imageKey,
+        frames: bakeLayerFrames(layer.sprites.frames, { ...layer, isNew: false }, params.frames, imageSize)
+      }
+    }
     const frames: FrameData[] = []
 
     // 计算每一帧的数据
@@ -434,7 +442,8 @@ export class SVGABuilder {
     }
 
     // 编码并压缩
-    const encoded = this.MovieEntity.encode(mergedMovie).finish()
+    // 编辑态形状可能使用 RECT / SHAPE 等字符串枚举，编码前统一转换为协议数值。
+    const encoded = this.MovieEntity.encode(this.MovieEntity.fromObject(mergedMovie)).finish()
     const compressed = pako.deflate(encoded, { level: 6 })
 
     return new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer], {

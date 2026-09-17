@@ -317,8 +317,8 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
               {Array.from(imageResources.values()).filter(r => r.isNew).length > 0 && (
                 <li>{Array.from(imageResources.values()).filter(r => r.isNew).length} 张新图片</li>
               )}
-              {layers.filter(l => Object.values(l.tracks).some(t => t.keyframes.length > 0)).length > 0 && (
-                <li>{layers.filter(l => Object.values(l.tracks).some(t => t.keyframes.length > 0)).length} 个图层有动画</li>
+              {layers.filter(l => [...Object.values(l.tracks), ...Object.values(l.animationTracks || {})].some(t => t.keyframes.length > 0)).length > 0 && (
+                <li>{layers.filter(l => [...Object.values(l.tracks), ...Object.values(l.animationTracks || {})].some(t => t.keyframes.length > 0)).length} 个图层有动画</li>
               )}
               {layers.filter(l => l.imageKey && l.name.trim() && l.name.trim() !== l.imageKey).length > 0 && (
                 <li>{layers.filter(l => l.imageKey && l.name.trim() && l.name.trim() !== l.imageKey).length} 个图层已改名</li>

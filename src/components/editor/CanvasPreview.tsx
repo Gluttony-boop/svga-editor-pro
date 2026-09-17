@@ -621,6 +621,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           variant="ghost" 
           size="sm"
           onClick={() => setZoom(zoom / 1.2)}
+          aria-label="缩小预览画布"
+          title="缩小预览画布"
         >
           <Icon name="minus" size={16} />
         </Button>
@@ -631,6 +633,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           variant="ghost" 
           size="sm"
           onClick={() => setZoom(zoom * 1.2)}
+          aria-label="放大预览画布"
+          title="放大预览画布"
         >
           <Icon name="plus" size={16} />
         </Button>

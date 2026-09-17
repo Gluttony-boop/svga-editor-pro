@@ -10,6 +10,7 @@ import { requestLayerReveal } from '@/utils/layer-navigation'
 import { cn } from '@/utils/cn'
 import { getSelectedLayerIds } from '@/utils/layer-selection'
 import { captureGroupTransform, applyGroupTransform, type GroupTransformSnapshot } from '@/core/group-transform'
+import { getKeyframeEditError, resolveCanvasTransform } from '@/core/keyframe-editing'
 
 type Tool = 'select' | 'rotate' | 'hand'
 
@@ -55,12 +56,15 @@ export function CanvasTransformOverlay({ viewportRef, disabled = false }: { view
   const frame = useEditorStore(state => state.playback.currentFrame)
   const playing = useEditorStore(state => state.playback.isPlaying)
   const active = useEditorStore(state => state.isCanvasTransforming)
+  const editMode = useEditorStore(state => state.transformEditMode)
+  const totalFrames = useEditorStore(state => state.playback.totalFrames)
   const layer = layers.find(item => item.id === selectedId)
   const geometry = layer && video ? getLayerGeometry(layer, frame, video, resources) : null
   const group = useMemo(() => isMulti ? captureGroupTransform(layers.filter(item => selectedIds.includes(item.id)), frame, video, resources) : null, [isMulti, layers, selectedIds, frame, video, resources])
   const groupIsComplete = !!group && group.items.length === selectedIds.length
-  const editable = (isMulti ? groupIsComplete : !!layer && layer.visible && !layer.locked && layer.type === 'image' && !!geometry) && !disabled && !playing
-  const transform = isMulti ? groupDelta : normalizeCanvasTransform(layer?.canvasTransform)
+  const frameEditError = layer && editMode === 'keyframe' ? getKeyframeEditError(layer, frame, totalFrames) : null
+  const editable = (isMulti ? groupIsComplete && editMode === 'whole' : !!layer && layer.visible && !layer.locked && layer.type === 'image' && !!geometry && !frameEditError) && !disabled && !playing
+  const transform = isMulti ? groupDelta : layer ? resolveCanvasTransform(layer, frame) : normalizeCanvasTransform()
   const bounds = isMulti ? (gestureRef.current?.group || group)?.bounds : geometry?.baseBounds
   const selectable = useMemo(() => layers.flatMap(item => {
     if (!item.visible || item.locked || item.type !== 'image') return []
@@ -123,7 +127,7 @@ export function CanvasTransformOverlay({ viewportRef, disabled = false }: { view
   }, [video])
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
-      if (event.isComposing || document.querySelector('[role="dialog"]') || (event.target as HTMLElement)?.closest('input,textarea,select,[contenteditable="true"]')) return
+      if (event.isComposing || document.querySelector('[role="dialog"]') || (event.target as HTMLElement)?.closest('input,textarea,select,[contenteditable="true"],[data-history-panel]')) return
       if (event.key === 'Shift') setShift(true)
       if (event.key === 'Escape' && marqueeRef.current) {
         event.preventDefault(); event.stopPropagation()
@@ -174,7 +178,9 @@ export function CanvasTransformOverlay({ viewportRef, disabled = false }: { view
       return true
     }
     if (!layer || disabled || !state.beginCanvasTransform(layer.id)) return false
-    gestureRef.current = { layerId: layer.id, transform: normalizeCanvasTransform(state.layers.find(item => item.id === layer.id)?.canvasTransform) }
+    const latest = useEditorStore.getState()
+    const currentLayer = latest.layers.find(item => item.id === layer.id)!
+    gestureRef.current = { layerId: layer.id, transform: resolveCanvasTransform(currentLayer, latest.playback.currentFrame) }
     setGestureActive(true)
     return true
   }
@@ -246,14 +252,22 @@ export function CanvasTransformOverlay({ viewportRef, disabled = false }: { view
       if (isMulti && group && state.beginCanvasTransforms(selectedIds)) {
         state.previewCanvasTransforms(applyGroupTransform(group, { x: dx, y: dy, scale: 1, rotation: 0 }))
         state.endCanvasTransform(true)
-      } else if (!isMulti) state.updateCanvasTransform(layer.id, { x: transform.x + dx, y: transform.y + dy })
+      } else if (!isMulti && state.beginCanvasTransform(layer.id)) {
+        state.previewCanvasTransform(layer.id, { ...transform, x: transform.x + dx, y: transform.y + dy })
+        state.endCanvasTransform(true)
+      }
     }}>
     <div data-stage-tools className="absolute left-3 top-2 right-3 z-10 flex flex-wrap items-center gap-1 rounded border border-border/70 bg-bg-secondary/95 p-1.5 text-xs" onMouseDown={event => event.stopPropagation()}>
       {([['select', '选择 V'], ['rotate', '旋转 W'], ['hand', '抓手 H']] as const).map(([id, label]) => <button type="button" key={id} aria-pressed={tool === id} onClick={() => { end(true); setTool(id) }} className={cn('rounded px-2 py-1', tool === id ? 'bg-accent/20 text-accent' : 'text-text-secondary hover:bg-bg-tertiary')}>{label}</button>)}
       <span className="mx-1 h-4 border-l border-border" />
       <button type="button" aria-pressed={isMulti || keepRatio} disabled={isMulti} title={isMulti ? '多选仅支持整体等比缩放，避免引入额外倾斜' : undefined} onClick={() => setKeepRatio(!keepRatio)} className={cn('rounded px-2 py-1', isMulti || keepRatio ? 'text-accent' : 'text-text-muted')}>{isMulti ? '整体等比' : '等比'}</button>
       <button type="button" aria-pressed={snapping} onClick={() => setSnapping(!snapping)} className={cn('rounded px-2 py-1', snapping ? 'text-accent' : 'text-text-muted')}>吸附</button>
-      <span className="ml-auto truncate text-[10px] text-text-muted" title="以当前帧为基准整段调整，不自动创建关键帧或永久编组">{playing ? '播放中 · 点击画面暂停编辑' : isMulti ? `已选 ${selectedIds.length} 层${groupIsComplete ? ' · 整体变换' : ' · 包含当前不可编辑图层'}` : layer ? `${layer.name}${layer.locked ? ' · 已锁定' : !layer.visible ? ' · 已隐藏' : ' · 整段变换'}` : '空白框选 · Shift 追加 · Alt 穿透'}</span>
+      <span className="mx-1 h-4 border-l border-border" />
+      <button type="button" aria-label="画布整段调整模式" aria-pressed={editMode === 'whole'} onClick={() => { end(true); useEditorStore.getState().setTransformEditMode('whole') }} className={cn('rounded px-2 py-1', editMode === 'whole' ? 'bg-accent/15 text-accent' : 'text-text-muted')}>整段</button>
+      <button type="button" aria-label="画布关键帧编辑模式" aria-pressed={editMode === 'keyframe'} onClick={() => { end(true); useEditorStore.getState().setTransformEditMode('keyframe') }} className={cn('rounded px-2 py-1', editMode === 'keyframe' ? 'bg-accent/15 text-accent' : 'text-text-muted')}>◆ 关键帧</button>
+      <span className="ml-auto truncate text-[10px] text-text-muted" title={frameEditError || (editMode === 'keyframe' ? '画布手势记录当前帧；单层编辑，Esc 取消' : '整段调整基准变换，保留所有关键帧')}>
+        {playing ? '播放中 · 点击画面暂停编辑' : isMulti ? `已选 ${selectedIds.length} 层${editMode === 'keyframe' ? ' · 请单选编辑关键帧' : groupIsComplete ? ' · 整体变换' : ' · 包含当前不可编辑图层'}` : layer ? `${layer.name}${layer.locked ? ' · 已锁定' : !layer.visible ? ' · 已隐藏' : editMode === 'keyframe' ? ` · ${frame + 1} F 写入关键帧` : ' · 整段变换'}` : '空白框选 · Shift 追加 · Alt 穿透'}
+      </span>
     </div>
     {selectable.map(item => <div key={item.id} data-layer-selectable={item.id} className="pointer-events-none absolute" style={{ left: left + item.bounds.x * zoom, top: top + item.bounds.y * zoom, width: Math.max(0.01, item.bounds.width * zoom), height: Math.max(0.01, item.bounds.height * zoom) }} />)}
     {isMulti && !playing && <svg className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">

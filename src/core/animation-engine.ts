@@ -180,6 +180,8 @@ export function applyEasing(t: number, easing: EasingType, controlPoints?: {
   t = Math.max(0, Math.min(1, t))
   
   switch (easing) {
+    case 'hold':
+      return t < 1 ? 0 : 1
     case 'linear':
       return EasingFunctions.linear(t)
     case 'easeIn':
