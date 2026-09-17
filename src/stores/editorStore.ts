@@ -16,11 +16,17 @@ import type {
   ImageResource,
   AudioResource,
   AnimationPreset,
-  LayerTracks
+  LayerTracks,
+  CanvasTransform
 } from '@/types'
 import type { OptimizationConfig, OptimizationStats } from '@/core/optimizer'
 import { getPreset } from '@/core/optimizer'
 import { v4 as uuid } from 'uuid'
+import { normalizeCanvasTransform } from '@/core/layer-transform'
+import { getSelectedLayerIds, selectionForLayers } from '@/utils/layer-selection'
+import { planLayerLayout, type LayoutOperation } from '@/core/layer-layout'
+import { LAYOUT_LABELS } from '@/utils/layout-labels'
+import { planLayerTiming, type TimingRequest } from '@/core/timing-plan'
 
 interface EditorSnapshot {
   params: MovieParams | null
@@ -28,6 +34,7 @@ interface EditorSnapshot {
   customFrames: number | null
   layers: Layer[]
   selectedLayerId: string | null
+  selectedLayerIds: string[]
   imageResources: Map<string, ImageResource>
   audioResources: Map<string, AudioResource>
   slotConfigs: Record<string, SlotConfig>
@@ -60,6 +67,7 @@ interface EditorStore {
   // 图层
   layers: Layer[]
   selectedLayerId: string | null
+  selectedLayerIds: string[]
 
   // 资源库（新增）
   imageResources: Map<string, ImageResource>
@@ -83,6 +91,7 @@ interface EditorStore {
   showGrid: boolean
   showOnionSkin: boolean
   rendererMode: 'high-performance' | 'official' | 'pixi'
+  canvasKeepRatio: boolean
 
   // 导出配置
   compressionConfig: CompressionConfig
@@ -96,6 +105,7 @@ interface EditorStore {
   history: EditorHistoryState
   canUndo: boolean
   canRedo: boolean
+  isCanvasTransforming: boolean
 
   // Actions
   setVideoItem: (videoItem: VideoItem | null) => void
@@ -107,8 +117,17 @@ interface EditorStore {
   
   // 图层操作
   setLayers: (layers: Layer[]) => void
-  selectLayer: (layerId: string | null) => void
+  selectLayer: (layerId: string | null, additive?: boolean) => void
+  selectLayers: (layerIds: string[]) => void
   updateLayer: (layerId: string, updates: Partial<Layer>) => void
+  updateCanvasTransform: (layerId: string, transform: Partial<CanvasTransform>) => void
+  beginCanvasTransform: (layerId: string) => boolean
+  beginCanvasTransforms: (layerIds: string[]) => boolean
+  previewCanvasTransform: (layerId: string, transform: CanvasTransform) => void
+  previewCanvasTransforms: (transforms: Record<string, CanvasTransform>) => void
+  arrangeLayers: (operation: LayoutOperation, target: 'selection' | 'canvas') => ReturnType<typeof planLayerLayout>
+  arrangeLayerTiming: (request: TimingRequest) => ReturnType<typeof planLayerTiming>
+  endCanvasTransform: (commit: boolean) => void
   reorderLayers: (fromIndex: number, toIndex: number) => void
   addLayer: (layer: Omit<Layer, 'id'>) => string
   deleteLayer: (layerId: string) => void
@@ -160,6 +179,7 @@ interface EditorStore {
   toggleGrid: () => void
   toggleOnionSkin: () => void
   setRendererMode: (mode: 'high-performance' | 'official' | 'pixi') => void
+  setCanvasKeepRatio: (value: boolean) => void
 
   // 导出配置
   setCompressionConfig: (config: Partial<CompressionConfig>) => void
@@ -203,6 +223,7 @@ const cloneParams = (params: MovieParams | null): MovieParams | null =>
 
 const cloneLayer = (layer: Layer): Layer => ({
   ...layer,
+  canvasTransform: layer.canvasTransform ? { ...layer.canvasTransform } : undefined,
   clip: { ...layer.clip },
   imageSource: layer.imageSource ? { ...layer.imageSource, file: undefined } : undefined,
   audioSource: layer.audioSource ? { ...layer.audioSource, file: undefined } : undefined,
@@ -300,6 +321,7 @@ const createSnapshot = (state: EditorStore): EditorSnapshot => ({
   customFrames: state.customFrames,
   layers: state.layers.map(cloneLayer),
   selectedLayerId: state.selectedLayerId,
+  selectedLayerIds: getSelectedLayerIds(state),
   imageResources: cloneImageResources(state.imageResources),
   audioResources: cloneAudioResources(state.audioResources),
   slotConfigs: cloneSlotConfigs(state.slotConfigs),
@@ -326,6 +348,10 @@ const isSameSnapshot = (a: EditorSnapshot, b: EditorSnapshot) =>
 
 export const useEditorStore = create<EditorStore>()(
   subscribeWithSelector((set, get) => {
+    let canvasEdit: {
+      before: EditorSnapshot; layerIds: string[]; video: VideoItem | null; buffer: ArrayBuffer | null
+      originalLayers: Layer[]; latestLayers: Layer[]; dirty: boolean
+    } | null = null
     const applySnapshot = (snapshot: EditorSnapshot) => {
       set((state) => ({
         params: cloneParams(snapshot.params),
@@ -333,6 +359,7 @@ export const useEditorStore = create<EditorStore>()(
         customFrames: snapshot.customFrames,
         layers: snapshot.layers.map(cloneLayer),
         selectedLayerId: snapshot.selectedLayerId,
+        selectedLayerIds: [...snapshot.selectedLayerIds],
         imageResources: cloneImageResources(snapshot.imageResources),
         audioResources: cloneAudioResources(snapshot.audioResources),
         slotConfigs: cloneSlotConfigs(snapshot.slotConfigs),
@@ -355,7 +382,7 @@ export const useEditorStore = create<EditorStore>()(
       }))
     }
 
-    const pushHistory = (snapshot: EditorSnapshot, label?: string) => {
+    const pushHistory = (snapshot: EditorSnapshot, label = '修改编辑内容') => {
       const state = get()
       if (state.history.isApplyingHistory) return
 
@@ -371,11 +398,31 @@ export const useEditorStore = create<EditorStore>()(
     }
 
     const withHistory = (updater: Parameters<typeof set>[0], label?: string) => {
+      finishCanvasEdit(true)
       const before = createSnapshot(get())
       set(updater)
       const after = createSnapshot(get())
       if (!isSameSnapshot(before, after)) {
         pushHistory(before, label)
+      }
+    }
+
+    // 一次拖动仅保存一个快照；逐帧预览不复制全部图片或累加撤销条目。
+    const finishCanvasEdit = (commit: boolean) => {
+      const edit = canvasEdit
+      if (!edit) return
+      canvasEdit = null
+      const state = get()
+      set({ isCanvasTransforming: false })
+      if (state.videoItem !== edit.video || state.originalBuffer !== edit.buffer || state.layers !== edit.latestLayers) return
+      const ids = new Set(edit.layerIds)
+      const before = edit.originalLayers.filter(layer => ids.has(layer.id)).map(layer => [layer.id, normalizeCanvasTransform(layer.canvasTransform)])
+      const after = state.layers.filter(layer => ids.has(layer.id)).map(layer => [layer.id, normalizeCanvasTransform(layer.canvasTransform)])
+      const changed = JSON.stringify(before) !== JSON.stringify(after)
+      if (!commit || !changed) {
+        set({ layers: edit.originalLayers, isDirty: edit.dirty })
+      } else {
+        pushHistory(edit.before, edit.layerIds.length > 1 ? `整体变换：${edit.layerIds.length} 个图层` : `画布变换：${state.layers.find(layer => layer.id === edit.layerIds[0])?.name || edit.layerIds[0]}`)
       }
     }
 
@@ -401,6 +448,7 @@ export const useEditorStore = create<EditorStore>()(
 
     layers: [],
     selectedLayerId: null,
+    selectedLayerIds: [],
 
     // 新增：资源库
     imageResources: new Map<string, ImageResource>(),
@@ -433,10 +481,14 @@ export const useEditorStore = create<EditorStore>()(
     },
     canUndo: false,
     canRedo: false,
+    isCanvasTransforming: false,
+    canvasKeepRatio: true,
 
     // Actions
     setVideoItem: (videoItem) => {
-      set({ videoItem, isDirty: false })
+      canvasEdit = null
+      set({ isCanvasTransforming: false })
+      set({ videoItem, isDirty: false, selectedLayerId: null, selectedLayerIds: [] })
       clearHistoryState()
       if (videoItem?.movie.params) {
         const params = videoItem.movie.params
@@ -507,7 +559,7 @@ export const useEditorStore = create<EditorStore>()(
           })
         }
         
-        set({ layers, selectedLayerId: null, imageResources })
+        set({ layers, selectedLayerId: null, selectedLayerIds: [], imageResources })
       }
     },
 
@@ -520,7 +572,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     setParams: (params) => {
-      withHistory({ params }, 'Update params')
+      withHistory({ params }, '修改动画参数')
       if (params) {
         set({
           playback: {
@@ -533,7 +585,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     setCustomFps: (fps) => {
-      withHistory({ customFps: fps, isDirty: true }, 'Update FPS')
+      withHistory({ customFps: fps, isDirty: true }, '修改帧率')
       const state = get()
       const nextFps = fps ?? state.params?.fps ?? state.playback.fps
       set({
@@ -545,7 +597,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     setCustomFrames: (frames) => {
-      withHistory({ customFrames: frames, isDirty: true }, 'Update frames')
+      withHistory({ customFrames: frames, isDirty: true }, '修改总帧数')
       const state = get()
       const nextFrames = frames ?? state.params?.frames ?? state.playback.totalFrames
       set({
@@ -559,20 +611,108 @@ export const useEditorStore = create<EditorStore>()(
 
     // 图层操作
     setLayers: (layers) => {
-      withHistory({ layers, isDirty: true }, 'Set layers')
+      withHistory({ layers, ...selectionForLayers(getSelectedLayerIds(get()), layers), isDirty: true }, '更新图层')
     },
 
-    selectLayer: (layerId) => {
-      set({ selectedLayerId: layerId })
+    selectLayer: (layerId, additive = false) => {
+      const selected = getSelectedLayerIds(get())
+      const ids = !layerId ? [] : !additive ? [layerId] : selected.includes(layerId) ? selected.filter(id => id !== layerId) : [...selected, layerId]
+      get().selectLayers(ids)
+    },
+
+    selectLayers: (layerIds) => {
+      const next = selectionForLayers(layerIds, get().layers)
+      if (JSON.stringify(getSelectedLayerIds(get())) !== JSON.stringify(next.selectedLayerIds)) finishCanvasEdit(true)
+      set(next)
+    },
+
+    updateCanvasTransform: (layerId, transform) => {
+      const layer = get().layers.find(layer => layer.id === layerId)
+      if (!layer || layer.locked || !layer.visible) return
+      const next = normalizeCanvasTransform({ ...normalizeCanvasTransform(layer.canvasTransform), ...transform })
+      if (JSON.stringify(next) === JSON.stringify(normalizeCanvasTransform(layer.canvasTransform))) return
+      withHistory(state => ({ layers: state.layers.map(layer => layer.id === layerId ? { ...layer, canvasTransform: next } : layer), isDirty: true }), `画布变换：${layer.name}`)
+    },
+
+    beginCanvasTransform: (layerId) => {
+      return get().beginCanvasTransforms([layerId])
+    },
+
+    beginCanvasTransforms: (layerIds) => {
+      finishCanvasEdit(true)
+      const state = get()
+      const ids = [...new Set(layerIds)]
+      // 拒绝不完整或含锁定/隐藏项的集合，避免用户以为整个选区都已移动。
+      if (!ids.length || !state.videoItem || ids.some(id => { const layer = state.layers.find(item => item.id === id); return !layer || layer.locked || !layer.visible })) return false
+      state.setPlaying(false)
+      canvasEdit = { before: createSnapshot(get()), layerIds: ids, video: state.videoItem, buffer: state.originalBuffer, originalLayers: state.layers, latestLayers: state.layers, dirty: state.isDirty }
+      set({ isCanvasTransforming: true })
+      return true
+    },
+
+    previewCanvasTransform: (layerId, transform) => {
+      if (!canvasEdit || canvasEdit.layerIds.length !== 1 || canvasEdit.layerIds[0] !== layerId) { finishCanvasEdit(false); return }
+      get().previewCanvasTransforms({ [layerId]: transform })
+    },
+
+    previewCanvasTransforms: (transforms) => {
+      const edit = canvasEdit
+      const state = get()
+      if (!edit || state.layers !== edit.latestLayers || state.videoItem !== edit.video || state.originalBuffer !== edit.buffer) { finishCanvasEdit(false); return }
+      const ids = new Set(edit.layerIds)
+      if (Object.keys(transforms).length !== ids.size || edit.layerIds.some(id => !Object.prototype.hasOwnProperty.call(transforms, id))) { finishCanvasEdit(false); return }
+      const layers = state.layers.map(layer => ids.has(layer.id) ? { ...layer, canvasTransform: normalizeCanvasTransform(transforms[layer.id]) } : layer)
+      edit.latestLayers = layers
+      set({ layers, isDirty: true })
+    },
+
+    endCanvasTransform: finishCanvasEdit,
+
+    arrangeLayers: (operation, target) => {
+      finishCanvasEdit(true)
+      get().setPlaying(false)
+      // 暂停回调会同步实际绘制帧，必须在其后重新读取状态和几何。
+      const state = get()
+      const ids = new Set(getSelectedLayerIds(state))
+      const selected = state.layers.filter(layer => ids.has(layer.id))
+      const plan = planLayerLayout(selected, state.playback.currentFrame, state.videoItem, state.imageResources, operation, target)
+      if ('error' in plan || !plan.changed) return plan
+      withHistory(current => ({
+        layers: current.layers.map(layer => Object.prototype.hasOwnProperty.call(plan.transforms, layer.id)
+          ? { ...layer, canvasTransform: plan.transforms[layer.id] } : layer),
+        isDirty: true
+      }), `${LAYOUT_LABELS[operation]}：${selected.length} 个图层（${target === 'canvas' ? '画布' : '选区'}）`)
+      return plan
+    },
+
+    arrangeLayerTiming: (request) => {
+      finishCanvasEdit(true)
+      get().setPlaying(false)
+      const state = get()
+      const selectedIds = getSelectedLayerIds(state)
+      const plan = planLayerTiming(state.layers, selectedIds, state.videoItem, state.playback.totalFrames, request)
+      if ('error' in plan || !plan.changed) return plan
+      const label = request.mode === 'reset' ? '重置时间偏移' : request.mode === 'stagger' ? '依次错开图层' : request.frames < 0 ? '提前图层' : '延后图层'
+      withHistory(current => ({
+        layers: current.layers.map(layer => Object.prototype.hasOwnProperty.call(plan.offsets, layer.id)
+          ? { ...layer, timeOffsetFrames: plan.offsets[layer.id] } : layer),
+        customFrames: plan.totalFrames === current.playback.totalFrames ? current.customFrames : plan.totalFrames,
+        playback: { ...current.playback, totalFrames: plan.totalFrames },
+        isDirty: true
+      }), `${label}：${selectedIds.length} 个图层`)
+      return plan
     },
 
     updateLayer: (layerId, updates) => {
+      const action = updates.name !== undefined ? '重命名图层'
+        : updates.visible !== undefined ? (updates.visible ? '显示图层' : '隐藏图层')
+        : updates.locked !== undefined ? (updates.locked ? '锁定图层' : '解锁图层') : '修改图层属性'
       withHistory((state) => ({
         layers: state.layers.map((layer) =>
           layer.id === layerId ? { ...layer, ...updates } : layer
         ),
         isDirty: true
-      }))
+      }), `${action}：${get().layers.find(layer => layer.id === layerId)?.name || layerId}`)
     },
 
     updateLayerTrackDefaultValue: (layerId, trackKey, value) => {
@@ -589,7 +729,7 @@ export const useEditorStore = create<EditorStore>()(
           }
         }),
         isDirty: true
-      }))
+      }), `调整${({ position: '位置', scale: '缩放', rotation: '旋转', alpha: '透明度' })[trackKey]}：${get().layers.find(layer => layer.id === layerId)?.name || layerId}`)
     },
 
     reorderLayers: (fromIndex, toIndex) => {
@@ -598,7 +738,7 @@ export const useEditorStore = create<EditorStore>()(
         const [removed] = layers.splice(fromIndex, 1)
         layers.splice(toIndex, 0, removed)
         return { layers, isDirty: true }
-      })
+      }, '调整图层顺序')
     },
 
     addLayer: (layer) => {
@@ -606,17 +746,18 @@ export const useEditorStore = create<EditorStore>()(
       withHistory((state) => ({
         layers: [...state.layers, { ...layer, id }],
         selectedLayerId: id,
+        selectedLayerIds: [id],
         isDirty: true
-      }))
+      }), `新增图层：${layer.name}`)
       return id
     },
 
     deleteLayer: (layerId) => {
       withHistory((state) => ({
         layers: state.layers.filter((l) => l.id !== layerId),
-        selectedLayerId: state.selectedLayerId === layerId ? null : state.selectedLayerId,
+        ...selectionForLayers(getSelectedLayerIds(state).filter(id => id !== layerId), state.layers),
         isDirty: true
-      }))
+      }), `删除图层：${get().layers.find(layer => layer.id === layerId)?.name || layerId}`)
     },
 
     duplicateLayer: (layerId) => {
@@ -641,8 +782,9 @@ export const useEditorStore = create<EditorStore>()(
       withHistory((state) => ({
         layers: [...state.layers, duplicated],
         selectedLayerId: newId,
+        selectedLayerIds: [newId],
         isDirty: true
-      }))
+      }), `复制图层：${layer.name}`)
 
       return newId
     },
@@ -653,7 +795,7 @@ export const useEditorStore = create<EditorStore>()(
         const newResources = new Map(state.imageResources)
         newResources.set(resource.key, resource)
         return { imageResources: newResources, isDirty: true }
-      })
+      }, `添加图片资源：${resource.key}`)
     },
 
     removeImageResource: (key) => {
@@ -671,12 +813,10 @@ export const useEditorStore = create<EditorStore>()(
           imageResources: newResources,
           slotConfigs,
           layers,
-          selectedLayerId: shouldRemoveLayers && state.selectedLayerId && !layers.some((layer) => layer.id === state.selectedLayerId)
-            ? null
-            : state.selectedLayerId,
+          ...selectionForLayers(getSelectedLayerIds(state), layers),
           isDirty: true
         }
-      })
+      }, `删除图片资源：${key}`)
     },
 
     getImageResource: (key) => {
@@ -790,7 +930,7 @@ export const useEditorStore = create<EditorStore>()(
           detectedSlots,
           isDirty: true
         }
-      })
+      }, `重命名图片资源：${oldKey} → ${trimmedKey}`)
 
       return true
     },
@@ -801,7 +941,7 @@ export const useEditorStore = create<EditorStore>()(
         const newResources = new Map(state.audioResources)
         newResources.set(resource.key, resource)
         return { audioResources: newResources, isDirty: true }
-      })
+      }, `添加音频：${resource.key}`)
     },
 
     removeAudioResource: (key) => {
@@ -809,7 +949,7 @@ export const useEditorStore = create<EditorStore>()(
         const newResources = new Map(state.audioResources)
         newResources.delete(key)
         return { audioResources: newResources, isDirty: true }
-      })
+      }, `删除音频：${key}`)
     },
 
     getAudioResource: (key) => {
@@ -817,7 +957,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     setAudioResources: (resources) => {
-      withHistory({ audioResources: resources, isDirty: true }, 'Set audio resources')
+      withHistory({ audioResources: resources, isDirty: true }, '更新音频资源')
     },
 
     // 插槽操作
@@ -825,28 +965,30 @@ export const useEditorStore = create<EditorStore>()(
       withHistory((state) => ({
         slotConfigs: { ...state.slotConfigs, [key]: config },
         isDirty: true
-      }))
+      }), `${config.type === 'image' ? '替换图片' : '设置文字插槽'}：${key}`)
     },
 
     removeSlotConfig: (key) => {
       withHistory((state) => {
         const { [key]: _, ...rest } = state.slotConfigs
         return { slotConfigs: rest, isDirty: true }
-      })
+      }, `清除素材替换：${key}`)
     },
 
     setDetectedSlots: (slots) => {
-      withHistory({ detectedSlots: slots, isDirty: true }, 'Set detected slots')
+      withHistory({ detectedSlots: slots, isDirty: true }, '更新插槽列表')
     },
 
     // 播放控制
     setPlaying: (playing) => {
+      if (playing) finishCanvasEdit(true)
       set((state) => ({
         playback: { ...state.playback, isPlaying: playing }
       }))
     },
 
     setCurrentFrame: (frame) => {
+      if (frame !== get().playback.currentFrame) finishCanvasEdit(true)
       set((state) => ({
         playback: { ...state.playback, currentFrame: frame }
       }))
@@ -869,7 +1011,7 @@ export const useEditorStore = create<EditorStore>()(
       withHistory((state) => ({
         keyframes: [...state.keyframes, { ...keyframe, id: uuid() }],
         isDirty: true
-      }))
+      }), '新增关键帧')
     },
 
     updateKeyframe: (id, updates) => {
@@ -878,14 +1020,14 @@ export const useEditorStore = create<EditorStore>()(
           kf.id === id ? { ...kf, ...updates } : kf
         ),
         isDirty: true
-      }))
+      }), '修改关键帧')
     },
 
     deleteKeyframe: (id) => {
       withHistory((state) => ({
         keyframes: state.keyframes.filter((kf) => kf.id !== id),
         isDirty: true
-      }))
+      }), '删除关键帧')
     },
 
     selectKeyframe: (id, multi = false) => {
@@ -920,7 +1062,7 @@ export const useEditorStore = create<EditorStore>()(
           }
         }),
         isDirty: true
-      }))
+      }), '新增图层关键帧')
     },
 
     updateLayerKeyframe: (layerId, trackKey, keyframeId, updates) => {
@@ -940,7 +1082,7 @@ export const useEditorStore = create<EditorStore>()(
           }
         }),
         isDirty: true
-      }))
+      }), '修改图层关键帧')
     },
 
     deleteLayerKeyframe: (layerId, trackKey, keyframeId) => {
@@ -958,7 +1100,7 @@ export const useEditorStore = create<EditorStore>()(
           }
         }),
         isDirty: true
-      }))
+      }), '删除图层关键帧')
     },
 
     applyAnimationPreset: (layerId, preset, startFrame) => {
@@ -1039,15 +1181,17 @@ export const useEditorStore = create<EditorStore>()(
           }),
           isDirty: true
         }
-      })
+      }, `应用动画预设：${preset.name}`)
     },
 
     // UI 操作
     setZoom: (zoom) => {
+      finishCanvasEdit(true)
       set({ zoom: Math.max(0.1, Math.min(5, zoom)) })
     },
 
     setCanvasOffset: (offset) => {
+      finishCanvasEdit(true)
       set({ canvasOffset: offset })
     },
 
@@ -1066,13 +1210,14 @@ export const useEditorStore = create<EditorStore>()(
     setRendererMode: (mode) => {
       set({ rendererMode: mode })
     },
+    setCanvasKeepRatio: (value) => set({ canvasKeepRatio: value }),
 
     // 导出配置
     setCompressionConfig: (config) => {
       withHistory((state) => ({
         compressionConfig: { ...state.compressionConfig, ...config },
         isDirty: true
-      }), 'Update compression')
+      }), '修改压缩设置')
     },
     
     // 优化配置
@@ -1081,7 +1226,7 @@ export const useEditorStore = create<EditorStore>()(
         optimizationConfig: { ...state.optimizationConfig, ...config, enabled: config.enabled ?? true },
         selectedPresetId: 'custom',
         isDirty: true
-      }), 'Update optimization')
+      }), '修改优化设置')
     },
     
     setSelectedPresetId: (id) => {
@@ -1091,7 +1236,7 @@ export const useEditorStore = create<EditorStore>()(
         selectedPresetId: id,
         optimizationConfig: id === 'custom' ? { ...state.optimizationConfig, enabled: true } : structuredClone(preset.config),
         isDirty: true
-      }), 'Select preset')
+      }), `选择压缩方案：${preset.name}`)
     },
     
     setOptimizationStats: (stats) => {
@@ -1099,6 +1244,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     undo: () => {
+      if (canvasEdit) { finishCanvasEdit(false); return }
       const state = get()
       const entry = state.history.past[state.history.past.length - 1]
       if (!entry) return
@@ -1123,6 +1269,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     redo: () => {
+      if (canvasEdit) { finishCanvasEdit(false); return }
       const state = get()
       const entry = state.history.future[0]
       if (!entry) return
@@ -1154,7 +1301,10 @@ export const useEditorStore = create<EditorStore>()(
 
     // 重置
     reset: () => {
+      canvasEdit = null
       set({
+        isCanvasTransforming: false,
+        canvasKeepRatio: true,
         currentSource: null,
         sourceType: null,
         videoItem: null,
@@ -1165,6 +1315,7 @@ export const useEditorStore = create<EditorStore>()(
         customFrames: null,
         layers: [],
         selectedLayerId: null,
+        selectedLayerIds: [],
         imageResources: new Map<string, ImageResource>(),
         audioResources: new Map<string, AudioResource>(),
         slotConfigs: {},

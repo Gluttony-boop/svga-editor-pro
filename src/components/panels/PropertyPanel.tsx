@@ -1,6 +1,11 @@
 import React from 'react'
-import { Panel, NumberInput, Slider, Icon } from '@/components/ui'
+import { Panel, NumberInput, Icon } from '@/components/ui'
 import { useEditorStore, useCurrentParams } from '@/stores'
+import { CanvasTransformInspector } from './CanvasTransformInspector'
+import { MultiSelectionInspector } from './MultiSelectionInspector'
+import { getSelectedLayerIds } from '@/utils/layer-selection'
+import { LayerLayoutInspector } from './LayerLayoutInspector'
+import { LayerTimingInspector } from './LayerTimingInspector'
 
 interface PropertyPanelProps {
   className?: string
@@ -17,14 +22,29 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
   const videoItem = useEditorStore((s) => s.videoItem)
   const layers = useEditorStore((s) => s.layers)
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId)
+  const selectedLayerIds = useEditorStore((s) => s.selectedLayerIds)
+  const selectLayer = useEditorStore((s) => s.selectLayer)
   const renameImageKey = useEditorStore((s) => s.renameImageKey)
-  const updateLayerTrackDefaultValue = useEditorStore((s) => s.updateLayerTrackDefaultValue)
-  const imageResources = useEditorStore((s) => s.imageResources)
 
   const selectedLayer = layers.find((l) => l.id === selectedLayerId)
+  const selection = React.useMemo(
+    () => getSelectedLayerIds({ layers, selectedLayerId, selectedLayerIds }),
+    [layers, selectedLayerId, selectedLayerIds]
+  )
+  const isMultiSelection = selection.length > 1
+  const selectedLayers = React.useMemo(() => {
+    const ids = new Set(selection)
+    return layers.filter(layer => ids.has(layer.id))
+  }, [layers, selection])
   const [editingKey, setEditingKey] = React.useState(false)
   const [keyValue, setKeyValue] = React.useState('')
   const keyInputRef = React.useRef<HTMLInputElement>(null)
+
+  React.useEffect(() => {
+    // 切换选区时丢弃未提交的 Key 草稿，避免将旧输入应用到新的主图层。
+    setEditingKey(false)
+    setKeyValue('')
+  }, [selectedLayerId, isMultiSelection])
 
   React.useEffect(() => {
     if (editingKey && keyInputRef.current) {
@@ -84,7 +104,7 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
     >
       <div className="space-y-3">
         {/* 图层 Key */}
-        {selectedLayer && selectedLayer.imageKey && (
+        {!isMultiSelection && selectedLayer && selectedLayer.imageKey && (
           <div>
             <div className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">图层 Key</div>
             {editingKey ? (
@@ -120,171 +140,18 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
           </div>
         )}
 
-        {/* 图层属性 */}
-        {selectedLayer && (
-          <div className="space-y-3">
-            {/* 分隔线 */}
-            <div className="border-t border-border" />
+        {isMultiSelection ? (
+          <MultiSelectionInspector
+            layers={selectedLayers}
+            primaryLayer={selectedLayer}
+            onKeepPrimary={() => selectedLayer && selectLayer(selectedLayer.id)}
+          />
+        ) : selectedLayer && <CanvasTransformInspector key={selectedLayer.id} layer={selectedLayer} />}
 
-            {/* 位置 */}
-            <div>
-              <div className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">位置</div>
-              <div className="grid grid-cols-2 gap-2">
-                <NumberInput
-                  label="X"
-                  value={Math.round(selectedLayer.tracks.position.defaultValue.x)}
-                  step={1}
-                  unit="px"
-                  onChange={(v) => {
-                    updateLayerTrackDefaultValue(selectedLayer.id, 'position', {
-                      ...selectedLayer.tracks.position.defaultValue,
-                      x: v
-                    })
-                  }}
-                />
-                <NumberInput
-                  label="Y"
-                  value={Math.round(selectedLayer.tracks.position.defaultValue.y)}
-                  step={1}
-                  unit="px"
-                  onChange={(v) => {
-                    updateLayerTrackDefaultValue(selectedLayer.id, 'position', {
-                      ...selectedLayer.tracks.position.defaultValue,
-                      y: v
-                    })
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* 尺寸 */}
-            {(() => {
-              const imgRes = selectedLayer.imageKey ? imageResources.get(selectedLayer.imageKey) : undefined
-              const origW = imgRes?.width ?? 0
-              const origH = imgRes?.height ?? 0
-              const scaleX = selectedLayer.tracks.scale.defaultValue.scaleX
-              const scaleY = selectedLayer.tracks.scale.defaultValue.scaleY
-              const displayW = Math.round(origW * scaleX)
-              const displayH = Math.round(origH * scaleY)
-              const hasOrigSize = origW > 0 && origH > 0
-
-              return (
-                <div>
-                  <div className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">尺寸</div>
-                  <div className="space-y-2">
-                    <div className="grid grid-cols-2 gap-2">
-                      <NumberInput
-                        label="宽度"
-                        value={displayW}
-                        disabled={!hasOrigSize}
-                        step={1}
-                        unit="px"
-                        onChange={(v) => {
-                          if (!hasOrigSize) return
-                          const newScaleX = v / origW
-                          updateLayerTrackDefaultValue(selectedLayer.id, 'scale', {
-                            ...selectedLayer.tracks.scale.defaultValue,
-                            scaleX: newScaleX
-                          })
-                        }}
-                      />
-                      <NumberInput
-                        label="高度"
-                        value={displayH}
-                        disabled={!hasOrigSize}
-                        step={1}
-                        unit="px"
-                        onChange={(v) => {
-                          if (!hasOrigSize) return
-                          const newScaleY = v / origH
-                          updateLayerTrackDefaultValue(selectedLayer.id, 'scale', {
-                            ...selectedLayer.tracks.scale.defaultValue,
-                            scaleY: newScaleY
-                          })
-                        }}
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <NumberInput
-                        label="缩放 X"
-                        value={Math.round(scaleX * 100)}
-                        min={1}
-                        max={500}
-                        step={1}
-                        unit="%"
-                        onChange={(v) => {
-                          updateLayerTrackDefaultValue(selectedLayer.id, 'scale', {
-                            ...selectedLayer.tracks.scale.defaultValue,
-                            scaleX: v / 100
-                          })
-                        }}
-                      />
-                      <NumberInput
-                        label="缩放 Y"
-                        value={Math.round(scaleY * 100)}
-                        min={1}
-                        max={500}
-                        step={1}
-                        unit="%"
-                        onChange={(v) => {
-                          updateLayerTrackDefaultValue(selectedLayer.id, 'scale', {
-                            ...selectedLayer.tracks.scale.defaultValue,
-                            scaleY: v / 100
-                          })
-                        }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              )
-            })()}
-
-            {/* 旋转 */}
-            {(() => {
-              const radToDeg = (rad: number) => ((rad * 180 / Math.PI) % 360 + 360) % 360
-              const degToRad = (deg: number) => deg * Math.PI / 180
-              const rotationDeg = Math.round(radToDeg(selectedLayer.tracks.rotation.defaultValue))
-
-              return (
-                <div>
-                  <div className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">旋转</div>
-                  <Slider
-                    value={rotationDeg}
-                    min={0}
-                    max={360}
-                    step={1}
-                    unit="°"
-                    onChange={(v) => {
-                      updateLayerTrackDefaultValue(selectedLayer.id, 'rotation', degToRad(v))
-                    }}
-                  />
-                </div>
-              )
-            })()}
-
-            {/* 透明度 */}
-            {(() => {
-              const alpha = selectedLayer.tracks.alpha.defaultValue
-              const alphaPct = Math.round(alpha * 100)
-
-              return (
-                <div>
-                  <div className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">透明度</div>
-                  <Slider
-                    value={alphaPct}
-                    min={0}
-                    max={100}
-                    step={1}
-                    unit="%"
-                    onChange={(v) => {
-                      updateLayerTrackDefaultValue(selectedLayer.id, 'alpha', v / 100)
-                    }}
-                  />
-                </div>
-              )
-            })()}
-          </div>
-        )}
+        {selectedLayers.length > 0 && <>
+          <LayerTimingInspector />
+          <LayerLayoutInspector key={isMultiSelection ? 'multiple-layout' : 'single-layout'} />
+        </>}
 
         {/* 尺寸信息 */}
         <div>

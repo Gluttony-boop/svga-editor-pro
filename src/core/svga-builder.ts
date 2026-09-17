@@ -16,9 +16,10 @@ import type {
   Layout
 } from '@/types'
 import { AnimationEngine } from './animation-engine'
+import { applyLayerFrameEdits, bakeLayerFrames, findOriginalLayer } from './layer-transform'
+import { getLayerSourceFrame } from './layer-time'
 import {
   createLayerImageAliases,
-  findLayerForSpriteIndex,
   normalizeMovieImageReferences
 } from './layer-name-sync'
 import SVGA_PROTO_JSON from './svga-proto'
@@ -31,13 +32,6 @@ export interface SVGABuildConfig {
   slotConfigs?: Record<string, SlotConfig>
   /** 新增图片的尺寸信息 */
   imageSizes?: Map<string, { width: number; height: number }>
-}
-
-function cloneFrame(frame: FrameData): FrameData {
-  if (typeof structuredClone === 'function') {
-    return structuredClone(frame)
-  }
-  return JSON.parse(JSON.stringify(frame)) as FrameData
 }
 
 function createEmptyFrame(): FrameData {
@@ -59,12 +53,11 @@ function fitSpriteFrameCount(sprite: Sprite, frameCount: number): Sprite {
     return { ...sprite, frames: frames.slice(0, frameCount) }
   }
 
-  const lastFrame = frames[frames.length - 1] ?? createEmptyFrame()
   return {
     ...sprite,
     frames: [
       ...frames,
-      ...Array.from({ length: frameCount - frames.length }, () => cloneFrame(lastFrame))
+      ...Array.from({ length: frameCount - frames.length }, () => createEmptyFrame())
     ]
   }
 }
@@ -179,9 +172,10 @@ export class SVGABuilder {
 
     // 计算每一帧的数据
     for (let frameIndex = 0; frameIndex < params.frames; frameIndex++) {
+      const sourceFrame = getLayerSourceFrame(layer, frameIndex)
       // 检查图层是否在此帧可见
       const { startFrame, duration } = layer.clip
-      if (frameIndex < startFrame || frameIndex >= startFrame + duration) {
+      if (sourceFrame < 0 || sourceFrame < startFrame || sourceFrame >= startFrame + duration) {
         // 不在此帧范围内，添加空白帧
         frames.push({
           alpha: 0,
@@ -193,7 +187,7 @@ export class SVGABuilder {
       }
 
       // 获取图层在此帧的属性
-      const props = AnimationEngine.getLayerPropertiesAtFrame(layer, frameIndex)
+      const props = AnimationEngine.getLayerPropertiesAtFrame(layer, sourceFrame)
 
       // 构建 FrameData
       const frameData = this.buildFrameData(props, frameIndex, layer, imageSize)
@@ -244,8 +238,9 @@ export class SVGABuilder {
     let layout: Layout | null = null
 
     // 如果图层有原始 sprites 数据，使用其 layout
-    if (layer.sprites?.frames?.[frameIndex]?.layout) {
-      layout = { ...layer.sprites.frames[frameIndex].layout }
+    const sourceFrame = getLayerSourceFrame(layer, frameIndex)
+    if (layer.sprites?.frames?.[sourceFrame]?.layout) {
+      layout = { ...layer.sprites.frames[sourceFrame].layout }
     } else if (imageSize) {
       // 新增图层：使用图片实际尺寸
       layout = {
@@ -256,12 +251,12 @@ export class SVGABuilder {
       }
     }
 
-    return {
+    return applyLayerFrameEdits({
       alpha,
       layout,
       transform,
       clipPath: null
-    }
+    }, layer, frameIndex, imageSize)
   }
 
   private async convertToPng(url: string): Promise<ArrayBuffer> {
@@ -354,7 +349,7 @@ export class SVGABuilder {
     }
 
     // 构建图片尺寸映射
-    const imageSizes = new Map<string, { width: number; height: number }>()
+    const imageSizes = new Map<string, { width: number; height: number }>(config.imageSizes)
     config.imageResources.forEach((resource, key) => {
       if (resource.width > 0 && resource.height > 0) {
         imageSizes.set(key, { width: resource.width, height: resource.height })
@@ -366,7 +361,7 @@ export class SVGABuilder {
     const sourceKeyByLayerId = new Map<string, string>()
     if (originalObj.sprites) {
       originalObj.sprites.forEach((sprite: Sprite, index: number) => {
-        const layer = findLayerForSpriteIndex(config.layers, index)
+        const layer = findOriginalLayer(config.layers, index)
         const sourceKey = sprite.imageKey || layer?.imageKey || ''
         if (layer && sourceKey) {
           sourceKeyByLayerId.set(layer.id, sourceKey)
@@ -387,23 +382,18 @@ export class SVGABuilder {
 
     // 更新现有图层的动画；缺失的原始图层视为已删除
     const updatedOriginalSprites = originalSprites.flatMap((sprite: Sprite, index: number) => {
-      const layer = findLayerForSpriteIndex(config.layers, index)
+      const layer = findOriginalLayer(config.layers, index)
       if (!layer) return []
 
-      // 检查图层是否有新的动画关键帧
-      const hasNewAnimation = Object.values(layer.tracks).some(
-        track => track.keyframes.length > 0
-      )
       const exportImageKey = imageAliases.get(layer.id) || sprite.imageKey
       const hasRenamed = Boolean(exportImageKey && exportImageKey !== sprite.imageKey)
-
-      if (!hasNewAnimation) {
-        const nextSprite = hasRenamed ? { ...sprite, imageKey: exportImageKey } : sprite
-        return [fitSpriteFrameCount(nextSprite, config.params.frames)]
+      let nextSprite = hasRenamed ? { ...sprite, imageKey: exportImageKey } : sprite
+      // 导入图层的逐帧矩阵、路径和遮罩是原始动画；整段调整不得改成新增图层重建。
+      nextSprite = {
+        ...nextSprite,
+        frames: bakeLayerFrames(sprite.frames, layer, config.params.frames, imageSizes.get(layer.imageKey || ''))
       }
-
-      // 重新计算帧数据
-      return [this.buildSprite(layer, config.params, undefined, exportImageKey)]
+      return [fitSpriteFrameCount(nextSprite, config.params.frames)]
     })
 
     const sourceToExportKey = new Map<string, string>()

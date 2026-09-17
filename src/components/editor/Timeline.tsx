@@ -2,6 +2,8 @@ import React, { useRef, useState, useEffect, useCallback, useLayoutEffect } from
 import { Icon, Button } from '@/components/ui'
 import { useEditorStore } from '@/stores'
 import { cn } from '@/utils/cn'
+import { getSelectedLayerIds } from '@/utils/layer-selection'
+import { getLayerTimeOffset, getLayerOutputRange } from '@/core/layer-time'
 import type { Layer, Keyframe } from '@/types'
 import { TIMELINE_GUTTER as GUTTER, clampFrame, frameAtPointer, rulerStep, zoomScroll, fitFrameWidth, clipRange, timelineRulerFrames } from '@/utils/timeline'
 
@@ -34,6 +36,8 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   const storeFrame = useEditorStore(s => s.playback.currentFrame)
   const layers = useEditorStore(s => s.layers)
   const selectedLayerId = useEditorStore(s => s.selectedLayerId)
+  const selectedLayerIds = useEditorStore(s => s.selectedLayerIds)
+  const selectedIds = React.useMemo(() => getSelectedLayerIds({ layers, selectedLayerId, selectedLayerIds }), [layers, selectedLayerId, selectedLayerIds])
   const selectLayer = useEditorStore(s => s.selectLayer)
   const available = !!videoItem && totalFrames > 0
   const rowHeight = compact ? 24 : 28
@@ -245,7 +249,7 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
           <div className="absolute bottom-0 pointer-events-none" style={{left:GUTTER,top:RULER,width:totalFrames*frameWidth,backgroundImage:'linear-gradient(to right, #4a586b50 1px, transparent 1px)',backgroundSize:`${frameWidth >= 16 ? frameWidth : step*frameWidth}px 100%`}} />
           <div ref={currentColumnRef} data-testid="timeline-current-column" className="absolute bottom-0 pointer-events-none bg-accent/10" style={{top:RULER,left:GUTTER+frameRef.current*frameWidth,width:frameWidth}} />
           <div className="absolute bottom-0 border-l border-border-light pointer-events-none" style={{top:RULER,left:GUTTER+totalFrames*frameWidth}} />
-          {layers.slice(firstRow,lastRow).map((layer,offset)=><LayerTrack key={layer.id} layer={layer} index={firstRow+offset} rowHeight={rowHeight} frameWidth={frameWidth} totalFrames={totalFrames} selected={selectedLayerId===layer.id} start={start} end={end} onSelect={selectLayer} />)}
+          {layers.slice(firstRow,lastRow).map((layer,offset)=><LayerTrack key={layer.id} layer={layer} index={firstRow+offset} rowHeight={rowHeight} frameWidth={frameWidth} totalFrames={totalFrames} selected={selectedIds.includes(layer.id)} start={start} end={end} onSelect={selectLayer} />)}
           {!layers.length && <p className="sticky left-0 w-fit p-3 text-xs text-text-muted">暂无图层，可在上方刻度定位帧</p>}
           <div ref={trackHeadRef} className="absolute bottom-0 w-px bg-accent pointer-events-none z-10" style={{top:RULER,left:GUTTER+frameRef.current*frameWidth}} />
         </div>}
@@ -255,16 +259,17 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   )
 }
 
-const LayerTrack = React.memo(({layer,index,rowHeight,frameWidth,totalFrames,selected,start,end,onSelect}: {layer:Layer;index:number;rowHeight:number;frameWidth:number;totalFrames:number;selected:boolean;start:number;end:number;onSelect:(id:string)=>void}) => {
-  const range=clipRange(layer.clip.startFrame,layer.clip.duration,totalFrames)
-  const frames=React.useMemo(()=>Array.from(new Set(Object.values(layer.tracks).flatMap(track=>track.keyframes.map((key: Keyframe)=>key.frameIndex)))).sort((a,b)=>a-b),[layer.tracks])
+const LayerTrack = React.memo(({layer,index,rowHeight,frameWidth,totalFrames,selected,start,end,onSelect}: {layer:Layer;index:number;rowHeight:number;frameWidth:number;totalFrames:number;selected:boolean;start:number;end:number;onSelect:(id:string,additive?:boolean)=>void}) => {
+  const range=clipRange(getLayerOutputRange(layer).startFrame,layer.clip.duration,totalFrames)
+  const timeOffset = getLayerTimeOffset(layer)
+  const frames=React.useMemo(()=>Array.from(new Set(Object.values(layer.tracks).flatMap(track=>track.keyframes.map((key: Keyframe)=>key.frameIndex+timeOffset)))).sort((a,b)=>a-b),[layer.tracks,timeOffset])
   const markers:number[]=[]
   let lastX=-Infinity
   for(const frame of frames){if(frame<start||frame>end||frame<0||frame>=totalFrames)continue;const x=frame*frameWidth;if(x-lastX>=8){markers.push(frame);lastX=x}}
   return <div data-track-layer={layer.id} className={cn('absolute left-0 right-0 border-b border-border/50',selected&&'bg-accent/5')} style={{top:RULER+index*rowHeight,height:rowHeight}}>
     {range.end>range.start && <div title={`第 ${range.start+1}–${range.end} 帧`} className={cn('absolute h-3.5 rounded border',selected?'border-accent/60 bg-accent/25':'border-border-light bg-slate-500/20',!layer.visible&&'opacity-40')} style={{top:(rowHeight-14)/2,left:GUTTER+range.start*frameWidth,width:Math.max(1,(range.end-range.start)*frameWidth)}} />}
     {markers.map(frame=><span key={frame} title={`第 ${frame+1} 帧 · 编辑关键帧`} className="absolute h-2 w-2 rotate-45 bg-accent pointer-events-none" style={{top:(rowHeight-8)/2,left:GUTTER+frame*frameWidth-4}} />)}
-    <button type="button" data-layer-label aria-label={`选择时间轴图层：${layer.name}`} aria-pressed={selected} title={layer.name} onClick={()=>onSelect(layer.id)} className={cn('sticky left-0 z-20 flex h-full items-center gap-1.5 border-r border-border px-2 text-left text-xs',selected?'bg-bg-tertiary text-accent':'bg-bg-secondary text-text-secondary hover:bg-bg-tertiary')} style={{width:GUTTER}}>
+    <button type="button" data-layer-label aria-label={`选择时间轴图层：${layer.name}`} aria-pressed={selected} title={layer.name} onClick={event=>onSelect(layer.id,event.shiftKey||event.ctrlKey||event.metaKey)} className={cn('sticky left-0 z-20 flex h-full items-center gap-1.5 border-r border-border px-2 text-left text-xs',selected?'bg-bg-tertiary text-accent':'bg-bg-secondary text-text-secondary hover:bg-bg-tertiary')} style={{width:GUTTER}}>
       <Icon name={layer.locked?'lock':!layer.visible?'eye-closed':'layer'} size={12}/><span className="truncate">{layer.name}</span>
     </button>
   </div>

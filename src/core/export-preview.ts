@@ -17,6 +17,14 @@ export function sameExportInputs(a: readonly unknown[], b: readonly unknown[]): 
   return a.length === b.length && a.every((value, index) => value === b[index])
 }
 
+/** 输入变化属于结果失效，与编码或写盘失败分开提示。 */
+export class ExportInputsChangedError extends Error {
+  constructor() {
+    super('编辑内容或导出配置已变化，请重新生成预览。')
+    this.name = 'ExportInputsChangedError'
+  }
+}
+
 export interface ExportPreviewResult {
   baseline: Blob
   optimized: Blob

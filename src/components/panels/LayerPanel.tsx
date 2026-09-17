@@ -5,12 +5,16 @@ import { LayerUtils } from '@/core'
 import type { AnimationPreset, ImageResource, Layer, VideoItem } from '@/types'
 import { cn } from '@/utils/cn'
 import { filterLayers, type LayerFilter } from '@/utils/layer-filter'
+import { listenForLayerReveal } from '@/utils/layer-navigation'
+import { detectImageMime } from '@/utils/image-mime'
+import { getLayerOutputRange, getLayerSourceFrame, getLayerTimeOffset } from '@/core/layer-time'
+import { getSelectedLayerIds } from '@/utils/layer-selection'
 
 const getLayerThumbnail = (
   layer: Layer,
   imageResources: Map<string, ImageResource>,
   videoItem: VideoItem | null,
-  objectUrlCache: Map<string, string>
+  objectUrlCache: Map<string, { url: string; buffer: ArrayBuffer; mimeType: string }>
 ): string | null => {
   if (layer.type !== 'image' || !layer.imageKey) return null
 
@@ -20,18 +24,14 @@ const getLayerThumbnail = (
   }
 
   if (videoItem?.buffers?.[layer.imageKey]) {
-    const cached = objectUrlCache.get(layer.imageKey)
-    if (cached) return cached
-
     const buffer = videoItem.buffers[layer.imageKey]
-    const data = new Uint8Array(buffer)
-    let mimeType = 'image/png'
-    if (data[0] === 0x89 && data[1] === 0x50) mimeType = 'image/png'
-    else if (data[0] === 0xff && data[1] === 0xd8) mimeType = 'image/jpeg'
-    else if (data[0] === 0x52 && data[1] === 0x49) mimeType = 'image/webp'
+    const mimeType = detectImageMime(new Uint8Array(buffer))
+    const cached = objectUrlCache.get(layer.imageKey)
+    if (cached?.buffer === buffer && cached.mimeType === mimeType) return cached.url
+    if (cached) URL.revokeObjectURL(cached.url)
 
     const url = URL.createObjectURL(new Blob([buffer], { type: mimeType }))
-    objectUrlCache.set(layer.imageKey, url)
+    objectUrlCache.set(layer.imageKey, { url, buffer, mimeType })
     return url
   }
 
@@ -175,6 +175,7 @@ const ANIMATION_PRESETS: AnimationPreset[] = [
 export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   const layers = useEditorStore((s) => s.layers)
   const selectedLayerId = useEditorStore((s) => s.selectedLayerId)
+  const selectedLayerIds = useEditorStore((s) => s.selectedLayerIds)
   const selectLayer = useEditorStore((s) => s.selectLayer)
   const updateLayer = useEditorStore((s) => s.updateLayer)
   const deleteLayer = useEditorStore((s) => s.deleteLayer)
@@ -183,10 +184,15 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   const reorderLayers = useEditorStore((s) => s.reorderLayers)
   const imageResources = useEditorStore((s) => s.imageResources)
   const videoItem = useEditorStore((s) => s.videoItem)
+  const selection = React.useMemo(
+    () => getSelectedLayerIds({ layers, selectedLayerId, selectedLayerIds }),
+    [layers, selectedLayerId, selectedLayerIds]
+  )
+  const selectedIdSet = React.useMemo(() => new Set(selection), [selection])
   const listRef = React.useRef<HTMLDivElement>(null)
-  const objectUrlCacheRef = React.useRef<Map<string, string>>(new Map())
+  const objectUrlCacheRef = React.useRef<Map<string, { url: string; buffer: ArrayBuffer; mimeType: string }>>(new Map())
 
-  const [currentFrame, setCurrentFrame] = React.useState(0)
+  const currentFrame = useEditorStore(state => state.playback.currentFrame)
   const [showAnimationMenu, setShowAnimationMenu] = React.useState<string | null>(null)
   const [showActionMenu, setShowActionMenu] = React.useState<string | null>(null)
   const [draggedIndex, setDraggedIndex] = React.useState<number | null>(null)
@@ -203,6 +209,14 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
     [layers, searchQuery, statusFilter]
   )
   const isFiltered = searchQuery.trim().length > 0 || statusFilter !== 'all'
+
+  React.useEffect(() => listenForLayerReveal((id) => {
+    if (!useEditorStore.getState().layers.some(layer => layer.id === id)) return
+    selectLayer(id)
+    setSearchQuery('')
+    setStatusFilter('all')
+    setRevealLayerId(id)
+  }), [selectLayer])
 
   React.useEffect(() => {
     setSearchQuery('')
@@ -235,17 +249,6 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   }, [filteredLayers, revealLayerId, viewportHeight])
 
   React.useEffect(() => {
-    const handleFrameUpdate = (e: CustomEvent<{ frameIndex: number }>) => {
-      setCurrentFrame(e.detail.frameIndex)
-    }
-
-    window.addEventListener('svga-frame-update', handleFrameUpdate as EventListener)
-    return () => {
-      window.removeEventListener('svga-frame-update', handleFrameUpdate as EventListener)
-    }
-  }, [])
-
-  React.useEffect(() => {
     const list = listRef.current
     if (!list) return
 
@@ -258,11 +261,20 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
 
   React.useEffect(() => {
     const cache = objectUrlCacheRef.current
+    cache.forEach((entry, key) => {
+      if (videoItem?.buffers?.[key] !== entry.buffer) {
+        URL.revokeObjectURL(entry.url)
+        cache.delete(key)
+      }
+    })
+  }, [videoItem])
+  React.useEffect(() => {
+    const cache = objectUrlCacheRef.current
     return () => {
-      cache.forEach((url) => URL.revokeObjectURL(url))
+      cache.forEach(({ url }) => URL.revokeObjectURL(url))
       cache.clear()
     }
-  }, [videoItem])
+  }, [])
 
   const visibleStart = Math.max(
     0,
@@ -300,7 +312,9 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   }
 
   const handleApplyAnimation = (layerId: string, preset: AnimationPreset) => {
-    applyAnimationPreset(layerId, preset, currentFrame)
+    const layer = layers.find(item => item.id === layerId)
+    if (!layer) return
+    applyAnimationPreset(layerId, preset, Math.max(layer.clip.startFrame, getLayerSourceFrame(layer, currentFrame)))
     setShowAnimationMenu(null)
     setShowActionMenu(null)
   }
@@ -351,7 +365,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   }
 
   const getLayerStatus = (layer: Layer) => {
-    const inRange = LayerUtils.isLayerVisibleAtFrame(layer, currentFrame)
+    const inRange = LayerUtils.isLayerVisibleAtFrame(layer, getLayerSourceFrame(layer, currentFrame))
     const hasAnimation = Object.values(layer.tracks).some(
       (track) => track.keyframes.length > 0
     )
@@ -410,8 +424,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
           <div className="flex h-10 flex-shrink-0 items-center justify-between border-b border-border/70 px-3 text-xs">
             <div className="min-w-0 text-text-muted">
               {selectedLayer ? (
-                <span className="block truncate text-text-secondary">
-                  当前：{selectedLayer.name}
+                <span className="block truncate text-text-secondary" title={selection.length > 1 ? `已选 ${selection.length} 层，主选中：${selectedLayer.name}` : `当前：${selectedLayer.name}`}>
+                  {selection.length > 1 ? `已选 ${selection.length} 层 · 主：${selectedLayer.name}` : `当前：${selectedLayer.name}`}
                 </span>
               ) : (
                 <span>未选择图层</span>
@@ -490,7 +504,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
                         layer={layer}
                         index={index}
                         canReorder={!isFiltered}
-                        selected={selectedLayerId === layer.id}
+                        selected={selectedIdSet.has(layer.id)}
+                        primary={selection.length > 1 && selectedLayerId === layer.id}
                         inRange={inRange}
                         hasAnimation={hasAnimation}
                         showAnimationMenu={showAnimationMenu === layer.id}
@@ -498,9 +513,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
                         thumbnailUrl={thumbnailUrl}
                         isEditing={editingLayerId === layer.id}
                         editingName={editingName}
-                        onClick={() => {
-                          selectLayer(layer.id)
+                        onClick={(event) => {
+                          selectLayer(layer.id, event.shiftKey || event.ctrlKey || event.metaKey)
                           setShowActionMenu(null)
+                          setShowAnimationMenu(null)
                         }}
                         onToggleVisibility={() => handleToggleVisibility(layer.id, layer.visible)}
                         onToggleLock={() => handleToggleLock(layer.id, layer.locked)}
@@ -534,6 +550,11 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
               </div>
             )}
           </div>
+          {layers.length > 1 && (
+            <div className="flex-shrink-0 border-t border-border/70 px-3 py-1.5 text-[10px] text-text-muted">
+              Shift / Ctrl / ⌘ 单击多选 · 行内按钮仅操作本层
+            </div>
+          )}
         </div>
       </Panel>
 
@@ -565,6 +586,7 @@ interface LayerItemProps {
   index: number
   canReorder: boolean
   selected: boolean
+  primary: boolean
   inRange: boolean
   hasAnimation: boolean
   showAnimationMenu: boolean
@@ -572,7 +594,7 @@ interface LayerItemProps {
   thumbnailUrl: string | null
   isEditing: boolean
   editingName: string
-  onClick: () => void
+  onClick: React.MouseEventHandler<HTMLDivElement>
   onToggleVisibility: () => void
   onToggleLock: () => void
   onDelete: () => void
@@ -599,6 +621,7 @@ const LayerItem: React.FC<LayerItemProps> = ({
   index,
   canReorder,
   selected,
+  primary,
   inRange,
   hasAnimation,
   showAnimationMenu,
@@ -628,7 +651,7 @@ const LayerItem: React.FC<LayerItemProps> = ({
   isNew
 }) => {
   const inputRef = React.useRef<HTMLInputElement>(null)
-  const endFrame = Math.max(layer.clip.startFrame, layer.clip.startFrame + layer.clip.duration - 1)
+  const timeRange = getLayerOutputRange(layer)
   const renamed = Boolean(layer.imageKey && layer.name.trim() && layer.name.trim() !== layer.imageKey)
 
   React.useEffect(() => {
@@ -656,6 +679,9 @@ const LayerItem: React.FC<LayerItemProps> = ({
         isDragging && 'opacity-30'
       )}
       onClick={onClick}
+      data-layer-id={layer.id}
+      data-selected={selected}
+      data-primary={primary}
       draggable={!isEditing && canReorder}
       onDragStart={handleDragStart}
       onDragOver={onDragOver}
@@ -715,6 +741,7 @@ const LayerItem: React.FC<LayerItemProps> = ({
                 type="button"
                 className="min-w-0 flex-1 truncate text-left text-xs font-medium text-text-primary"
                 title={layer.name}
+                aria-pressed={selected}
                 onDoubleClick={(e) => {
                   e.stopPropagation()
                   onStartRename()
@@ -727,6 +754,9 @@ const LayerItem: React.FC<LayerItemProps> = ({
             {!isEditing && hasAnimation && (
               <Icon name="animation" size={12} className="flex-shrink-0 text-accent" />
             )}
+            {!isEditing && primary && (
+              <span className="flex-shrink-0 rounded bg-accent/15 px-1 py-0.5 text-[9px] text-accent" title="多选中的主图层">主</span>
+            )}
           </div>
 
           <div className="mt-1 flex min-w-0 items-center gap-1 text-[10px] text-text-muted overflow-hidden whitespace-nowrap">
@@ -734,7 +764,8 @@ const LayerItem: React.FC<LayerItemProps> = ({
               {String(index + 1).padStart(2, '0')}
             </span>
             <span className="uppercase">{layer.type}</span>
-            <span>{layer.clip.startFrame}-{endFrame}</span>
+            <span title="输出时间范围（从第 1 帧开始）">{timeRange.startFrame + 1}–{timeRange.endFrame}</span>
+            {getLayerTimeOffset(layer) !== 0 && <span className="text-accent" title="相对源动画的时间偏移">{getLayerTimeOffset(layer) > 0 ? '+' : ''}{getLayerTimeOffset(layer)}F</span>}
             {renamed && <span className="truncate text-accent">已改名</span>}
             {!layer.visible && <span>隐藏</span>}
             {layer.locked && <span className="text-warning">锁定</span>}

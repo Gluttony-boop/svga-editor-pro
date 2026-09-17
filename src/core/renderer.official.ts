@@ -5,15 +5,12 @@
  */
 
 import type { VideoItem, SlotConfig, Layer, Sprite, FrameData } from '@/types'
+import type { RenderOptions } from './renderer'
+import { applyLayerFrameEdits, getFrameAlpha, getFrameTransform, getLayerBaseFrame, getOriginalLayerIndex } from './layer-transform'
+import { getLayerSourceFrame, getLayerTimeOffset } from './layer-time'
+import { RendererImageCache } from './renderer-images'
 
-export interface RenderOptions {
-  clearCanvas?: boolean
-  applySlots?: boolean
-  slotConfigs?: Record<string, SlotConfig>
-  layers?: Layer[]
-  imageResources?: Map<string, { data: Uint8Array; blobUrl?: string; width: number; height: number }>
-  useFrameCache?: boolean
-}
+export type { RenderOptions } from './renderer'
 
 export interface PerformanceMetrics {
   fps: number
@@ -76,7 +73,9 @@ export class OfficialSvgRenderer {
   
   // 图片缓存
   private imageCache: Map<string, HTMLImageElement> = new Map()
-  private slotImageCache: Map<string, HTMLImageElement> = new Map()
+  private liveImages = new RendererImageCache(() => this.clearFrameCache())
+  private videoGeneration = 0
+  private renderSignature = ''
 
   // 帧缓存（按需LRU）
   private frameCache: Map<number, { canvas: HTMLCanvasElement; timestamp: number }> = new Map()
@@ -107,8 +106,11 @@ export class OfficialSvgRenderer {
    * 设置视频项
    */
   async setVideoItem(videoItem: VideoItem | null, options?: { waitForImages?: boolean }): Promise<void> {
+    const generation = ++this.videoGeneration
     this.videoItem = videoItem
-    this.slotImageCache.clear()
+    this.params = null
+    this.liveImages.clear()
+    this.renderSignature = ''
     this.imageCache.clear()
     this.frameCache.clear()
     this.metrics.cacheSize = 0
@@ -134,11 +136,11 @@ export class OfficialSvgRenderer {
         imageEntries.map(([key, img]) => 
           new Promise<void>((resolve) => {
             if (img && img.complete && img.width > 0) {
-              this.imageCache.set(key, img)
+              if (generation === this.videoGeneration) this.imageCache.set(key, img)
               resolve()
             } else if (img) {
               img.onload = () => {
-                this.imageCache.set(key, img)
+                if (generation === this.videoGeneration) this.imageCache.set(key, img)
                 resolve()
               }
               img.onerror = () => {
@@ -147,7 +149,7 @@ export class OfficialSvgRenderer {
               }
               if (img.complete) {
                 if (img.width > 0) {
-                  this.imageCache.set(key, img)
+                  if (generation === this.videoGeneration) this.imageCache.set(key, img)
                 }
                 resolve()
               }
@@ -175,14 +177,21 @@ export class OfficialSvgRenderer {
     const startTime = performance.now()
     
     const { 
-      slotConfigs: _slotConfigs = {}, 
+      slotConfigs = {},
       layers = [],
       useFrameCache = true
     } = options
 
-    if (!this.videoItem || !this.params) {
+    if (!this.videoItem || !this.params || options.shouldRender?.() === false) {
       return
     }
+
+    const signature = this.createRenderSignature(slotConfigs, layers, options.applySlots !== false)
+    if (signature !== this.renderSignature) {
+      this.clearFrameCache()
+      this.renderSignature = signature
+    }
+    void this.liveImages.prepare(slotConfigs, options.applySlots !== false, options.imageResources).catch(() => undefined)
 
     // 检查帧缓存
     if (useFrameCache) {
@@ -203,62 +212,78 @@ export class OfficialSvgRenderer {
     this.ctx.setTransform(1, 0, 0, 1, 0, 0)
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
 
-    // 创建图层可见性映射
-    const layerVisibilityMap = new Map<string, { visible: boolean; opacity: number }>()
+    // 同一图片可被多层复用，图层变换和可见性必须按稳定索引分别处理。
+    const layerMap = new Map<number, Layer>()
     for (const layer of layers) {
-      layerVisibilityMap.set(layer.imageKey || layer.id, {
-        visible: layer.visible !== false,
-        opacity: layer.opacity ?? 1
-      })
+      const index = getOriginalLayerIndex(layer)
+      if (index !== null) layerMap.set(index, layer)
     }
 
     // 按正确的渲染顺序渲染所有精灵
     const sprites = this.videoItem.movie.sprites || []
     let spriteCount = 0
     
-    for (const sprite of sprites) {
+    const matteKeys = new Set(sprites.map(sprite => sprite.matteKey).filter(Boolean))
+    for (let index = 0; index < sprites.length; index++) {
+      const sprite = sprites[index]
       const { imageKey, frames, matteKey } = sprite
       
-      if (!frames || frameIndex >= frames.length) {
+      const layerState = layerMap.get(index)
+      const sourceFrame = layerState ? getLayerSourceFrame(layerState, frameIndex) : frameIndex
+      if (!frames || sourceFrame < 0 || sourceFrame >= frames.length) {
         continue
       }
 
       // 检查图层可见性
-      const layerState = layerVisibilityMap.get(imageKey)
-      if (layerState && !layerState.visible) {
+      if ((options.layers !== undefined && !layerState) || (layerState && (!layerState.visible || sourceFrame < layerState.clip.startFrame || sourceFrame >= layerState.clip.startFrame + layerState.clip.duration))) {
         continue
       }
+      if (matteKeys.has(imageKey) && !matteKey) continue
 
       // 获取当前帧的插值数据
-      const frameData = this.getInterpolatedFrameData(sprite, frameIndex)
+      let frameData = this.getInterpolatedFrameData(sprite, sourceFrame)
       if (!frameData) {
         continue
       }
 
-      // 应用图层透明度
-      const layerOpacity = layerState?.opacity ?? 1
-      const finalAlpha = frameData.alpha * layerOpacity
-      if (finalAlpha <= 0) {
-        continue
-      }
-
       // 获取图片
-      let img = this.imageCache.get(imageKey)
-      if (!img && this.slotImageCache.has(imageKey)) {
-        img = this.slotImageCache.get(imageKey)!
-      }
+      const img = this.getImage(layerState?.imageKey || imageKey, imageKey) || (frameData.shapes?.length ? this.canvas : undefined)
       
-      if (!img || !img.complete || img.width === 0) {
+      if (!img || img.width === 0) {
         continue
       }
+      frameData = this.editFrame(frameData, layerState, img, frameIndex)
+      const finalAlpha = frameData.alpha
+      if (finalAlpha <= 0) continue
 
       // 渲染精灵（支持遮罩）
       if (matteKey) {
-        this.renderSpriteWithMatte(img, frameData, matteKey, finalAlpha)
+        const matteIndex = sprites.findIndex(candidate => candidate.imageKey === matteKey)
+        const matteLayer = layerMap.get(matteIndex)
+        const matteSourceFrame = matteLayer ? getLayerSourceFrame(matteLayer, frameIndex) : frameIndex
+        const matteInClip = !matteLayer || (matteSourceFrame >= matteLayer.clip.startFrame && matteSourceFrame < matteLayer.clip.startFrame + matteLayer.clip.duration)
+        const matteExists = matteIndex >= 0 && (options.layers === undefined || !!matteLayer)
+        const matteFrame = matteExists && matteInClip && matteSourceFrame >= 0 && matteSourceFrame < sprites[matteIndex].frames.length
+          ? this.getInterpolatedFrameData(sprites[matteIndex], matteSourceFrame) : null
+        const matteImg = this.getImage(matteLayer?.imageKey || matteKey, matteKey) || (matteFrame?.shapes?.length ? this.canvas : undefined)
+        const editedMatte = matteFrame && matteImg ? this.editFrame(matteFrame, matteLayer, matteImg, frameIndex) : null
+        const matteAlpha = editedMatte?.alpha ?? 1
+        this.renderSpriteWithMatte(img, frameData, matteImg, editedMatte, finalAlpha, matteAlpha)
       } else {
         this.renderSprite(img, frameData, finalAlpha)
       }
       
+      spriteCount++
+    }
+
+    for (const layer of layers) {
+      if (!layer.isNew || !layer.visible || !layer.imageKey) continue
+      const base = getLayerBaseFrame(layer, frameIndex, this.videoItem, options.imageResources)
+      if (!base || (base.alpha ?? 1) <= 0) continue
+      const image = this.getImage(layer.imageKey)
+      if (!image) continue
+      const edited = applyLayerFrameEdits(base, layer, frameIndex, { width: image.width, height: image.height })
+      this.renderSprite(image, this.convertFrameData(edited), getFrameAlpha(edited))
       spriteCount++
     }
 
@@ -282,6 +307,8 @@ export class OfficialSvgRenderer {
     if (!frames || frames.length === 0) {
       return null
     }
+
+    if (frames[frameIndex]) return this.convertFrameData(frames[frameIndex])
 
     // 查找当前帧的前后关键帧
     const keyFrames: KeyFrame[] = []
@@ -435,14 +462,7 @@ export class OfficialSvgRenderer {
         width: frame.layout?.width ?? 0,
         height: frame.layout?.height ?? 0
       },
-      transform: {
-        a: frame.transform?.a ?? 1,
-        b: frame.transform?.b ?? 0,
-        c: frame.transform?.c ?? 0,
-        d: frame.transform?.d ?? 1,
-        tx: frame.transform?.tx ?? 0,
-        ty: frame.transform?.ty ?? 0
-      },
+      transform: getFrameTransform(frame),
       alpha: frame.alpha ?? 1,
       clipPath: frame.clipPath ?? undefined,
       shapes: frame.shapes,
@@ -455,20 +475,15 @@ export class OfficialSvgRenderer {
    * 复用离屏Canvas池，避免每帧createElement
    */
   private renderSpriteWithMatte(
-    img: HTMLImageElement,
+    img: HTMLImageElement | HTMLCanvasElement,
     frameData: InterpolatedFrameData,
-    matteKey: string,
-    alpha: number
+    matteImg: HTMLImageElement | HTMLCanvasElement | undefined,
+    matteFrame: InterpolatedFrameData | null,
+    alpha: number,
+    matteAlpha: number
   ): void {
-    // 获取遮罩图片
-    let matteImg = this.imageCache.get(matteKey)
-    if (!matteImg && this.slotImageCache.has(matteKey)) {
-      matteImg = this.slotImageCache.get(matteKey)!
-    }
-    
-    if (!matteImg || !matteImg.complete || matteImg.width === 0) {
-      // 遮罩图层不存在，正常渲染
-      this.renderSprite(img, frameData, alpha)
+    if (!matteImg || !matteFrame || matteImg.width === 0) {
+      // 缺失或时间范围外的遮罩必须保持透明，避免露出原本被遮挡的内容。
       return
     }
 
@@ -486,11 +501,16 @@ export class OfficialSvgRenderer {
     // 第二步：应用遮罩（destination-in 模式）
     offscreenCtx.save()
     offscreenCtx.globalCompositeOperation = 'destination-in'
-    this.renderSpriteInternal(offscreenCtx, matteImg, frameData, 1.0)
+    this.renderSpriteInternal(offscreenCtx, matteImg, { ...matteFrame, blendMode: undefined }, matteAlpha)
     offscreenCtx.restore()
 
     // 第三步：将结果绘制到主画布
+    this.ctx.save()
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0)
+    this.ctx.globalAlpha = 1
+    this.ctx.globalCompositeOperation = 'source-over'
     this.ctx.drawImage(offscreenCanvas, 0, 0)
+    this.ctx.restore()
 
     // 归还离屏Canvas
     this.returnOffscreenCanvas(offscreenCanvas)
@@ -556,7 +576,7 @@ export class OfficialSvgRenderer {
   /**
    * 渲染精灵（无遮罩）
    */
-  private renderSprite(img: HTMLImageElement, frameData: InterpolatedFrameData, alpha: number): void {
+  private renderSprite(img: HTMLImageElement | HTMLCanvasElement, frameData: InterpolatedFrameData, alpha: number): void {
     this.renderSpriteInternal(this.ctx, img, frameData, alpha)
   }
 
@@ -565,7 +585,7 @@ export class OfficialSvgRenderer {
    */
   private renderSpriteInternal(
     ctx: CanvasRenderingContext2D,
-    img: HTMLImageElement,
+    img: HTMLImageElement | HTMLCanvasElement,
     frameData: InterpolatedFrameData,
     alpha: number
   ): void {
@@ -606,7 +626,7 @@ export class OfficialSvgRenderer {
       this.renderShapes(ctx, shapes)
     } else {
       // 绘制图片
-      ctx.drawImage(img, 0, 0, layout.width, layout.height)
+      ctx.drawImage(img, 0, 0, layout.width || img.width, layout.height || img.height)
     }
 
     ctx.restore()
@@ -622,7 +642,7 @@ export class OfficialSvgRenderer {
       // 应用形状变换
       if (shape.transform) {
         const t = shape.transform
-        ctx.setTransform(
+        ctx.transform(
           t.a ?? 1,
           t.b ?? 0,
           t.c ?? 0,
@@ -759,10 +779,39 @@ export class OfficialSvgRenderer {
     return modeMap[blendMode.toLowerCase()] || 'source-over'
   }
 
-  /**
-   * 异步渲染（保持接口兼容）
-   */
+  private getImage(key: string, fallbackKey?: string): HTMLImageElement | undefined {
+    const image = this.liveImages.getSlot(key) || this.liveImages.getResource(key) || this.videoItem?.images?.[key] || this.imageCache.get(key)
+    if (image?.complete && image.width > 0) return image
+    return fallbackKey && fallbackKey !== key ? this.getImage(fallbackKey) : undefined
+  }
+
+  private editFrame(frame: InterpolatedFrameData, layer: Layer | undefined, image: HTMLImageElement | HTMLCanvasElement, frameIndex: number): InterpolatedFrameData {
+    if (!layer) return frame
+    return this.convertFrameData(applyLayerFrameEdits(
+      { ...frame, clipPath: frame.clipPath ?? null },
+      layer,
+      frameIndex,
+      { width: image.width, height: image.height }
+    ))
+  }
+
+  private createRenderSignature(slots: Record<string, SlotConfig>, layers: Layer[], applySlots: boolean): string {
+    return JSON.stringify({
+      layers: layers.map(layer => [layer.id, layer.editableIndex, layer.imageKey, layer.visible, layer.opacity, layer.clip, getLayerTimeOffset(layer), layer.canvasTransform, layer.tracks]),
+      slots: applySlots ? Object.entries(slots).map(([key, slot]) => [key, slot.type, slot.imageConfig?.url || slot.value]) : []
+    })
+  }
+
+  clearFrameCache(): void {
+    this.frameCache.clear()
+    this.metrics.cacheSize = 0
+  }
+
+  /** 图片解码结束后重新检查请求时效，过期编辑不能覆盖较新的画面。 */
   async renderFrameAsync(frameIndex: number, options: RenderOptions = {}): Promise<void> {
+    const generation = this.videoGeneration
+    await this.liveImages.prepare(options.slotConfigs || {}, options.applySlots !== false, options.imageResources)
+    if (generation !== this.videoGeneration || options.shouldRender?.() === false) return
     this.renderFrame(frameIndex, options)
   }
 
@@ -777,8 +826,11 @@ export class OfficialSvgRenderer {
    * 销毁渲染器
    */
   destroy(): void {
+    this.videoGeneration++
+    this.videoItem = null
+    this.params = null
     this.imageCache.clear()
-    this.slotImageCache.clear()
+    this.liveImages.clear()
     this.frameCache.clear()
     for (const c of this.offscreenCanvasPool) {
       c.getContext('2d')?.clearRect(0, 0, c.width, c.height)

@@ -3,6 +3,7 @@ import { Button, Icon, Modal } from '@/components/ui'
 import { OfficialSvgRenderer } from '@/core/renderer.official'
 import { loadExportPreviewVideo, type ExportPreviewResult } from '@/core/export-preview'
 import { formatResourceBytes } from '@/utils/resource-catalog'
+import { OperationStatus, type OperationStatusValue } from '@/components/ui/OperationStatus'
 
 function PreviewCanvas({ blob, frame, title, background }: { blob: Blob; frame: number; title: string; background: string }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null)
@@ -73,7 +74,7 @@ export function ExportPreviewDialog({ result, stale, saving, status, onClose, on
   result: ExportPreviewResult
   stale: boolean
   saving: boolean
-  status: string | null
+  status: OperationStatusValue | null
   onClose: () => void
   onSave: (kind: 'optimized' | 'baseline') => void
 }) {
@@ -146,7 +147,7 @@ export function ExportPreviewDialog({ result, stale, saving, status, onClose, on
         <p className="text-xs text-text-muted">相对当前编辑的未优化副本，体积{result.stats.reductionPercent >= 0 ? '减少' : '增加'} {Math.abs(result.stats.reductionPercent)}%。下方预览重新解码真实导出文件；仅对比画面，不播放音频。</p>
         {stale && <p role="alert" className="rounded bg-warning/10 p-2 text-sm text-warning">编辑内容或导出配置已变化，此结果已失效。请关闭并重新生成预览。</p>}
         {result.warnings.map(warning => <p key={warning} className="text-xs text-warning">{warning}</p>)}
-        {status && <p role="status" className="text-xs text-text-secondary">{saving ? '正在保存…' : status}</p>}
+        <OperationStatus status={stale && status?.kind === 'stale' ? null : status} />
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <PreviewCanvas blob={result.baseline} frame={frame} title="当前编辑·未优化" background={background} />
           <PreviewCanvas blob={result.optimized} frame={frame} title="优化结果" background={background} />

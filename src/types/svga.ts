@@ -225,6 +225,15 @@ export interface AudioPlaybackState {
 
 // ==================== 编辑态数据结构 ====================
 
+/** 整段动画的画布调整；位置为世界坐标偏移，旋转使用弧度。 */
+export interface CanvasTransform {
+  x: number
+  y: number
+  scaleX: number
+  scaleY: number
+  rotation: number
+}
+
 /**
  * Layer - 编辑态图层（扩展版，支持新增图层）
  */
@@ -243,6 +252,8 @@ export interface Layer {
     startFrame: number
     duration: number
   }
+  /** 输出时间相对源时间的整数帧偏移；裁切与关键帧仍保留在源时间坐标。 */
+  timeOffsetFrames?: number
   
   // 图片图层特有属性
   imageKey?: string
@@ -259,6 +270,9 @@ export interface Layer {
   
   // 动画轨道
   tracks: LayerTracks
+
+  /** 独立于原始逐帧动画，预览与导出使用同一矩阵合成。 */
+  canvasTransform?: CanvasTransform
   
   // 原始 SVGA 精灵数据（仅存在于从 SVGA 解析的图层）
   sprites?: Sprite

@@ -1,4 +1,4 @@
-export type ResourceSort = 'original' | 'name' | 'size-desc' | 'size-asc'
+export type ResourceSort = 'original' | 'name' | 'size-desc' | 'size-asc' | 'memory-desc'
 
 export interface ResourceMetadata {
   key: string
@@ -13,14 +13,22 @@ export function selectResources<T extends ResourceMetadata>(resources: readonly 
   if (sort === 'name') result.sort((a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }))
   if (sort === 'size-desc') result.sort((a, b) => b.byteSize - a.byteSize)
   if (sort === 'size-asc') result.sort((a, b) => a.byteSize - b.byteSize)
+  if (sort === 'memory-desc') result.sort((a, b) => (resourceDecodedBytes(b) ?? -1) - (resourceDecodedBytes(a) ?? -1))
   return result
+}
+
+export function resourceDecodedBytes(resource: ResourceMetadata): number | null {
+  const { width, height } = resource
+  return width && height && Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+    ? width * height * 4 : null
 }
 
 export function summarizeResources(resources: readonly ResourceMetadata[]) {
   return resources.reduce((stats, resource) => {
     stats.encodedBytes += resource.byteSize
-    if (resource.width && resource.height && resource.width > 0 && resource.height > 0) {
-      stats.decodedBytes += resource.width * resource.height * 4
+    const decodedBytes = resourceDecodedBytes(resource)
+    if (decodedBytes !== null) {
+      stats.decodedBytes += decodedBytes
     } else {
       stats.unknownDimensions += 1
     }

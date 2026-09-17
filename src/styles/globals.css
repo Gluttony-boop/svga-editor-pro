@@ -245,3 +245,21 @@ input[type="range"]::-webkit-slider-thumb {
 .window-btn.close:hover {
   @apply bg-red-500;
 }
+
+/* 手柄由 Moveable 实现，颜色与编辑器选中态统一，命中区域不随画布缩小。 */
+[aria-label="画布直接编辑"] .moveable-control-box {
+  --moveable-color: #ef83a1;
+  z-index: 8;
+}
+[aria-label="画布直接编辑"] .moveable-control {
+  width: 11px;
+  height: 11px;
+  margin-top: -5.5px;
+  margin-left: -5.5px;
+  border-radius: 2px;
+}
+
+[aria-label="画布直接编辑"] .selecto-selection {
+  border-color: #ef83a1;
+  background: rgba(239, 131, 161, 0.12);
+}

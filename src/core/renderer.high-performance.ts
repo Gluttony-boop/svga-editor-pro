@@ -10,15 +10,12 @@
  */
 
 import type { VideoItem, SlotConfig, Layer, FrameData } from '@/types'
+import type { RenderOptions } from './renderer'
+import { applyLayerFrameEdits, getFrameAlpha, getFrameTransform, getLayerBaseFrame, getOriginalLayerIndex } from './layer-transform'
+import { RendererImageCache } from './renderer-images'
+import { getLayerSourceFrame, getLayerTimeOffset } from './layer-time'
 
-export interface RenderOptions {
-  clearCanvas?: boolean
-  applySlots?: boolean
-  slotConfigs?: Record<string, SlotConfig>
-  layers?: Layer[]
-  imageResources?: Map<string, { data: Uint8Array; blobUrl?: string; width: number; height: number }>
-  useFrameCache?: boolean
-}
+export type { RenderOptions } from './renderer'
 
 export interface PerformanceMetrics {
   fps: number
@@ -57,6 +54,7 @@ interface SortedKeyFrames {
 interface LayerRenderState {
   visible: boolean
   opacity: number
+  layer: Layer
 }
 
 export class HighPerformanceRenderer {
@@ -74,25 +72,20 @@ export class HighPerformanceRenderer {
   private lastRenderSignature = ''
 
   // 插槽图片缓存
-  private slotImageCache: Map<string, HTMLImageElement> = new Map()
-  private slotImageUrls: Map<string, string> = new Map()
-  private activeSlotImageKeys: Set<string> = new Set()
-  private slotConfigsSource: Record<string, SlotConfig> | null = null
-  private slotConfigsApplySlots: boolean | null = null
+  private liveImages = new RendererImageCache(() => this.clearFrameCache())
+  private videoGeneration = 0
 
   // 预计算的关键帧索引（二分查找加速）
   private spriteKeyFrameMap: Map<number, SortedKeyFrames> = new Map()
 
   // 预计算的帧精灵数据
   private precomputedFrames: Map<number, PrecomputedSprite[]> = new Map()
-  private precomputedSpritesByImageKey: Map<number, Map<string, PrecomputedSprite[]>> = new Map()
-  private frameMatteKeys: Map<number, Set<string>> = new Map()
-  private hasMatteSprites = false
+  private precomputedLayerFrames: Map<number, Map<number, PrecomputedSprite>> = new Map()
+  private referencedMatteKeys: Set<string> = new Set()
 
   // 图层状态缓存，播放时避免每帧重建 Map
   private layerStates: Array<LayerRenderState | undefined> = []
   private layerStatesSource: Layer[] | null = null
-  private layerStatesSignature = ''
 
   // 图片缓存
   private imageCache: Map<string, HTMLImageElement> = new Map()
@@ -151,21 +144,16 @@ export class HighPerformanceRenderer {
    * 设置视频项
    */
   async setVideoItem(videoItem: VideoItem | null, _options?: { waitForImages?: boolean }): Promise<void> {
+    const generation = ++this.videoGeneration
     this.videoItem = videoItem
     this.params = null
-    this.slotImageCache.clear()
-    this.slotImageUrls.clear()
-    this.activeSlotImageKeys.clear()
-    this.slotConfigsSource = null
-    this.slotConfigsApplySlots = null
+    this.liveImages.clear()
     this.frameCache.clear()
     this.lastRenderSignature = ''
     this.layerStates = []
     this.layerStatesSource = null
-    this.layerStatesSignature = ''
-    this.precomputedSpritesByImageKey.clear()
-    this.frameMatteKeys.clear()
-    this.hasMatteSprites = false
+    this.precomputedLayerFrames.clear()
+    this.referencedMatteKeys.clear()
     this.renderCount = 0
     this.lastFpsUpdate = 0
     this.metrics = {
@@ -194,7 +182,7 @@ export class HighPerformanceRenderer {
         new Promise<void>((resolve) => {
           if (!img) { resolve(); return }
           const done = () => {
-            this.imageCache.set(key, img)
+            if (generation === this.videoGeneration) this.imageCache.set(key, img)
             resolve()
           }
           if (img.complete && img.width > 0) { done(); return }
@@ -203,6 +191,7 @@ export class HighPerformanceRenderer {
           if (img.complete) done()
         })
       ))
+      if (generation !== this.videoGeneration) return
 
       // 预转换 ImageBitmap（GPU加速drawImage）
       if (typeof createImageBitmap === 'function') {
@@ -210,7 +199,8 @@ export class HighPerformanceRenderer {
           if (img && img.complete && img.width > 0) {
             try {
               const bmp = await createImageBitmap(img)
-              this.imageBitmapCache.set(key, bmp)
+              if (generation === this.videoGeneration) this.imageBitmapCache.set(key, bmp)
+              else bmp.close()
             } catch { /* ignore */ }
           }
         })
@@ -219,14 +209,15 @@ export class HighPerformanceRenderer {
       }
     }
 
+    if (generation !== this.videoGeneration) return
+
     // 预构建关键帧索引（二分查找加速）
     this.buildKeyFrameIndex()
 
     // 预计算帧精灵数据
     this.precomputeAllFrames()
 
-    // 渲染第一帧
-    this.renderFrame(0, { layers: [], slotConfigs: {} })
+    // 初始化仅准备资源，调用者用最新帧和编辑快照发起绘制。
   }
 
   /**
@@ -324,25 +315,26 @@ export class HighPerformanceRenderer {
   private precomputeAllFrames(): void {
     if (!this.videoItem) return
     const sprites = this.videoItem.movie.sprites || []
-    const totalFrames = this.params?.frames || 0
+    const referencedMatteKeys = new Set(sprites.map(sprite => sprite.matteKey).filter((key): key is string => !!key))
     this.precomputedFrames.clear()
-    this.precomputedSpritesByImageKey.clear()
-    this.frameMatteKeys.clear()
-    this.hasMatteSprites = false
+    this.precomputedLayerFrames.clear()
+    this.referencedMatteKeys = referencedMatteKeys
 
     for (let spriteIndex = 0; spriteIndex < sprites.length; spriteIndex++) {
       const sprite = sprites[spriteIndex]
       const { imageKey, frames } = sprite
       if (!frames || frames.length === 0) continue
-      if (!this.imageCache.has(imageKey) && !this.imageBitmapCache.has(imageKey)) continue
-      if (sprite.matteKey) this.hasMatteSprites = true
+      if (!this.imageCache.has(imageKey) && !this.imageBitmapCache.has(imageKey) && !frames.some(frame => frame.shapes?.length)) continue
+      const layerFrames = new Map<number, PrecomputedSprite>()
+      this.precomputedLayerFrames.set(spriteIndex, layerFrames)
 
-      for (let fi = 0; fi < totalFrames; fi++) {
+      for (let fi = 0; fi < frames.length; fi++) {
         const frameData = frames[fi]
         if (!frameData) continue
 
         const alpha = frameData.alpha ?? 1
-        if (alpha <= 0) continue
+        // 全透明遮罩仍参与合成；把它省略会让被遮罩内容意外全部出现。
+        if (alpha <= 0 && !referencedMatteKeys.has(imageKey)) continue
 
         const layout = frameData.layout
         const transform = frameData.transform
@@ -370,27 +362,7 @@ export class HighPerformanceRenderer {
         }
 
         this.precomputedFrames.get(fi)!.push(precomputedSprite)
-
-        let frameSpriteMap = this.precomputedSpritesByImageKey.get(fi)
-        if (!frameSpriteMap) {
-          frameSpriteMap = new Map()
-          this.precomputedSpritesByImageKey.set(fi, frameSpriteMap)
-        }
-        const keyedSprites = frameSpriteMap.get(imageKey)
-        if (keyedSprites) {
-          keyedSprites.push(precomputedSprite)
-        } else {
-          frameSpriteMap.set(imageKey, [precomputedSprite])
-        }
-
-        if (sprite.matteKey) {
-          let matteKeys = this.frameMatteKeys.get(fi)
-          if (!matteKeys) {
-            matteKeys = new Set()
-            this.frameMatteKeys.set(fi, matteKeys)
-          }
-          matteKeys.add(sprite.matteKey)
-        }
+        layerFrames.set(fi, precomputedSprite)
       }
     }
   }
@@ -452,7 +424,7 @@ export class HighPerformanceRenderer {
       useFrameCache = true
     } = options
 
-    if (!this.videoItem || !this.params) return
+    if (!this.videoItem || !this.params || options.shouldRender?.() === false) return
     const shouldUseCache = this.cacheEnabled && useFrameCache
     if (shouldUseCache) {
       const renderSignature = this.createRenderSignature(slotConfigs, layers, applySlots)
@@ -479,8 +451,8 @@ export class HighPerformanceRenderer {
       this.metrics.cacheMisses++
     }
 
-    // 预加载插槽图片
-    this.preloadSlotImages(slotConfigs, applySlots)
+    // 同步调用沿用已解码图片；编辑预览通过异步入口等待最新替换。
+    void this.liveImages.prepare(slotConfigs, applySlots, options.imageResources).catch(() => undefined)
 
     const layerStates = this.getLayerStates(layers)
 
@@ -489,16 +461,35 @@ export class HighPerformanceRenderer {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
 
     // 获取预计算的帧精灵数据
-    const frameSprites = this.precomputedFrames.get(frameIndex)
-    if (!frameSprites || frameSprites.length === 0) {
-      this.metrics.spriteCount = 0
-      this.resetContextState(this.ctx)
-      this.recordRender(startTime)
-      return
-    }
+    const shifted = layers.some(layer => getLayerTimeOffset(layer) !== 0)
+    const sourceSprites = shifted
+      ? (this.videoItem.movie.sprites || []).flatMap((_, index) => {
+        const layer = layerStates[index]?.layer
+        if (!layer) return []
+        const sprite = this.precomputedLayerFrames.get(index)?.get(getLayerSourceFrame(layer, frameIndex))
+        return sprite ? [sprite] : []
+      })
+      : this.precomputedFrames.get(frameIndex) || []
+    const frameSprites = options.layers === undefined ? sourceSprites : sourceSprites.filter(sprite => {
+      const layer = layerStates[sprite.spriteIndex]?.layer
+      if (!layer) return false
+      const sourceFrame = getLayerSourceFrame(layer, frameIndex)
+      return sourceFrame >= 0 && sourceFrame >= layer.clip.startFrame && sourceFrame < layer.clip.startFrame + layer.clip.duration
+    })
 
     // 渲染所有精灵
     this.renderSprites(frameIndex, frameSprites, layerStates)
+
+    for (const layer of layers) {
+      if (!layer.isNew || !layer.visible || !layer.imageKey) continue
+      const frame = getLayerBaseFrame(layer, frameIndex, this.videoItem, options.imageResources)
+      if (!frame || (frame.alpha ?? 1) <= 0) continue
+      const img = this.getImage(layer.imageKey)
+      if (!img) continue
+      const edited = applyLayerFrameEdits(frame, layer, frameIndex, this.getDrawSize(img, frame.layout))
+      this.renderSpriteToCtx(this.ctx, img, edited, getFrameAlpha(edited))
+      this.metrics.spriteCount++
+    }
 
     // 按需缓存帧
     if (shouldUseCache) {
@@ -509,39 +500,18 @@ export class HighPerformanceRenderer {
     this.metrics.cacheSize = this.frameCache.size
   }
 
-  private getLayerSpriteIndex(layer: Layer, index: number): number {
-    if (typeof layer.editableIndex === 'number' && Number.isFinite(layer.editableIndex)) {
-      return layer.editableIndex
-    }
-
-    const numericId = Number(layer.id)
-    return Number.isFinite(numericId) ? numericId : index
-  }
-
   private getLayerStates(layers: Layer[]): Array<LayerRenderState | undefined> {
     if (this.layerStatesSource === layers) {
       return this.layerStates
     }
 
-    let signature = ''
-    for (let index = 0; index < layers.length; index++) {
-      const layer = layers[index]
-      signature += `${this.getLayerSpriteIndex(layer, index)}:${layer.visible === false ? 0 : 1}:${layer.opacity ?? 1}|`
+    const nextStates: Array<LayerRenderState | undefined> = []
+    for (const layer of layers) {
+      const index = getOriginalLayerIndex(layer)
+      if (index === null) continue
+      nextStates[index] = { visible: layer.visible !== false, opacity: layer.opacity ?? 1, layer }
     }
-
-    if (signature !== this.layerStatesSignature) {
-      const nextStates: Array<LayerRenderState | undefined> = []
-      for (let index = 0; index < layers.length; index++) {
-        const layer = layers[index]
-        nextStates[this.getLayerSpriteIndex(layer, index)] = {
-          visible: layer.visible !== false,
-          opacity: layer.opacity ?? 1
-        }
-      }
-      this.layerStates = nextStates
-      this.layerStatesSignature = signature
-    }
-
+    this.layerStates = nextStates
     this.layerStatesSource = layers
     return this.layerStates
   }
@@ -555,11 +525,12 @@ export class HighPerformanceRenderer {
     layerStates: Array<LayerRenderState | undefined>
   ): void {
     let spriteCount = 0
-    const matteLayerKeys = this.hasMatteSprites ? this.frameMatteKeys.get(frameIndex) : undefined
+    // 纯遮罩身份来自全局引用，不能因为关联内容本帧未出现就把遮罩画到画布。
+    const matteLayerKeys = this.referencedMatteKeys
 
-    if (!matteLayerKeys || matteLayerKeys.size === 0) {
+    if (matteLayerKeys.size === 0) {
       for (const sprite of frameSprites) {
-        if (this.renderSingleSprite(sprite, layerStates)) spriteCount++
+        if (this.renderSingleSprite(sprite, layerStates, frameIndex)) spriteCount++
       }
 
       this.metrics.spriteCount = spriteCount
@@ -567,7 +538,10 @@ export class HighPerformanceRenderer {
       return
     }
 
-    const spritesByImageKey = this.precomputedSpritesByImageKey.get(frameIndex)
+    const spritesByImageKey = new Map<string, PrecomputedSprite>()
+    for (const sprite of frameSprites) {
+      if (!spritesByImageKey.has(sprite.imageKey)) spritesByImageKey.set(sprite.imageKey, sprite)
+    }
 
     for (const sprite of frameSprites) {
       // 跳过纯遮罩图层
@@ -575,14 +549,12 @@ export class HighPerformanceRenderer {
 
       // 被遮罩图层
       if (sprite.matteKey) {
-        const matteSprite = spritesByImageKey?.get(sprite.matteKey)?.[0]
+        const matteSprite = spritesByImageKey.get(sprite.matteKey)
         if (matteSprite) {
-          if (this.renderWithMatte(sprite, matteSprite, layerStates)) spriteCount++
-        } else {
-          if (this.renderSingleSprite(sprite, layerStates)) spriteCount++
+          if (this.renderWithMatte(sprite, matteSprite, layerStates, frameIndex)) spriteCount++
         }
       } else {
-        if (this.renderSingleSprite(sprite, layerStates)) spriteCount++
+        if (this.renderSingleSprite(sprite, layerStates, frameIndex)) spriteCount++
       }
     }
 
@@ -591,73 +563,32 @@ export class HighPerformanceRenderer {
   }
 
   /**
-   * 预加载插槽图片
-   */
-  private preloadSlotImages(slotConfigs: Record<string, SlotConfig>, applySlots: boolean): void {
-    if (this.slotConfigsSource === slotConfigs && this.slotConfigsApplySlots === applySlots) {
-      return
-    }
-
-    this.slotConfigsSource = slotConfigs
-    this.slotConfigsApplySlots = applySlots
-    this.activeSlotImageKeys.clear()
-    if (!applySlots) return
-
-    for (const [key, slot] of Object.entries(slotConfigs)) {
-      if (slot.type !== 'image' || !slot.imageConfig?.url) continue
-
-      const url = slot.imageConfig.url
-      this.activeSlotImageKeys.add(key)
-
-      if (this.slotImageUrls.get(key) === url && this.slotImageCache.has(key)) {
-        continue
-      }
-
-      this.slotImageUrls.set(key, url)
-      this.slotImageCache.delete(key)
-
-      const img = new Image()
-      img.crossOrigin = 'anonymous'
-      img.onload = () => {
-        if (this.slotImageUrls.get(key) === url) {
-          this.slotImageCache.set(key, img)
-          this.clearFrameCache()
-        }
-      }
-      img.onerror = () => {
-        if (this.slotImageUrls.get(key) === url) {
-          this.slotImageUrls.delete(key)
-        }
-      }
-      img.src = url
-    }
-  }
-
-  /**
    * 渲染带matte遮罩的精灵（复用离屏Canvas）
    */
   private renderWithMatte(
     sprite: PrecomputedSprite,
     matteSprite: PrecomputedSprite,
-    layerStates: Array<LayerRenderState | undefined>
+    layerStates: Array<LayerRenderState | undefined>,
+    frameIndex: number
   ): boolean {
-    let finalAlpha = sprite.finalAlpha
     const layerState = layerStates[sprite.spriteIndex]
-    if (layerState) {
-      if (!layerState.visible) return false
-      finalAlpha *= layerState.opacity
-    }
-    if (finalAlpha <= 0) return false
+    if (layerState?.visible === false) return false
 
     // 获取图片
-    const img = this.getImage(sprite.imageKey)
+    const img = this.getImage(layerState?.layer.imageKey || sprite.imageKey, sprite.imageKey) || (sprite.frame.shapes?.length ? this.canvas : null)
     if (!img) return false
 
-    const matteImg = this.getImage(matteSprite.imageKey)
-    if (!matteImg) {
-      this.renderSprite(sprite, this.ctx, img, finalAlpha)
-      return true
+    const editedSprite = {
+      ...sprite,
+      frame: layerState ? applyLayerFrameEdits(sprite.frame, layerState.layer, frameIndex, this.getDrawSize(img, sprite.frame.layout)) : sprite.frame
     }
+    const finalAlpha = getFrameAlpha(editedSprite.frame)
+    if (finalAlpha <= 0) return false
+
+    const matteState = layerStates[matteSprite.spriteIndex]
+    const matteImg = this.getImage(matteState?.layer.imageKey || matteSprite.imageKey, matteSprite.imageKey) || (matteSprite.frame.shapes?.length ? this.canvas : null)
+    // 缺失或时间范围外的遮罩是透明结果，不能退回未遮罩的内容。
+    if (!matteImg) return false
 
     // 使用池化的离屏Canvas
     const offscreen = this.getOffscreenCanvas()
@@ -667,13 +598,15 @@ export class HighPerformanceRenderer {
 
     // 渲染被遮罩层
     offCtx.save()
-    this.renderSpriteToCtx(offCtx, img, sprite.frame, finalAlpha)
+    this.renderSpriteToCtx(offCtx, img, editedSprite.frame, finalAlpha)
     offCtx.restore()
 
     // 应用遮罩
     offCtx.save()
     offCtx.globalCompositeOperation = 'destination-in'
-    this.renderSpriteToCtx(offCtx, matteImg, matteSprite.frame, 1.0)
+    const matteFrame = matteState ? applyLayerFrameEdits(matteSprite.frame, matteState.layer, frameIndex, this.getDrawSize(matteImg, matteSprite.frame.layout)) : matteSprite.frame
+    const matteAlpha = getFrameAlpha(matteFrame)
+    this.renderSpriteToCtx(offCtx, matteImg, matteFrame, matteAlpha)
     offCtx.restore()
 
     // 绘制到主画布
@@ -688,20 +621,19 @@ export class HighPerformanceRenderer {
    */
   private renderSingleSprite(
     sprite: PrecomputedSprite,
-    layerStates: Array<LayerRenderState | undefined>
+    layerStates: Array<LayerRenderState | undefined>,
+    frameIndex: number
   ): boolean {
-    let finalAlpha = sprite.finalAlpha
     const layerState = layerStates[sprite.spriteIndex]
-    if (layerState) {
-      if (!layerState.visible) return false
-      finalAlpha *= layerState.opacity
-    }
-    if (finalAlpha <= 0) return false
+    if (layerState?.visible === false) return false
 
-    const img = this.getImage(sprite.imageKey)
+    const img = this.getImage(layerState?.layer.imageKey || sprite.imageKey, sprite.imageKey) || (sprite.frame.shapes?.length ? this.canvas : null)
     if (!img) return false
 
-    this.renderSprite(sprite, this.ctx, img, finalAlpha)
+    const editedFrame = layerState ? applyLayerFrameEdits(sprite.frame, layerState.layer, frameIndex, this.getDrawSize(img, sprite.frame.layout)) : sprite.frame
+    const finalAlpha = getFrameAlpha(editedFrame)
+    if (finalAlpha <= 0) return false
+    this.renderSprite(editedFrame === sprite.frame ? sprite : { ...sprite, frame: editedFrame }, this.ctx, img, finalAlpha)
     return true
   }
 
@@ -732,7 +664,8 @@ export class HighPerformanceRenderer {
     frame: FrameData,
     alpha: number
   ): void {
-    const { transform, layout } = frame
+    const { layout } = frame
+    const transform = getFrameTransform(frame)
 
     ctx.globalAlpha = alpha
     ctx.globalCompositeOperation = 'source-over'
@@ -776,18 +709,20 @@ export class HighPerformanceRenderer {
   /**
    * 获取图片（优先ImageBitmap，其次HTMLImageElement，最后插槽缓存）
    */
-  private getImage(imageKey: string): CanvasImageSource | null {
-    const slotImg = this.activeSlotImageKeys.has(imageKey)
-      ? this.slotImageCache.get(imageKey)
-      : null
+  private getImage(imageKey: string, fallbackKey?: string): CanvasImageSource | null {
+    const slotImg = this.liveImages.getSlot(imageKey)
     if (slotImg && slotImg.complete && slotImg.width > 0) return slotImg
+
+    const resource = this.liveImages.getResource(imageKey)
+    if (resource?.complete && resource.width > 0) return resource
 
     const bmp = this.imageBitmapCache.get(imageKey)
     if (bmp) return bmp
 
-    const img = this.imageCache.get(imageKey)
+    const img = this.videoItem?.images?.[imageKey] || this.imageCache.get(imageKey)
     if (img && img.complete && img.width > 0) return img
 
+    if (fallbackKey && fallbackKey !== imageKey) return this.getImage(fallbackKey)
     return null
   }
 
@@ -804,7 +739,8 @@ export class HighPerformanceRenderer {
     frame: FrameData,
     alpha: number
   ): void {
-    const { transform, layout, clipPath, shapes } = frame
+    const { layout, clipPath, shapes } = frame
+    const transform = getFrameTransform(frame)
 
     ctx.save()
     ctx.globalAlpha = alpha
@@ -856,7 +792,7 @@ export class HighPerformanceRenderer {
 
       if (shape.transform) {
         const t = shape.transform
-        ctx.setTransform(t.a ?? 1, t.b ?? 0, t.c ?? 0, t.d ?? 1, t.tx ?? 0, t.ty ?? 0)
+        ctx.transform(t.a ?? 1, t.b ?? 0, t.c ?? 0, t.d ?? 1, t.tx ?? 0, t.ty ?? 0)
       }
 
       if (shape.styles) {
@@ -995,7 +931,13 @@ export class HighPerformanceRenderer {
         layer.imageKey ?? '',
         layer.visible === false ? 0 : 1,
         layer.opacity ?? 1,
-        layer.blendMode ?? ''
+        layer.blendMode ?? '',
+        layer.editableIndex ?? '',
+        layer.clip.startFrame,
+        layer.clip.duration,
+        getLayerTimeOffset(layer),
+        JSON.stringify(layer.canvasTransform || null),
+        JSON.stringify(layer.tracks)
       ].join(':'))
       .join('|')
 
@@ -1018,7 +960,14 @@ export class HighPerformanceRenderer {
 
   precomputeFrameData(): void { this.precomputeAllFrames() }
 
+  prepareImages(options: RenderOptions): Promise<void> {
+    return this.liveImages.prepare(options.slotConfigs || {}, options.applySlots !== false, options.imageResources)
+  }
+
   async renderFrameAsync(frameIndex: number, options: RenderOptions = {}): Promise<void> {
+    const generation = this.videoGeneration
+    await this.liveImages.prepare(options.slotConfigs || {}, options.applySlots !== false, options.imageResources)
+    if (generation !== this.videoGeneration || options.shouldRender?.() === false) return
     this.renderFrame(frameIndex, options)
   }
 
@@ -1055,20 +1004,14 @@ export class HighPerformanceRenderer {
 
   clearAllCaches(): void {
     this.clearFrameCache()
-    this.slotImageCache.clear()
-    this.slotImageUrls.clear()
-    this.activeSlotImageKeys.clear()
-    this.slotConfigsSource = null
-    this.slotConfigsApplySlots = null
+    this.liveImages.clear()
     this.precomputedFrames.clear()
-    this.precomputedSpritesByImageKey.clear()
-    this.frameMatteKeys.clear()
-    this.hasMatteSprites = false
+    this.precomputedLayerFrames.clear()
+    this.referencedMatteKeys.clear()
     this.imageCache.clear()
     this.spriteKeyFrameMap.clear()
     this.layerStates = []
     this.layerStatesSource = null
-    this.layerStatesSignature = ''
     for (const bmp of this.imageBitmapCache.values()) bmp.close()
     this.imageBitmapCache.clear()
   }
@@ -1078,6 +1021,9 @@ export class HighPerformanceRenderer {
   getPerformanceMetrics(): PerformanceMetrics { return { ...this.metrics } }
 
   destroy(): void {
+    this.videoGeneration++
+    this.videoItem = null
+    this.params = null
     this.clearAllCaches()
     for (const c of this.offscreenCanvasPool) {
       c.getContext('2d')?.clearRect(0, 0, c.width, c.height)

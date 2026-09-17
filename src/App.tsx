@@ -11,6 +11,8 @@ import { cn } from '@/utils/cn'
 import type { ImageResource, Layer, VideoItem } from '@/types'
 import { previewFileName } from '@/utils/preview-view'
 import { createWindowCloseHandler } from '@/lib/window-close'
+import { historyActionLabel } from '@/utils/history-label'
+import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
 
 const INSPECTOR_TABS = [
   { id: 'properties', label: '属性', icon: 'settings' },
@@ -246,6 +248,8 @@ const MenuBar: React.FC<MenuBarProps> = ({
   const canUndo = useEditorStore((s) => s.canUndo)
   const canRedo = useEditorStore((s) => s.canRedo)
   const showGrid = useEditorStore((s) => s.showGrid)
+  const undoLabel = useEditorStore((s) => historyActionLabel('撤销', s.history.past[s.history.past.length - 1]))
+  const redoLabel = useEditorStore((s) => historyActionLabel('重做', s.history.future[0]))
   const rendererMode = useEditorStore((s) => s.rendererMode)
   const toggleGrid = useEditorStore((s) => s.toggleGrid)
   const setRendererMode = useEditorStore((s) => s.setRendererMode)
@@ -286,8 +290,8 @@ const MenuBar: React.FC<MenuBarProps> = ({
       { label: '导出', shortcut: 'Ctrl+E', disabled: !videoItem, onSelect: onExport }
     ],
     edit: [
-      { label: '撤销', shortcut: 'Ctrl+Z', disabled: !canUndo, onSelect: onUndo },
-      { label: '重做', shortcut: 'Ctrl+Shift+Z / Ctrl+Y', disabled: !canRedo, onSelect: onRedo },
+      { label: undoLabel, shortcut: 'Ctrl+Z', disabled: !canUndo, onSelect: onUndo },
+      { label: redoLabel, shortcut: 'Ctrl+Shift+Z / Ctrl+Y', disabled: !canRedo, onSelect: onRedo },
       { label: videoItem ? '请选择图层后使用图层面板编辑' : '打开文件后可编辑图层', disabled: true }
     ],
     view: [
@@ -455,6 +459,8 @@ export const App: React.FC = () => {
   const reset = useEditorStore((s) => s.reset)
   const undo = useEditorStore((s) => s.undo)
   const redo = useEditorStore((s) => s.redo)
+  const undoLabel = useEditorStore((s) => historyActionLabel('撤销', s.history.past[s.history.past.length - 1]))
+  const redoLabel = useEditorStore((s) => historyActionLabel('重做', s.history.future[0]))
   const canUndo = useEditorStore((s) => s.canUndo)
   const canRedo = useEditorStore((s) => s.canRedo)
   
@@ -845,6 +851,7 @@ export const App: React.FC = () => {
 
   // 保存文件（覆盖原文件或另存为）
   const buildCurrentSvgaBlob = useCallback(async (): Promise<Blob> => {
+    useEditorStore.getState().endCanvasTransform(true)
     const { videoItem, originalBuffer, compressionConfig, slotConfigs, layers, imageResources } = useEditorStore.getState()
     const params = getCurrentParamsSnapshot()
     if (!videoItem || !params || !originalBuffer) {
@@ -893,8 +900,10 @@ export const App: React.FC = () => {
   }, [])
 
   const handleSaveAs = useCallback(async () => {
+    useEditorStore.getState().endCanvasTransform(true)
     const { videoItem, currentSource } = useEditorStore.getState()
     if (!videoItem) return false
+    const savedInputs = captureExportInputs(useEditorStore.getState())
 
     setLoading(true)
     setError(null)
@@ -913,15 +922,13 @@ export const App: React.FC = () => {
         if (result && !result.success) {
           throw new Error(result.error || '写入失败')
         }
-        useEditorStore.setState({
-          currentSource: filePath,
-          sourceType: 'file',
-          isDirty: false
-        })
+        if (sameExportInputs(savedInputs, captureExportInputs(useEditorStore.getState()))) {
+          useEditorStore.setState({ currentSource: filePath, sourceType: 'file', isDirty: false })
+        }
       } else {
         const saved = await saveGeneratedFile(blob, getDefaultSvgaName(currentSource))
         if (!saved) return false
-        useEditorStore.setState({ isDirty: false })
+        if (sameExportInputs(savedInputs, captureExportInputs(useEditorStore.getState()))) useEditorStore.setState({ isDirty: false })
       }
       return true
     } catch (err) {
@@ -934,6 +941,7 @@ export const App: React.FC = () => {
 
   // 保存文件（本地文件覆盖保存；URL/浏览器来源转为另存为）
   const handleSave = useCallback(async () => {
+    useEditorStore.getState().endCanvasTransform(true)
     const { videoItem, currentSource, sourceType } = useEditorStore.getState()
     if (!videoItem) return false
     const shouldOverwriteSource = isTauriRuntime() && sourceType === 'file' && currentSource
@@ -941,6 +949,7 @@ export const App: React.FC = () => {
     if (!shouldOverwriteSource) {
       return handleSaveAs()
     }
+    const savedInputs = captureExportInputs(useEditorStore.getState())
 
     setLoading(true)
     setError(null)
@@ -950,7 +959,7 @@ export const App: React.FC = () => {
       if (result && !result.success) {
         throw new Error(result.error || '写入失败')
       }
-      useEditorStore.setState({ isDirty: false })
+      if (sameExportInputs(savedInputs, captureExportInputs(useEditorStore.getState()))) useEditorStore.setState({ isDirty: false })
       return true
     } catch (err) {
       setError(`保存失败: ${(err as Error).message}`)
@@ -1095,11 +1104,11 @@ export const App: React.FC = () => {
             <Icon name="globe" size={16} />
             打开 URL
           </Button>
-          <Button variant="ghost" size="sm" onClick={undo} disabled={!canUndo} aria-label="撤销">
+          <Button variant="ghost" size="sm" onClick={undo} disabled={!canUndo} aria-label={undoLabel} title={`${undoLabel} (Ctrl+Z)`}>
             <Icon name="undo" size={16} />
           </Button>
           <div className="mx-1 h-5 w-px bg-border" />
-          <Button variant="ghost" size="sm" onClick={redo} disabled={!canRedo} aria-label="重做">
+          <Button variant="ghost" size="sm" onClick={redo} disabled={!canRedo} aria-label={redoLabel} title={`${redoLabel} (Ctrl+Shift+Z / Ctrl+Y)`}>
             <Icon name="redo" size={16} />
           </Button>
         </div>

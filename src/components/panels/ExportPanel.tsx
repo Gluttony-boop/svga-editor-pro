@@ -2,10 +2,11 @@ import React from 'react'
 import { Panel, Button, Icon, Slider, Select } from '@/components/ui'
 import { useEditorStore, useCanExport, useCurrentParams } from '@/stores'
 import { ExportEngine, saveGeneratedFile, createSaveFileTarget, svgaBuilder, OPTIMIZATION_PRESETS } from '@/core'
-import { captureExportInputs, sameExportInputs, generateExportPreview, type ExportPreviewResult } from '@/core/export-preview'
+import { captureExportInputs, sameExportInputs, generateExportPreview, ExportInputsChangedError, type ExportPreviewResult } from '@/core/export-preview'
 import { ExportPreviewDialog } from '@/components/editor/ExportPreviewDialog'
 import { cn } from '@/utils/cn'
 import { SVGAValidator } from '@/utils/svga-validator'
+import { OperationStatus, type OperationStatusValue } from '@/components/ui/OperationStatus'
 
 interface ExportPanelProps {
   className?: string
@@ -34,7 +35,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   const setOptimizationStats = useEditorStore((s) => s.setOptimizationStats)
 
   const [isExporting, setIsExporting] = React.useState(false)
-  const [exportStatus, setExportStatus] = React.useState<string | null>(null)
+  const [exportStatus, setExportStatus] = React.useState<OperationStatusValue | null>(null)
   const [showAdvanced, setShowAdvanced] = React.useState(false)
   const [showOtherFormats, setShowOtherFormats] = React.useState(false)
   const [showMoreExports, setShowMoreExports] = React.useState(false)
@@ -52,11 +53,15 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   React.useEffect(() => {
     setPreview(null)
     setShowPreview(false)
+    setExportStatus(null)
     setOptimizationStats(null)
   }, [videoItem, originalBuffer, setOptimizationStats])
 
   React.useEffect(() => {
-    if (preview && !previewIsCurrent) setOptimizationStats(null)
+    if (preview && !previewIsCurrent) {
+      setOptimizationStats(null)
+      setExportStatus({ kind: 'stale', message: '编辑内容或导出配置已变化，请重新生成预览。' })
+    }
   }, [preview, previewIsCurrent, setOptimizationStats])
 
   // 检查是否存在需要重建合并的编辑内容
@@ -131,6 +136,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   }
 
   const preparePreview = async () => {
+    useEditorStore.getState().endCanvasTransform(true)
     const inputs = captureExportInputs(useEditorStore.getState())
     if (preview && sameExportInputs(preview.inputs, inputs)) return preview
     if (!params || !originalBuffer) throw new Error('没有原始 SVGA 数据')
@@ -141,12 +147,12 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
       params,
       (phase) => {
         if (!mountedRef.current || !sameExportInputs(inputs, captureExportInputs(useEditorStore.getState()))) {
-          throw new Error('编辑内容或配置在生成期间发生变化，请重新生成')
+          throw new ExportInputsChangedError()
         }
-        setExportStatus(phase)
+        setExportStatus({ kind: 'processing', message: phase })
       }
     )
-    setExportStatus('正在校验导出文件结构…')
+    setExportStatus({ kind: 'processing', message: '正在校验导出文件结构…' })
     const validation = await new SVGAValidator().validate(await result.optimized.arrayBuffer())
     const outputParams = validation.info.params
     if (!validation.isValid || !outputParams || !Object.values(outputParams).every(value => Number.isFinite(value) && value > 0)) {
@@ -155,7 +161,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
     result.warnings.push(...validation.warnings)
     result.stats.warnings = [...new Set([...(result.stats.warnings ?? []), ...validation.warnings])]
     if (!mountedRef.current || !sameExportInputs(inputs, captureExportInputs(useEditorStore.getState()))) {
-      throw new Error('编辑内容或配置在生成期间发生变化，请重新生成')
+      throw new ExportInputsChangedError()
     }
     const prepared = { inputs, result }
     setPreview(prepared)
@@ -164,12 +170,14 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   }
 
   const savePreparedPreview = async (prepared: NonNullable<typeof preview>, kind: 'optimized' | 'baseline') => {
-    if (!sameExportInputs(prepared.inputs, captureExportInputs(useEditorStore.getState()))) throw new Error('结果已失效，请重新生成预览')
+    if (!sameExportInputs(prepared.inputs, captureExportInputs(useEditorStore.getState()))) throw new ExportInputsChangedError()
+    setExportStatus({ kind: 'processing', message: '请选择保存位置…' })
     const save = await createSaveFileTarget(kind === 'optimized' ? 'export.svga' : 'export-unoptimized.svga')
-    if (!save) { setExportStatus('已取消保存，预览结果仍可使用'); return }
-    if (!mountedRef.current || !sameExportInputs(prepared.inputs, captureExportInputs(useEditorStore.getState()))) throw new Error('编辑内容或配置已变化，已取消保存旧结果')
+    if (!save) { setExportStatus({ kind: 'cancelled', message: '已取消保存，预览结果仍可使用' }); return }
+    if (!mountedRef.current || !sameExportInputs(prepared.inputs, captureExportInputs(useEditorStore.getState()))) throw new ExportInputsChangedError()
+    setExportStatus({ kind: 'processing', message: '正在保存预览中的文件…' })
     await save(prepared.result[kind])
-    if (mountedRef.current) setExportStatus('已保存预览中的文件')
+    if (mountedRef.current) setExportStatus({ kind: 'success', message: '已保存预览中的文件' })
   }
 
   const runOptimizedAction = async (action: 'preview' | 'save') => {
@@ -181,12 +189,14 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
       if (action === 'preview') {
         useEditorStore.getState().setPlaying(false)
         setShowPreview(true)
-        setExportStatus('预览已生成；保存时直接使用同一文件，不会再次压缩')
+        setExportStatus({ kind: 'ready', message: '预览文件已就绪；生成预览不会保存文件，点击保存将使用同一文件，不会再次压缩' })
       } else {
         await savePreparedPreview(prepared, 'optimized')
       }
     } catch (error) {
-      if (mountedRef.current) setExportStatus(`导出预览/保存失败: ${(error as Error).message}`)
+      if (mountedRef.current) setExportStatus(error instanceof ExportInputsChangedError
+        ? { kind: 'stale', message: error.message }
+        : { kind: 'error', message: `导出预览/保存失败: ${(error as Error).message}` })
     } finally {
       busyRef.current = false
       if (mountedRef.current) setIsExporting(false)
@@ -200,7 +210,9 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
     try {
       await savePreparedPreview(preview, kind)
     } catch (error) {
-      if (mountedRef.current) setExportStatus(`保存失败: ${(error as Error).message}`)
+      if (mountedRef.current) setExportStatus(error instanceof ExportInputsChangedError
+        ? { kind: 'stale', message: error.message }
+        : { kind: 'error', message: `保存失败: ${(error as Error).message}。预览结果仍保留，可重试保存。` })
     } finally {
       busyRef.current = false
       if (mountedRef.current) setIsExporting(false)
@@ -210,7 +222,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   const handleExport = async (format: 'svga' | 'png-sequence' | 'webp') => {
     if (!videoItem || !params || busyRef.current) return
     if (format === 'svga' && !originalBuffer) {
-      setExportStatus('导出失败: 没有原始数据')
+      setExportStatus({ kind: 'error', message: '导出失败: 没有原始数据' })
       return
     }
 
@@ -222,7 +234,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
 
     busyRef.current = true
     setIsExporting(true)
-    setExportStatus(null)
+    setExportStatus({ kind: 'processing', message: '正在生成导出文件…' })
     
     try {
       // 创建离屏 canvas
@@ -264,16 +276,17 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
           throw new Error('不支持的格式')
       }
 
+      setExportStatus({ kind: 'processing', message: '文件已生成，正在保存…' })
       const saved = await saveGeneratedFile(blob, defaultName)
       if (!saved) {
-        setExportStatus('已取消导出')
+        setExportStatus({ kind: 'cancelled', message: '已取消导出' })
         return
       }
 
-      setExportStatus('导出成功')
+      setExportStatus({ kind: 'success', message: '导出成功' })
     } catch (error) {
       console.error('导出失败:', error)
-      setExportStatus(`导出失败: ${(error as Error).message}`)
+      setExportStatus({ kind: 'error', message: `导出失败: ${(error as Error).message}` })
     } finally {
       busyRef.current = false
       setIsExporting(false)
@@ -628,11 +641,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
         </p>
       )}
 
-      {exportStatus && (
-        <p className={cn("text-xs mt-2 text-center", exportStatus.includes('失败') ? 'text-error' : 'text-success')}>
-          {exportStatus}
-        </p>
-      )}
+      <OperationStatus status={exportStatus} className="mt-2 text-center" />
     </Panel>
     {showPreview && preview && <ExportPreviewDialog result={preview.result} stale={!previewIsCurrent} saving={isExporting} status={exportStatus} onClose={() => setShowPreview(false)} onSave={handleSavePreview} />}
     </>

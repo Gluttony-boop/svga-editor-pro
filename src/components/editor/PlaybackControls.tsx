@@ -56,7 +56,8 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
 
 
   const handlePrevFrame = () => {
-    const newFrame = currentFrame - 1
+    setPlaying(false)
+    const newFrame = useEditorStore.getState().playback.currentFrame - 1
     if (newFrame >= 0) {
       setCurrentFrame(newFrame)
       setCurrentFrameLocal(newFrame)
@@ -66,7 +67,8 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
   }
 
   const handleNextFrame = () => {
-    const newFrame = currentFrame + 1
+    setPlaying(false)
+    const newFrame = useEditorStore.getState().playback.currentFrame + 1
     if (newFrame < totalFrames) {
       setCurrentFrame(newFrame)
       setCurrentFrameLocal(newFrame)
@@ -76,6 +78,7 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
   }
 
   const handleFirstFrame = () => {
+    setPlaying(false)
     setCurrentFrame(0)
     setCurrentFrameLocal(0)
     // 触发手动帧更新事件
@@ -83,6 +86,7 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
   }
 
   const handleLastFrame = () => {
+    setPlaying(false)
     const lastFrame = totalFrames - 1
     setCurrentFrame(lastFrame)
     setCurrentFrameLocal(lastFrame)
@@ -172,9 +176,11 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({ className })
           type="range"
           aria-label="播放帧"
           min={0}
-          max={totalFrames - 1 || 0}
+          max={Math.max(0, totalFrames - 1)}
           value={currentFrame}
           onChange={(e) => {
+            // 手动定位先暂停，避免播放循环继续覆盖用户选定的帧。
+            setPlaying(false)
             const newFrame = parseInt(e.target.value)
             setCurrentFrame(newFrame)
             setCurrentFrameLocal(newFrame)

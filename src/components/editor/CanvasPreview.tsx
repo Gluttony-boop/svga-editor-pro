@@ -6,6 +6,12 @@ import type { SVGAPixiRenderer as SVGAPixiRendererType } from '@/rendering/svga-
 import { cn } from '@/utils/cn'
 import { calculatePreviewZoom, previewFileName } from '@/utils/preview-view'
 import { formatResourceBytes } from '@/utils/resource-catalog'
+import { CanvasTransformOverlay } from './CanvasTransformOverlay'
+import { PreviewRenderQueue } from '@/core/preview-render-queue'
+import { startPlaybackClock } from '@/core/playback-clock'
+
+type PreviewRenderer = HighPerformanceRenderer | OfficialSvgRenderer | SVGAPixiRendererType
+type PreviewState = ReturnType<typeof useEditorStore.getState>
 
 interface CanvasPreviewProps {
   className?: string
@@ -55,7 +61,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const previewToolsRef = useRef<HTMLDivElement>(null)
-  const rendererRef = useRef<HighPerformanceRenderer | OfficialSvgRenderer | SVGAPixiRendererType | null>(null)
+  const rendererRef = useRef<PreviewRenderer | null>(null)
   const rendererKindRef = useRef<'high-performance' | 'official' | 'pixi' | null>(null)
   
   // 渲染器模式：从 store 读取，支持用户切换
@@ -108,61 +114,110 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   const originalBytes = useEditorStore((s) => s.originalBuffer?.byteLength ?? 0)
   const fps = useEditorStore((s) => s.playback.fps)
   const totalFrames = useEditorStore((s) => s.playback.totalFrames)
+  const isPlaying = useEditorStore((s) => s.playback.isPlaying)
   const savedViewportRef = useRef<{ video: typeof videoItem; zoom: number; offset: { x: number; y: number } } | null>(null)
   const previewBackgroundColorRef = useRef(previewBackgroundColor)
 
-  useEffect(() => {
-    previewBackgroundColorRef.current = previewBackgroundColor
-    if (rendererRef.current) {
-      const state = useEditorStore.getState()
-      rendererRef.current.renderFrame(state.playback.currentFrame, {
-        slotConfigs: state.slotConfigs,
-        layers: state.layers,
-        applySlots: true,
-        useFrameCache: false
-      })
-    }
-    paintPreviewBackground(canvasRef.current, previewBackgroundColor)
-  }, [previewBackgroundColor])
+  const lastRenderedFrameRef = useRef<{ video: PreviewState['videoItem']; frame: number } | null>(null)
+  const loadedRendererRef = useRef<{ renderer: PreviewRenderer; video: PreviewState['videoItem']; params: PreviewState['params'] } | null>(null)
+  const mountRevisionRef = useRef(0)
+  const renderQueueRef = useRef<PreviewRenderQueue<{ renderer: PreviewRenderer; state: PreviewState }> | null>(null)
 
-  // 播放循环内部直接读取 store，避免每帧触发 React 更新
-  // 手动帧索引 - 使用本地状态，不订阅 store，避免动画时重渲染
-  const manualFrameRef = useRef(0)
-  
-  const slotConfigs = useEditorStore((s) => s.slotConfigs)
-  const layers = useEditorStore((s) => s.layers)
-  // 避免 TS6133 - 这些值在事件处理中通过 store 直接获取
-  void slotConfigs
-  void layers
-  
-  // 监听手动帧更新事件（非播放状态下的帧跳转）
-  useEffect(() => {
-    const handleManualFrameUpdate = (e: CustomEvent<{ frameIndex: number }>) => {
-      manualFrameRef.current = e.detail.frameIndex
-      if (!useEditorStore.getState().playback.isPlaying && rendererRef.current) {
-        const state = useEditorStore.getState()
-        rendererRef.current.renderFrame(e.detail.frameIndex, {
+  if (!renderQueueRef.current) {
+    renderQueueRef.current = new PreviewRenderQueue(async ({ renderer, state }, isCurrent) => {
+      if (renderer !== rendererRef.current || !state.videoItem || !state.params) return
+      const loaded = loadedRendererRef.current
+      if (loaded?.renderer !== renderer || loaded.video !== state.videoItem || loaded.params !== state.params) {
+        await renderer.setVideoItem(state.videoItem, { waitForImages: true })
+        if (renderer !== rendererRef.current) return
+        loadedRendererRef.current = { renderer, video: state.videoItem, params: state.params }
+      }
+      const shouldRender = () => isCurrent() && renderer === rendererRef.current
+        && useEditorStore.getState().videoItem === state.videoItem
+        && !useEditorStore.getState().playback.isPlaying
+      if (!isCurrent() || renderer !== rendererRef.current) return
+      if (shouldRender()) {
+        await renderer.renderFrameAsync(state.playback.currentFrame, {
           slotConfigs: state.slotConfigs,
           layers: state.layers,
-          applySlots: true
+          imageResources: state.imageResources,
+          applySlots: true,
+          useFrameCache: false,
+          shouldRender
         })
+        if (!shouldRender()) return
+        lastRenderedFrameRef.current = { video: state.videoItem, frame: state.playback.currentFrame }
         paintPreviewBackground(canvasRef.current, previewBackgroundColorRef.current)
+        window.dispatchEvent(new CustomEvent('svga-preview-frame', { detail: { frameIndex: state.playback.currentFrame } }))
       }
-    }
-    
-    window.addEventListener('svga-manual-frame', handleManualFrameUpdate as EventListener)
-    
-    return () => {
-      window.removeEventListener('svga-manual-frame', handleManualFrameUpdate as EventListener)
-    }
+      setRendererReady(true)
+    }, (error) => console.error('[CanvasPreview] 预览渲染失败:', error))
+  }
+
+  const requestPreviewFrame = useCallback((frameIndex?: number) => {
+    const renderer = rendererRef.current
+    const state = useEditorStore.getState()
+    if (!renderer || !state.videoItem || !state.params) return
+    renderQueueRef.current?.request({
+      renderer,
+      state: frameIndex === undefined ? state : { ...state, playback: { ...state.playback, currentFrame: frameIndex } }
+    })
   }, [])
+
+  useEffect(() => {
+    const unsubscribe = useEditorStore.subscribe((state, previous) => {
+      previewBackgroundColorRef.current = state.previewBackgroundColor
+      const documentChanged = state.videoItem !== previous.videoItem || state.params !== previous.params
+      if (documentChanged) {
+        lastRenderedFrameRef.current = null
+        renderQueueRef.current?.invalidate()
+        setRendererReady(false)
+        requestPreviewFrame()
+        return
+      }
+      if (state.playback.isPlaying && !previous.playback.isPlaying) {
+        renderQueueRef.current?.invalidate()
+        requestPreviewFrame()
+        return
+      }
+      if (!state.playback.isPlaying && previous.playback.isPlaying) {
+        // Store 的播放进度经过节流，暂停时先同步实绘帧，保证随后的命中与拖动不跳帧。
+        const rendered = lastRenderedFrameRef.current
+        if (rendered?.video === state.videoItem && state.playback.currentFrame === previous.playback.currentFrame
+          && rendered.frame !== state.playback.currentFrame) {
+          state.setCurrentFrame(rendered.frame)
+          return
+        }
+      }
+      if (!state.playback.isPlaying && (state.layers !== previous.layers || state.slotConfigs !== previous.slotConfigs
+        || state.imageResources !== previous.imageResources || state.previewBackgroundColor !== previous.previewBackgroundColor
+        || state.playback.currentFrame !== previous.playback.currentFrame || state.playback.isPlaying !== previous.playback.isPlaying)) {
+        requestPreviewFrame()
+      }
+    })
+    const handleManualFrameUpdate = (event: Event) => {
+      if (!useEditorStore.getState().playback.isPlaying) requestPreviewFrame((event as CustomEvent<{ frameIndex: number }>).detail.frameIndex)
+    }
+    window.addEventListener('svga-manual-frame', handleManualFrameUpdate)
+    return () => {
+      unsubscribe()
+      renderQueueRef.current?.invalidate()
+      window.removeEventListener('svga-manual-frame', handleManualFrameUpdate)
+    }
+  }, [requestPreviewFrame])
 
   // 初始化渲染器 - 使用 ref 回调确保在 DOM 元素创建时立即执行
   const canvasRefCallback = useCallback((canvas: HTMLElement | null) => {
     canvasRef.current = canvas instanceof HTMLCanvasElement ? canvas : null
-    
-    // 如果 canvas 被卸载，不做任何事
-    if (!canvas) return
+    const mountRevision = ++mountRevisionRef.current
+    renderQueueRef.current?.invalidate()
+    if (!canvas) {
+      rendererRef.current?.destroy()
+      rendererRef.current = null
+      rendererKindRef.current = null
+      loadedRendererRef.current = null
+      return
+    }
 
     const initializeRenderer = async () => {
       const nextKind = usePixi ? 'pixi' : useOfficialRenderer ? 'official' : 'high-performance'
@@ -181,6 +236,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
         if (container) {
           setPixiLoading(true)
           const { SVGAPixiRenderer } = await import('@/rendering/svga-pixi-renderer')
+          if (mountRevision !== mountRevisionRef.current) return
           rendererRef.current = new SVGAPixiRenderer(container)
           setPixiLoading(false)
         }
@@ -194,53 +250,20 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
       ;(canvas as any).__renderer = rendererRef.current
       ;(window as any).__SVGA_RENDERER__ = rendererRef.current
       
-      // 如果已经有 videoItem，立即初始化
-      const state = useEditorStore.getState()
-      if (state.videoItem && state.params && rendererRef.current) {
-        setRendererReady(false)
-        await rendererRef.current.setVideoItem(state.videoItem, { waitForImages: true })
-        if (rendererRef.current) {
-          const s = useEditorStore.getState()
-          await rendererRef.current.renderFrameAsync(0, {
-            slotConfigs: s.slotConfigs,
-            layers: s.layers,
-            applySlots: true
-          })
-          paintPreviewBackground(canvasRef.current, previewBackgroundColorRef.current)
-          setRendererReady(true)
-        }
-      } else {
-        setRendererReady(true)
-      }
+      setRendererReady(false)
+      requestPreviewFrame()
     }
 
     void initializeRenderer().catch((err) => {
       setPixiLoading(false)
       console.error('[CanvasPreview] Renderer init failed:', err)
     })
-  }, [enableWorker, useOfficialRenderer, usePixi])
+  }, [enableWorker, useOfficialRenderer, usePixi, requestPreviewFrame])
 
-  // 当 videoItem 变化时，初始化渲染器
+  // StrictMode 重订阅以及已有画布切换文件时，都交给同一队列初始化。
   useEffect(() => {
-    if (rendererRef.current && videoItem && params) {
-      const initRenderer = async () => {
-        setRendererReady(false)
-        try {
-          await rendererRef.current!.setVideoItem(videoItem, { waitForImages: true })
-          const state = useEditorStore.getState()
-          await rendererRef.current!.renderFrameAsync(0, {
-            slotConfigs: state.slotConfigs,
-            layers: state.layers,
-            applySlots: true
-          })
-          paintPreviewBackground(canvasRef.current, previewBackgroundColorRef.current)
-        } finally {
-          setRendererReady(true)
-        }
-      }
-      initRenderer()
-    }
-  }, [videoItem, params])
+    requestPreviewFrame()
+  }, [videoItem, params, requestPreviewFrame])
 
   // 更新性能指标（使用 requestIdleCallback 避免阻塞渲染）
   const updatePerformanceMetrics = useCallback(() => {
@@ -272,7 +295,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
 
   // 播放动画 - 完全独立于 React 状态
   useEffect(() => {
-    if (!params || !rendererReady || !rendererRef.current) return
+    if (!params || !rendererReady || !rendererRef.current || !isPlaying) return
 
     const getPlaybackState = () => {
       const state = useEditorStore.getState()
@@ -296,10 +319,6 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
     let lastUiUpdate = 0
     let renderedFrames = 0
     let lastFpsTime = performance.now()
-    let clockWorker: Worker | null = null
-    let clockWorkerUrl: string | null = null
-    let mainClockId: number | null = null
-    let rafClockId: number | null = null
     let tickBusy = false
 
     const animate = () => {
@@ -349,10 +368,13 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           rendererRef.current.renderFrame(frameToRender, {
             slotConfigs: state.slotConfigs,
             layers: state.layers,
+            imageResources: state.imageResources,
             applySlots: true,
             useFrameCache: false
           })
           paintPreviewBackground(canvasRef.current, previewBackgroundColorRef.current)
+          lastRenderedFrameRef.current = { video: state.videoItem, frame: frameToRender }
+          window.dispatchEvent(new CustomEvent('svga-preview-frame', { detail: { frameIndex: frameToRender } }))
           renderedFrames++
         }
         
@@ -363,6 +385,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           useEditorStore.getState().setCurrentFrame(playbackState.totalFrames - 1)
           // 最终帧也通知 UI 更新
           updateTimelineIndicators(playbackState.totalFrames - 1)
+          tickBusy = false
           return
         }
 
@@ -390,52 +413,14 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
       tickBusy = false
     }
 
-    if (typeof Worker !== 'undefined') {
-      clockWorkerUrl = URL.createObjectURL(new Blob([`
-        let timer = null;
-        self.onmessage = (event) => {
-          if (event.data === 'stop') {
-            if (timer !== null) clearInterval(timer);
-            timer = null;
-            return;
-          }
-          if (event.data === 'start' && timer === null) {
-            timer = setInterval(() => self.postMessage('tick'), 16);
-          }
-        };
-      `], { type: 'text/javascript' }))
-      clockWorker = new Worker(clockWorkerUrl)
-      clockWorker.onmessage = animate
-      clockWorker.postMessage('start')
-    }
-    const rafClock = () => {
-      animate()
-      if (!cancelled) {
-        rafClockId = window.requestAnimationFrame(rafClock)
-      }
-    }
-    rafClockId = window.requestAnimationFrame(rafClock)
-    mainClockId = window.setInterval(animate, 16)
-    animate()
+    const stopClock = startPlaybackClock(animate, enableWorker)
 
     return () => {
       cancelled = true
-      if (clockWorker) {
-        clockWorker.postMessage('stop')
-        clockWorker.terminate()
-      }
-      if (clockWorkerUrl) {
-        URL.revokeObjectURL(clockWorkerUrl)
-      }
-      if (mainClockId !== null) {
-        window.clearInterval(mainClockId)
-      }
-      if (rafClockId !== null) {
-        window.cancelAnimationFrame(rafClockId)
-      }
+      stopClock()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params, rendererReady])
+  }, [params, rendererReady, isPlaying, enableWorker])
 
   // 手动帧更新已改用事件监听（见 svga-manual-frame 事件）
 
@@ -456,9 +441,10 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
 
     const container = containerRef.current
     const toolsHeight = previewToolsRef.current?.offsetHeight ?? 48
-    setZoom(calculatePreviewZoom(container.clientWidth, Math.max(1, container.clientHeight - toolsHeight), params.viewBoxWidth, params.viewBoxHeight))
-    setCanvasOffset({ x: 0, y: -toolsHeight / 2 })
-  }, [params, setZoom, setCanvasOffset])
+    const topInset = immersive ? 0 : 72
+    setZoom(calculatePreviewZoom(container.clientWidth, Math.max(1, container.clientHeight - toolsHeight - topInset), params.viewBoxWidth, params.viewBoxHeight))
+    setCanvasOffset({ x: 0, y: (topInset - toolsHeight) / 2 })
+  }, [params, setZoom, setCanvasOffset, immersive])
 
   // 初始适应
   useEffect(() => {
@@ -535,11 +521,12 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
 
   // 鼠标拖动开始
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (videoItem && !immersive && !usePixi) return
     if (e.button === 0) {
       setIsDragging(true)
       setDragStart({ x: e.clientX - canvasOffset.x, y: e.clientY - canvasOffset.y })
     }
-  }, [canvasOffset])
+  }, [canvasOffset, videoItem, immersive, usePixi])
 
   // 鼠标拖动中
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
@@ -626,10 +613,10 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           <Button className="flex-shrink-0" onClick={onToggleImmersive} title="退出沉浸预览（Esc / F9）">退出沉浸预览</Button>
         </div>
       )}
-      {!immersive && videoItem && params && <div className="pointer-events-none absolute left-4 top-3 flex items-center gap-2 text-xs text-text-muted"><span className="font-medium text-text-secondary">画布预览</span><span className="text-border-light">/</span><span>{params.viewBoxWidth} × {params.viewBoxHeight}</span></div>}
+      {!immersive && !usePixi && videoItem && params && <CanvasTransformOverlay viewportRef={containerRef} disabled={!rendererReady || pixiLoading} />}
 
       {/* 缩放控制 */}
-      <div ref={previewToolsRef} aria-label="画布工具" className="absolute bottom-4 right-4 flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-end gap-2 bg-bg-secondary/90 backdrop-blur rounded-lg border border-border/60 p-2" onMouseDown={e => e.stopPropagation()}>
+      <div ref={previewToolsRef} aria-label="画布工具" className="absolute bottom-4 right-4 z-10 flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-end gap-2 bg-bg-secondary/90 backdrop-blur rounded-lg border border-border/60 p-2" onMouseDown={e => e.stopPropagation()}>
         <Button 
           variant="ghost" 
           size="sm"

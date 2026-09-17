@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { useEditorStore } from './editorStore'
 import type { Layer, VideoItem } from '@/types'
+import { historyActionLabel } from '@/utils/history-label'
 
 const createLayer = (id: string, name = id): Layer => ({
   id,
@@ -136,6 +137,35 @@ describe('editorStore history', () => {
 
     expect(useEditorStore.getState().canUndo).toBe(false)
     expect(useEditorStore.getState().canRedo).toBe(false)
+  })
+
+  it('撤销重做名称跟随记录移动，新操作清空重做名称', () => {
+    const label = (action: '撤销' | '重做') => {
+      const { history } = useEditorStore.getState()
+      return historyActionLabel(action, action === '撤销' ? history.past[history.past.length - 1] : history.future[0])
+    }
+    expect(label('撤销')).toBe('撤销')
+    useEditorStore.getState().setSlotConfig('avatar', { type: 'image', name: 'avatar', value: 'data:image/png;base64,new' })
+    expect(label('撤销')).toBe('撤销：替换图片：avatar')
+    useEditorStore.getState().undo()
+    expect(label('重做')).toBe('重做：替换图片：avatar')
+    useEditorStore.getState().redo()
+    expect(label('撤销')).toBe('撤销：替换图片：avatar')
+    useEditorStore.getState().undo()
+    useEditorStore.getState().updateLayer('layer-1', { visible: false })
+    expect(label('撤销')).toBe('撤销：隐藏图层：layer-1')
+    expect(label('重做')).toBe('重做')
+    useEditorStore.getState().clearHistory()
+    expect(label('撤销')).toBe('撤销')
+  })
+
+  it('定位引用图层不修改文档和撤销历史', () => {
+    const before = useEditorStore.getState()
+    before.selectLayer(null)
+    useEditorStore.getState().selectLayer('layer-1')
+    expect(useEditorStore.getState().layers).toBe(before.layers)
+    expect(useEditorStore.getState().history).toBe(before.history)
+    expect(useEditorStore.getState().isDirty).toBe(false)
   })
 
   it('syncs custom fps changes to playback', () => {

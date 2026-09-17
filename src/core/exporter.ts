@@ -13,6 +13,7 @@ import {
 } from './layer-name-sync'
 import SVGA_PROTO_JSON from './svga-proto'
 import SVGA_PROTO_LITE from './svga-proto-lite'
+import { applyCanvasTransformsToMovie } from './layer-transform'
 
 type BrowserWritableFileStream = {
   write: (data: Blob | ArrayBuffer | Uint8Array) => Promise<void>
@@ -46,13 +47,6 @@ type ExportFrame = {
   shapes?: unknown[]
 }
 
-function cloneFrame<T extends ExportFrame>(frame: T): T {
-  if (typeof structuredClone === 'function') {
-    return structuredClone(frame)
-  }
-  return JSON.parse(JSON.stringify(frame)) as T
-}
-
 function createEmptyFrame(): ExportFrame {
   return {
     alpha: 0,
@@ -73,10 +67,9 @@ function normalizeSpriteFrameCounts(sprites: Array<{ frames?: ExportFrame[] }> |
     }
 
     if (frames.length < frameCount) {
-      const lastFrame = frames[frames.length - 1] ?? createEmptyFrame()
       sprite.frames = [
         ...frames,
-        ...Array.from({ length: frameCount - frames.length }, () => cloneFrame(lastFrame))
+        ...Array.from({ length: frameCount - frames.length }, () => createEmptyFrame())
       ]
     }
   }
@@ -102,6 +95,13 @@ export class ExportEngine {
   setVideoItem(videoItem: VideoItem): void {
     this.videoItem = videoItem
     this.renderer.setVideoItem(videoItem)
+  }
+
+  private getImageSizes(): Map<string, { width: number; height: number }> {
+    return new Map(Object.entries(this.videoItem?.images || {}).map(([key, image]) => [key, {
+      width: image.naturalWidth || image.width || 0,
+      height: image.naturalHeight || image.height || 0
+    }]))
   }
 
   /**
@@ -224,6 +224,8 @@ export class ExportEngine {
           }
         }
       }
+
+      applyCanvasTransformsToMovie(decodedMessage, config.layers, this.getImageSizes(), config.frames)
 
       // 处理压缩和缩放
       if (compression?.enabled && movieObj.images) {
@@ -606,6 +608,9 @@ export class ExportEngine {
           }
         }
       }
+
+      // 先在原画布坐标合成编辑，再执行兼容导出的整体缩放。
+      applyCanvasTransformsToMovie(decodedMessage, config.layers, this.getImageSizes(), config.frames)
 
       // 4. 处理压缩和缩放
       const compression = config.compression

@@ -8,9 +8,10 @@ const host = process.env.TAURI_DEV_HOST
 export default defineConfig({
   server: {
     port: 5174,
-    strictPort: false,
-    // Tauri 开发模式需要
-    host: host || false,
+    // 固定 IPv4 回环地址与端口，与 Tauri 的 devUrl 保持一致。
+    // 端口占用时直接报错，避免 Vite 自动换端口导致 Tauri 一直等待。
+    strictPort: true,
+    host: host || '127.0.0.1',
     hmr: host ? {
       protocol: 'ws',
       host,

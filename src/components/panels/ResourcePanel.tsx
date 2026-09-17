@@ -8,6 +8,13 @@ import type { ImageResource } from '@/types'
 import { cn } from '@/utils/cn'
 import { fitImageToDataUrl, validateReplacementSize, type ImageFitMode } from '@/core/image-fit'
 import { captureReplacementTarget, isReplacementTargetCurrent } from '@/core/replacement-target'
+import { describeResourceScope, buildResourceUsageIndex } from '@/utils/resource-usage'
+import { auditResources, RESOURCE_FILTERS, type ResourceFilter } from '@/utils/resource-audit'
+import { requestLayerReveal } from '@/utils/layer-navigation'
+import { ResourceInspector } from '@/components/editor/ResourceInspector'
+import { ResourceAuditDialog } from '@/components/editor/ResourceAuditDialog'
+import type { OperationStatusValue } from '@/components/ui/OperationStatus'
+import { detectImageMime } from '@/utils/image-mime'
 
 interface ReplacementDraft {
   key: string
@@ -56,6 +63,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   onImageSelect 
 }) => {
   const videoItem = useEditorStore((s) => s.videoItem)
+  const layers = useEditorStore((s) => s.layers)
   const imageResources = useEditorStore((s) => s.imageResources)
   const addImageResource = useEditorStore((s) => s.addImageResource)
   const removeImageResource = useEditorStore((s) => s.removeImageResource)
@@ -68,11 +76,14 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   const [error, setError] = React.useState<string | null>(null)
   const [dragOver, setDragOver] = React.useState(false)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
-  const objectUrlCacheRef = React.useRef<Map<string, string>>(new Map())
+  const objectUrlCacheRef = React.useRef<Map<string, { url: string; buffer: ArrayBuffer; mimeType: string }>>(new Map())
   const resourceGridRef = React.useRef<HTMLDivElement>(null)
   const [resourceScrollTop, setResourceScrollTop] = React.useState(0)
   const [resourceViewportHeight, setResourceViewportHeight] = React.useState(0)
   const [renamingKey, setRenamingKey] = React.useState<string | null>(null)
+  const [inspectedKey, setInspectedKey] = React.useState<string | null>(null)
+  const [showAudit, setShowAudit] = React.useState(false)
+  const [resourceFilter, setResourceFilter] = React.useState<ResourceFilter>('all')
   const [renameValue, setRenameValue] = React.useState('')
   const renameInputRef = React.useRef<HTMLInputElement>(null)
   const [searchQuery, setSearchQuery] = React.useState('')
@@ -95,6 +106,8 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
 
   React.useEffect(() => {
     setPendingReplacement(null)
+    setInspectedKey(null)
+    setShowAudit(false)
     selectionIdRef.current++
   }, [videoItem])
 
@@ -125,25 +138,26 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   React.useEffect(() => {
     const cache = objectUrlCacheRef.current
     return () => {
-      cache.forEach((url) => URL.revokeObjectURL(url))
+      cache.forEach(({ url }) => URL.revokeObjectURL(url))
       cache.clear()
     }
-  }, [videoItem])
+  }, [])
 
   const revokeCachedBufferUrl = React.useCallback((key: string) => {
     const cachedUrl = objectUrlCacheRef.current.get(key)
     if (cachedUrl) {
-      URL.revokeObjectURL(cachedUrl)
+      URL.revokeObjectURL(cachedUrl.url)
       objectUrlCacheRef.current.delete(key)
     }
   }, [])
 
   const getCachedBufferUrl = React.useCallback((key: string, buffer: ArrayBuffer, mimeType: string) => {
     const cached = objectUrlCacheRef.current.get(key)
-    if (cached) return cached
+    if (cached?.buffer === buffer && cached.mimeType === mimeType) return cached.url
+    if (cached) URL.revokeObjectURL(cached.url)
 
     const url = URL.createObjectURL(new Blob([buffer], { type: mimeType }))
-    objectUrlCacheRef.current.set(key, url)
+    objectUrlCacheRef.current.set(key, { url, buffer, mimeType })
     return url
   }, [])
 
@@ -169,16 +183,17 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
       Object.entries(videoItem.buffers).forEach(([key, buffer]) => {
         if (audioKeys.has(key)) return
         seenKeys.add(key)
-        const mimeType = getImageMimeType(buffer)
         const existingResource = imageResources.get(key)
+        const sourceBuffer = existingResource?.data.byteLength ? new Uint8Array(existingResource.data).buffer : buffer
+        const mimeType = detectImageMime(new Uint8Array(sourceBuffer), existingResource?.data.byteLength ? existingResource.mimeType : undefined)
         resources.push({
           key,
           resource: existingResource,
           url: existingResource?.blobUrl,
-          mimeType: existingResource?.mimeType || mimeType,
+          mimeType,
           width: existingResource?.width || videoItem.images?.[key]?.naturalWidth,
           height: existingResource?.height || videoItem.images?.[key]?.naturalHeight,
-          buffer
+          buffer: sourceBuffer
         })
       })
     }
@@ -192,7 +207,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
           key,
           resource,
           url: resource.blobUrl,
-          mimeType: resource.mimeType,
+          mimeType: detectImageMime(resource.data, resource.mimeType),
           isNew: resource.isNew,
           width: resource.width,
           height: resource.height
@@ -206,22 +221,36 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     }))
   }, [videoItem, imageResources])
 
+  const usageIndex = React.useMemo(() => buildResourceUsageIndex(layers, videoItem), [layers, videoItem])
+  const audit = React.useMemo(() => auditResources(allResources, usageIndex, slotConfigs), [allResources, usageIndex, slotConfigs])
   const filteredResources = React.useMemo(
-    () => selectResources(allResources, searchQuery, sortOrder),
-    [allResources, searchQuery, sortOrder]
+    () => selectResources(audit.rows.filter(row => row.tags.includes(resourceFilter)), searchQuery, sortOrder),
+    [audit, resourceFilter, searchQuery, sortOrder]
   )
   const resourceStats = React.useMemo(() => summarizeResources(filteredResources), [filteredResources])
+  const inspectedResource = audit.rows.find(resource => resource.key === inspectedKey)
+  const inspectedSlot = inspectedKey && Object.prototype.hasOwnProperty.call(slotConfigs, inspectedKey) ? slotConfigs[inspectedKey] : undefined
+  const inspectedReplacementUrl = inspectedSlot?.type === 'image'
+    ? inspectedSlot.imageConfig?.url || String(inspectedSlot.value)
+    : undefined
+  const inspectedSourceUrl = inspectedResource?.url || (inspectedResource?.buffer ? getCachedBufferUrl(inspectedResource.key, inspectedResource.buffer, inspectedResource.mimeType) : undefined)
+  const locateLayer = (id: string) => {
+    setInspectedKey(null)
+    setShowAudit(false)
+    requestLayerReveal(id)
+  }
 
   React.useEffect(() => {
     setSearchQuery('')
     setSortOrder('original')
+    setResourceFilter('all')
     setExtractionStatus(null)
   }, [videoItem])
 
   React.useLayoutEffect(() => {
     if (resourceGridRef.current) resourceGridRef.current.scrollTop = 0
     setResourceScrollTop(0)
-  }, [searchQuery, sortOrder, videoItem])
+  }, [searchQuery, sortOrder, resourceFilter, videoItem])
 
   React.useEffect(() => {
     const grid = resourceGridRef.current
@@ -241,17 +270,14 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     if (grid) setResourceScrollTop(grid.scrollTop)
   }, [filteredResources.length])
 
-  // 清理 URL 对象
+  // 文件切换后的清理只回收不再使用的字节，不能撤销新一轮渲染刚创建的 URL。
   React.useEffect(() => {
-    return () => {
-      allResources.forEach(({ url, resource }) => {
-        // 只清理临时创建的 URL，不清理 resource 中的 blobUrl
-        if (url && !resource?.blobUrl) {
-          void url
-        }
-      })
-    }
-  }, [allResources])
+    const sources = new Map(allResources.map(resource => [resource.key, resource]))
+    objectUrlCacheRef.current.forEach((cached, key) => {
+      const resource = sources.get(key)
+      if (!resource || resource.buffer !== cached.buffer || resource.mimeType !== cached.mimeType) revokeCachedBufferUrl(key)
+    })
+  }, [allResources, revokeCachedBufferUrl])
 
   const totalResourceItems = filteredResources.length
   const resourceRowCount = Math.ceil(totalResourceItems / RESOURCE_COLUMNS)
@@ -361,10 +387,10 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     }
   }
 
-  const handleExportImage = async (key: string) => {
-    if (extractingRef.current) return
+  const handleExportImage = async (key: string): Promise<OperationStatusValue> => {
+    if (extractingRef.current) return { kind: 'processing', message: '已有图片提取正在进行，请稍后再试。' }
     const item = allResources.find((resource) => resource.key === key)
-    if (!item) return
+    if (!item) return { kind: 'error', message: '资源已不存在，请关闭检查窗口后重新选择。' }
     extractingRef.current = true
     setIsExtracting(true)
     setError(null)
@@ -374,8 +400,10 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
       const extension = getResourceExtension(new Uint8Array(await blob.arrayBuffer()), blob.type)
       const saved = await saveGeneratedFile(blob, getResourceFileName(key, extension))
       setExtractionStatus(saved ? '图片提取完成' : '已取消提取')
+      return { kind: saved ? 'success' : 'cancelled', message: saved ? '图片提取完成' : '已取消提取' }
     } catch (err) {
       setError((err as Error).message)
+      return { kind: 'error', message: `图片提取失败：${(err as Error).message}` }
     } finally {
       extractingRef.current = false
       setIsExtracting(false)
@@ -481,6 +509,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
       contentClassName="p-0 overflow-hidden flex flex-col min-h-0"
       headerAction={
         <div className="flex items-center gap-1">
+        <Button variant="ghost" size="sm" disabled={!videoItem && !allResources.length} onClick={() => setShowAudit(true)} title="检查共享、遮罩、缺失引用与源图内存">体检</Button>
         <Button
           variant="ghost"
           size="sm"
@@ -538,7 +567,13 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
               <option value="name">名称顺序</option>
               <option value="size-desc">体积↓</option>
               <option value="size-asc">体积↑</option>
+              <option value="memory-desc">内存↓</option>
             </select>
+          </div>
+          <div className="flex flex-wrap gap-1" role="group" aria-label="资源用途筛选">
+            {RESOURCE_FILTERS.map(filter => <button type="button" key={filter.id} aria-pressed={resourceFilter === filter.id} onClick={() => setResourceFilter(filter.id)} className={cn('rounded px-1.5 py-1 text-[10px]', resourceFilter === filter.id ? 'bg-accent/15 text-accent' : 'text-text-muted hover:bg-bg-tertiary')}>
+              {filter.label} {audit.counts[filter.id]}
+            </button>)}
           </div>
           <div className="text-[10px] text-text-muted" title="当前列表的源资源统计，不含插槽替换。体积是编码图片字节之和，不是 SVGA 文件大小；解码估算为宽×高×4，不含帧缓存及 GPU 额外开销。">
             <div>{filteredResources.length} / {allResources.length} 张 · 源图体积 {formatResourceBytes(resourceStats.encodedBytes)}</div>
@@ -603,18 +638,18 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
           {filteredResources.length === 0 && (
             <div role="status" className="col-span-2 py-4 text-center text-xs text-text-muted">
               没有匹配的图片
-              <button type="button" className="ml-2 text-accent hover:underline" onClick={() => setSearchQuery('')}>清除搜索</button>
+              <button type="button" className="ml-2 text-accent hover:underline" onClick={() => { setSearchQuery(''); setResourceFilter('all') }}>清除筛选</button>
             </div>
           )}
           {visibleResourceRowStart > 0 && <div className="col-span-2" style={{ height: visibleResourceRowStart * RESOURCE_CARD_HEIGHT - 8 }} />}
-          {filteredResources.slice(visibleResourceItemStart, visibleResourceItemEnd).map(({ key, resource, url, mimeType, isNew, width, height, buffer, byteSize }) => {
+          {filteredResources.slice(visibleResourceItemStart, visibleResourceItemEnd).map(({ key, resource, url, mimeType, isNew, width, height, buffer, byteSize, usages, tags }) => {
             const isReplaced = slotConfigs[key]?.type === 'image'
             const displayUrl = isReplaced
               ? (slotConfigs[key].imageConfig?.url || slotConfigs[key].value as string)
               : url || (buffer ? getCachedBufferUrl(key, buffer, mimeType) : undefined)
             
-            // 点击图片卡片创建图层
-            const handleCardClick = () => {
+            // 查看与添加分离，浏览资源不能隐式修改动画。
+            const handleAddLayer = () => {
               handleSelectImage({
                 key,
                 isNew: !!isNew,
@@ -632,9 +667,10 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
                   "h-[182px] min-w-0 bg-bg-tertiary rounded-lg p-2 hover:bg-border/50 cursor-pointer transition-colors group relative",
                   isNew && "ring-1 ring-accent"
                 )}
-                onClick={handleCardClick}
+                onClick={() => setInspectedKey(key)}
               >
                 <div className="h-[108px] bg-bg-primary rounded overflow-hidden mb-2 relative">
+                  <button type="button" aria-label={`查看素材 ${key}`} className="absolute inset-0 z-10 rounded focus-visible:ring-2 focus-visible:ring-accent" onClick={(e) => { e.stopPropagation(); setInspectedKey(key) }} />
                   <img
                     src={displayUrl}
                     alt={key}
@@ -656,12 +692,12 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
                   )}
 
                   {/* 悬停操作按钮 */}
-                  <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex flex-wrap content-center items-center justify-center gap-1 p-1">
+                  <div className="absolute inset-0 z-20 pointer-events-none bg-black/50 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex flex-wrap content-center items-center justify-center gap-1 p-1 [&>button]:pointer-events-auto">
                     <button
                       className="p-1.5 bg-white/20 hover:bg-white/30 rounded text-white"
                       onClick={(e) => {
                         e.stopPropagation()
-                        handleCardClick()
+                        handleAddLayer()
                       }}
                       title="添加为图层"
                     >
@@ -753,7 +789,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
                   {mimeType.split('/')[1].toUpperCase()}
                   {width && height && ` · ${width}×${height}`}
                 </p>
-                <p className="text-[10px] text-text-muted" title="源图片编码体积，不含插槽替换">源图 {formatResourceBytes(byteSize)}</p>
+                <p className="truncate text-[10px] text-text-muted" title="源图片编码体积，不含插槽替换；引用数量包含隐藏、锁定和遮罩关联">{formatResourceBytes(byteSize)} · {usages.length ? `${usages.length} 引用` : '未引用'}{tags.includes('matte') ? ' · 遮罩' : ''}{tags.includes('heavy') ? ' · 高内存' : ''}</p>
               </div>
             )
           })}
@@ -773,6 +809,14 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
         </div>
       )}
     </Panel>
+      {showAudit && <ResourceAuditDialog audit={audit} onClose={() => setShowAudit(false)}
+        onFilter={filter => { setResourceFilter(filter); setSearchQuery(''); if (filter === 'heavy') setSortOrder('memory-desc'); setShowAudit(false) }}
+        onInspect={key => { setShowAudit(false); setInspectedKey(key) }} onLocate={locateLayer} />}
+      {inspectedResource && <ResourceInspector key={inspectedResource.key} resource={inspectedResource} sourceUrl={inspectedSourceUrl}
+        replacementUrl={inspectedReplacementUrl} textSlot={inspectedSlot?.type === 'text'}
+        onClose={() => setInspectedKey(null)} onLocate={locateLayer}
+        onReplace={() => { const key = inspectedResource.key; setInspectedKey(null); handleReplaceImage(key) }}
+        downloading={isExtracting} onDownload={() => handleExportImage(inspectedResource.key)} />}
       <Modal
         isolateKeyboard
         isOpen={Boolean(pendingReplacement)}
@@ -785,6 +829,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
       >
         {pendingReplacement && <div className="space-y-3">
           <p className="text-xs text-text-muted">{pendingReplacement.key} · 目标尺寸 {pendingReplacement.width}×{pendingReplacement.height}</p>
+          <p className="rounded bg-warning/10 p-2 text-xs text-warning">{describeResourceScope(pendingReplacement.key, layers, videoItem)}</p>
           {!replacementIsCurrent && <p role="alert" className="text-sm text-warning">原素材或替换配置已变化，不能应用旧预览。请取消后重新操作。</p>}
           {replacementError && <p role="alert" className="text-sm text-error">{replacementError}</p>}
           <div className="flex h-56 items-center justify-center overflow-hidden rounded border border-border" style={{ backgroundColor: '#d1d5db', backgroundImage: 'conic-gradient(#f3f4f6 25%, transparent 0 50%, #f3f4f6 0 75%, transparent 0)', backgroundSize: '20px 20px' }}>
@@ -800,29 +845,4 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
       </Modal>
     </>
   )
-}
-
-/**
- * 根据文件头判断图片 MIME 类型
- */
-const getImageMimeType = (buffer: ArrayBuffer): string => {
-  const data = new Uint8Array(buffer)
-  // PNG: 89 50 4E 47 0D 0A 1A 0A
-  if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4E && data[3] === 0x47) {
-    return 'image/png'
-  }
-  // JPEG: FF D8
-  if (data[0] === 0xFF && data[1] === 0xD8) {
-    return 'image/jpeg'
-  }
-  // WebP: RIFF....WEBP
-  if (data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46 &&
-      data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50) {
-    return 'image/webp'
-  }
-  // GIF: GIF
-  if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) {
-    return 'image/gif'
-  }
-  return 'image/png'
 }
