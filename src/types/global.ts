@@ -45,6 +45,8 @@ declare global {
   interface Window {
     nativeAPI?: NativeAPI
     __SVGA_RENDERER__?: HighPerformanceRenderer
+    /** MCP 截图使用的当前预览画布；由 CanvasPreview 管理生命周期。 */
+    __SVGA_CANVAS__?: HTMLCanvasElement
   }
   
   interface HTMLCanvasElement {

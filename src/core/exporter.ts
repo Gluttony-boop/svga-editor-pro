@@ -7,13 +7,38 @@ import protobuf from 'protobufjs'
 import JSZip from 'jszip'
 import { CanvasRenderer } from './renderer'
 import type { VideoItem, CompressionConfig, SlotConfig, Layer } from '@/types'
-import {
-  applyLayerNamesToMovie,
-  normalizeMovieImageReferences
-} from './layer-name-sync'
+import type { ExportSpriteBinding } from '@/types/export-artifact'
+import { assertDecodedImageReferences, normalizeMovieImageReferences } from './layer-name-sync'
 import SVGA_PROTO_JSON from './svga-proto'
 import SVGA_PROTO_LITE from './svga-proto-lite'
-import { applyCanvasTransformsToMovie } from './layer-transform'
+import { applyCanvasTransformsToMovie, findOriginalLayer } from './layer-transform'
+import { getSlotImageUrl } from '@/utils/slot-config'
+import { applyTextExportLayerNames, findExportSlotSourceKey, mapSlotsToSourceImages, prepareTextSlotsForExport, resolveTextExportImageSizes } from './text-export'
+import { createExportSpriteBinding, emitExportBindings, throwIfExportAborted, type ExportProvenanceOptions } from './export-provenance'
+
+export interface SVGAExportConfig extends ExportProvenanceOptions {
+  viewBoxWidth?: number
+  viewBoxHeight?: number
+  fps: number
+  frames: number
+  compression?: CompressionConfig
+  slotConfigs?: Record<string, SlotConfig>
+  layers?: Layer[]
+}
+
+function bindOriginalSprites(sprites: Array<{ imageKey?: string | null }> | undefined, config: SVGAExportConfig): ExportSpriteBinding[] {
+  // Lite 路径保留全部原始 sprite，包括没有图片 Key 的矢量/空图层。
+  return (sprites || []).map((sprite, index) => createExportSpriteBinding(
+    index, findOriginalLayer(config.layers || [], index), index, sprite.imageKey, sprite.imageKey, config.slotConfigs
+  ))
+}
+
+function bindNamedSlots(bindings: ExportSpriteBinding[], sprites: Array<{ imageKey?: string | null }> | undefined, config: SVGAExportConfig): void {
+  for (const binding of bindings) {
+    binding.sourceSlotKey = findExportSlotSourceKey(config.slotConfigs,
+      findOriginalLayer(config.layers || [], binding.originalSpriteIndex!), binding.sourceImageKey, sprites?.[binding.spriteIndex]?.imageKey)
+  }
+}
 
 type BrowserWritableFileStream = {
   write: (data: Blob | ArrayBuffer | Uint8Array) => Promise<void>
@@ -97,6 +122,11 @@ export class ExportEngine {
     this.renderer.setVideoItem(videoItem)
   }
 
+  destroy(): void {
+    this.renderer.destroy()
+    this.videoItem = null
+  }
+
   private getImageSizes(): Map<string, { width: number; height: number }> {
     return new Map(Object.entries(this.videoItem?.images || {}).map(([key, image]) => [key, {
       width: image.naturalWidth || image.width || 0,
@@ -121,16 +151,9 @@ export class ExportEngine {
    */
   async exportSVGA(
     originalBuffer: ArrayBuffer,
-    config: {
-      viewBoxWidth?: number
-      viewBoxHeight?: number
-      fps: number
-      frames: number
-      compression?: CompressionConfig
-      slotConfigs?: Record<string, SlotConfig>
-      layers?: Layer[]
-    }
+    config: SVGAExportConfig
   ): Promise<Blob> {
+    throwIfExportAborted(config.signal)
     if (!this.videoItem) {
       throw new Error('没有可导出的视频')
     }
@@ -139,6 +162,7 @@ export class ExportEngine {
     if (!this.MovieEntity) {
       await this.initProtobuf()
     }
+    throwIfExportAborted(config.signal)
 
 
     // SVGA 版本号（在 try 块外声明以便后续使用）
@@ -175,8 +199,11 @@ export class ExportEngine {
 
 
       // 2. 解码 protobuf
-      const decodedMessage = this.MovieEntity.decode(decompressed)
+      let decodedMessage = this.MovieEntity.decode(decompressed)
+      assertDecodedImageReferences(decodedMessage)
+      const bindings = bindOriginalSprites(decodedMessage.sprites, config)
       decodedMessage.version = '2.0.0'
+      decodedMessage.images = Object.assign(Object.create(null), decodedMessage.images)
       if (decodedMessage.params) {
         if (config.viewBoxWidth !== undefined) decodedMessage.params.viewBoxWidth = config.viewBoxWidth
         if (config.viewBoxHeight !== undefined) decodedMessage.params.viewBoxHeight = config.viewBoxHeight
@@ -185,20 +212,12 @@ export class ExportEngine {
       }
       
 
-      // 将消息转换为普通对象，保留所有字段
-      // 注意：不使用 defaults: true，保留 undefined 值
-      const movieObj = this.MovieEntity.toObject(decodedMessage, {
-        bytes: Uint8Array,  // 保持 bytes 为 Uint8Array
-        arrays: true,       // 保持数组
-        objects: true,      // 保持对象
-        oneofs: true,       // 保持 oneof
-        defaults: false     // 不填充默认值
-      })
-      
       // 3. 处理图片替换
-      const slotConfigs = config.slotConfigs || {}
+      const slotConfigs = mapSlotsToSourceImages(config.slotConfigs, decodedMessage.sprites, config.layers)
+      const imageSizes = await resolveTextExportImageSizes(decodedMessage, slotConfigs, this.getImageSizes(), config.layers)
+      throwIfExportAborted(config.signal)
       const replacementKeys = Object.keys(slotConfigs).filter(
-        key => slotConfigs[key]?.type === 'image' && slotConfigs[key]?.value
+        key => !!getSlotImageUrl(slotConfigs[key])
       )
 
       // Always re-encode so every exported .svga is standard SVGA 2.0.
@@ -208,27 +227,32 @@ export class ExportEngine {
       if (replacementKeys.length > 0) {
         
         for (const key of replacementKeys) {
+          throwIfExportAborted(config.signal)
           const slotConfig = slotConfigs[key]
-          if (!slotConfig?.value) continue
+          if (!getSlotImageUrl(slotConfig)) continue
 
           try {
-            const imageUrl = slotConfig.value as string
+            const imageUrl = getSlotImageUrl(slotConfig)
             
             // 获取替换图片的数据 - 转换为 PNG
             const imageBuffer = await this.convertToPng(imageUrl)
             
             // 设置新图片数据
-            movieObj.images[key] = new Uint8Array(imageBuffer)
+            decodedMessage.images[key] = new Uint8Array(imageBuffer)
           } catch (err) {
             throw new Error(`替换图片“${key}”读取失败，请重新选择图片后导出`)
           }
         }
       }
 
-      applyCanvasTransformsToMovie(decodedMessage, config.layers, this.getImageSizes(), config.frames)
+      applyCanvasTransformsToMovie(decodedMessage, config.layers, imageSizes, config.frames)
+      const namedText = applyTextExportLayerNames(decodedMessage, config.slotConfigs, config.layers, imageSizes)
+      bindNamedSlots(bindings, decodedMessage.sprites, config)
+      decodedMessage = await prepareTextSlotsForExport(decodedMessage, namedText.slots, namedText.imageSizes)
+      throwIfExportAborted(config.signal)
 
       // 处理压缩和缩放
-      if (compression?.enabled && movieObj.images) {
+      if (compression?.enabled && decodedMessage.images) {
 
         // 检查是否需要缩放
         const needResize = compression.resizeEnabled && compression.resizePercent < 100
@@ -236,12 +260,14 @@ export class ExportEngine {
         const needCompress = useWebP || compression.quality < 100
 
         if (needResize || needCompress) {
-          for (const key of Object.keys(movieObj.images)) {
+          for (const key of Object.keys(decodedMessage.images)) {
+            throwIfExportAborted(config.signal)
+            let url: string | undefined
             try {
-              const uint8Data = movieObj.images[key]
+              const uint8Data = decodedMessage.images[key]
               const originalSize = uint8Data.length
               const blob = new Blob([uint8Data])
-              const url = URL.createObjectURL(blob)
+              url = URL.createObjectURL(blob)
 
               // 处理图片（缩放和压缩）
               const processedBuffer = await this.processImage(
@@ -253,42 +279,19 @@ export class ExportEngine {
 
               // 只有处理后更小才替换
               if (processedBuffer.byteLength < originalSize) {
-                movieObj.images[key] = new Uint8Array(processedBuffer)
+                decodedMessage.images[key] = new Uint8Array(processedBuffer)
               } else {
               }
 
-              URL.revokeObjectURL(url)
             } catch (err) {
               console.warn(`[Exporter] Failed to process image "${key}":`, err)
+            } finally {
+              if (url) URL.revokeObjectURL(url)
             }
           }
         }
       }
 
-      // 验证所有图片
-      if (movieObj.images) {
-        for (const key of Object.keys(movieObj.images)) {
-          // 图片数据已存在于 movieObj.images[key] 中，此处仅做遍历验证
-          void key
-        }
-      }
-
-      // 关键修复：直接修改解码后的消息对象，而不是创建新对象
-      // protobufjs 的 Message 对象可以直接修改字段值
-      // 这样可以保留原始数据中的 undefined 值，不会被填充为 0
-      const shouldSync = replacementKeys.length > 0 ||
-        (compression?.enabled && (compression.quality < 100 || compression.mode === 'webp'))
-
-      if (shouldSync) {
-        // 只有需要修改时才操作 decodedMessage
-        for (const key of Object.keys(movieObj.images)) {
-          if (decodedMessage.images && movieObj.images[key]) {
-            decodedMessage.images[key] = movieObj.images[key]
-          }
-        }
-      }
-
-      applyLayerNamesToMovie(decodedMessage, config.layers)
       normalizeSpriteFrameCounts(decodedMessage.sprites, config.frames)
       const normalizedReferences = normalizeMovieImageReferences(decodedMessage)
       if (normalizedReferences.missingImageKeys.length > 0) {
@@ -309,6 +312,7 @@ export class ExportEngine {
       if (verifyObj.sprites && !Array.isArray(verifyObj.sprites)) {
         throw new Error('导出验证失败: sprites 数据格式异常')
       }
+      emitExportBindings(config, bindings, decodedMessage.sprites)
       
       return createSVGA2Blob(encoded)
     } catch (error) {
@@ -475,30 +479,36 @@ export class ExportEngine {
     return new Promise((resolve, reject) => {
       const img = new Image()
       img.crossOrigin = 'anonymous'
-      
-      img.onload = () => {
-        const canvas = document.createElement('canvas')
-        canvas.width = img.width
-        canvas.height = img.height
-        const ctx = canvas.getContext('2d')
-        if (!ctx) {
-          reject(new Error('Failed to get canvas context'))
-          return
-        }
-        ctx.drawImage(img, 0, 0)
-        
-        canvas.toBlob(async (blob) => {
-          if (blob) {
-            const buffer = await blob.arrayBuffer()
-            resolve(buffer)
-          } else {
-            reject(new Error('Failed to convert to PNG'))
-          }
-        }, 'image/png')
+      let canvas: HTMLCanvasElement | undefined
+      const cleanup = () => {
+        img.onload = null
+        img.onerror = null
+        if (canvas) { canvas.width = 0; canvas.height = 0 }
       }
-      
-      img.onerror = () => reject(new Error(`Failed to load image: ${url}`))
-      img.src = url
+
+      img.onload = () => {
+        try {
+          canvas = document.createElement('canvas')
+          canvas.width = img.width
+          canvas.height = img.height
+          const ctx = canvas.getContext('2d')
+          if (!ctx) throw new Error('Failed to get canvas context')
+          ctx.drawImage(img, 0, 0)
+          canvas.toBlob(async (blob) => {
+            try {
+              if (!blob) throw new Error('Failed to convert to PNG')
+              resolve(await blob.arrayBuffer())
+            } catch (error) { reject(error) }
+            finally { cleanup() }
+          }, 'image/png')
+        } catch (error) {
+          cleanup()
+          reject(error)
+        }
+      }
+
+      img.onerror = () => { cleanup(); reject(new Error(`Failed to load image: ${url}`)) }
+      try { img.src = url } catch (error) { cleanup(); reject(error) }
     })
   }
 
@@ -508,16 +518,9 @@ export class ExportEngine {
    */
   async exportSVGALite(
     originalBuffer: ArrayBuffer,
-    config: {
-      viewBoxWidth?: number
-      viewBoxHeight?: number
-      fps: number
-      frames: number
-      compression?: CompressionConfig
-      slotConfigs?: Record<string, SlotConfig>
-      layers?: Layer[]
-    }
+    config: SVGAExportConfig
   ): Promise<Blob> {
+    throwIfExportAborted(config.signal)
     if (!this.videoItem) {
       throw new Error('没有可导出的视频')
     }
@@ -526,6 +529,7 @@ export class ExportEngine {
     if (!this.MovieEntityLite) {
       await this.initProtobuf()
     }
+    throwIfExportAborted(config.signal)
 
 
     try {
@@ -555,8 +559,11 @@ export class ExportEngine {
       // 2. 使用标准 protobuf 解码
       // 注意：不使用 defaults: true，保留 undefined 值
       // 否则 layout.x, transform.tx 等不存在字段会被填充为 0
-      const decodedMessage = this.MovieEntity.decode(decompressed)
+      let decodedMessage = this.MovieEntity.decode(decompressed)
+      assertDecodedImageReferences(decodedMessage)
+      const bindings = bindOriginalSprites(decodedMessage.sprites, config)
       decodedMessage.version = '2.0.0'
+      decodedMessage.images = Object.assign(Object.create(null), decodedMessage.images)
       // 2.5 修改 FPS 和帧数（如果用户修改了）
 
       if (decodedMessage.params) {
@@ -583,9 +590,11 @@ export class ExportEngine {
       }
 
       // 3. 处理图片替换
-      const slotConfigs = config.slotConfigs || {}
+      const slotConfigs = mapSlotsToSourceImages(config.slotConfigs, decodedMessage.sprites, config.layers)
+      const imageSizes = await resolveTextExportImageSizes(decodedMessage, slotConfigs, this.getImageSizes(), config.layers)
+      throwIfExportAborted(config.signal)
       const replacementKeys = Object.keys(slotConfigs).filter(
-        key => slotConfigs[key]?.type === 'image' && slotConfigs[key]?.value
+        key => !!getSlotImageUrl(slotConfigs[key])
       )
 
       // 关键修复：直接操作解码后的消息对象，而不是 movieObj
@@ -593,16 +602,15 @@ export class ExportEngine {
       if (replacementKeys.length > 0) {
         
         for (const key of replacementKeys) {
+          throwIfExportAborted(config.signal)
           const slotConfig = slotConfigs[key]
-          if (!slotConfig?.value) continue
+          if (!getSlotImageUrl(slotConfig)) continue
 
           try {
-            const imageUrl = slotConfig.value as string
+            const imageUrl = getSlotImageUrl(slotConfig)
             const imageBuffer = await this.convertToPng(imageUrl)
             // 直接修改解码后的消息对象
-            if (decodedMessage.images) {
-              decodedMessage.images[key] = new Uint8Array(imageBuffer)
-            }
+            decodedMessage.images[key] = new Uint8Array(imageBuffer)
           } catch (err) {
             throw new Error(`替换图片“${key}”读取失败，请重新选择图片后导出`)
           }
@@ -610,7 +618,11 @@ export class ExportEngine {
       }
 
       // 先在原画布坐标合成编辑，再执行兼容导出的整体缩放。
-      applyCanvasTransformsToMovie(decodedMessage, config.layers, this.getImageSizes(), config.frames)
+      applyCanvasTransformsToMovie(decodedMessage, config.layers, imageSizes, config.frames)
+      const namedText = applyTextExportLayerNames(decodedMessage, config.slotConfigs, config.layers, imageSizes)
+      bindNamedSlots(bindings, decodedMessage.sprites, config)
+      decodedMessage = await prepareTextSlotsForExport(decodedMessage, namedText.slots, namedText.imageSizes)
+      throwIfExportAborted(config.signal)
 
       // 4. 处理压缩和缩放
       const compression = config.compression
@@ -628,13 +640,15 @@ export class ExportEngine {
           let totalCompressedSize = 0
 
           for (const key of Object.keys(decodedMessage.images)) {
+            throwIfExportAborted(config.signal)
+            let url: string | undefined
             try {
               const uint8Data = decodedMessage.images[key]
               const originalSize = uint8Data.length
               totalOriginalSize += originalSize
 
               const blob = new Blob([uint8Data])
-              const url = URL.createObjectURL(blob)
+              url = URL.createObjectURL(blob)
 
               // 处理图片（缩放和压缩），使用统一的 baseScale
               const { buffer: processedBuffer } = await this.processImageWithScale(
@@ -652,9 +666,10 @@ export class ExportEngine {
                 totalCompressedSize += originalSize
               }
 
-              URL.revokeObjectURL(url)
             } catch (err) {
               console.warn(`[Exporter Lite] Failed to process image "${key}":`, err)
+            } finally {
+              if (url) URL.revokeObjectURL(url)
             }
           }
 
@@ -710,7 +725,6 @@ export class ExportEngine {
         }
       }
 
-      applyLayerNamesToMovie(decodedMessage, config.layers)
       normalizeSpriteFrameCounts(decodedMessage.sprites, config.frames)
       const normalizedReferences = normalizeMovieImageReferences(decodedMessage)
       if (normalizedReferences.missingImageKeys.length > 0) {
@@ -732,6 +746,7 @@ export class ExportEngine {
       if (verifyObj.sprites && !Array.isArray(verifyObj.sprites)) {
         throw new Error('导出验证失败: sprites 数据格式异常')
       }
+      emitExportBindings(config, bindings, decodedMessage.sprites)
 
       // Official SVGA 2.0: zlib-compressed protobuf MovieEntity, no custom file header.
       return createSVGA2Blob(encoded)

@@ -1,4 +1,5 @@
 import type { SlotConfig } from '@/types'
+import { getSlotImageUrl } from '@/utils/slot-config'
 
 export interface RendererImageResource {
   data: Uint8Array
@@ -31,7 +32,7 @@ export class RendererImageCache {
     const pending: Promise<void>[] = []
     if (applySlots) {
       for (const [key, slot] of Object.entries(slots)) {
-        const url = slot.type === 'image' ? slot.imageConfig?.url || (typeof slot.value === 'string' ? slot.value : '') : ''
+        const url = getSlotImageUrl(slot)
         if (!url) continue
         this.activeSlots.add(key)
         pending.push(this.load(`slot:${key}`, url))

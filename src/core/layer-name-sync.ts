@@ -56,7 +56,8 @@ export function getCompatibleImageKey(
   fallback: string,
   layerIndex: number
 ): string {
-  if (!requestedKey || isLikelyInlineImageData(requestedKey)) {
+  // 常见 JS 播放器使用普通对象读取 protobuf map；该名称会触发原型 setter 丢失图片。
+  if (!requestedKey || requestedKey === '__proto__' || isLikelyInlineImageData(requestedKey)) {
     return `image_${layerIndex + 1}`
   }
 
@@ -65,6 +66,14 @@ export function getCompatibleImageKey(
   }
 
   return requestedKey
+}
+
+/** 不把旧文件经 protobuf 解码已丢失的特殊图片冒充为合法透明占位图。 */
+export function assertDecodedImageReferences(movie: MutableMovieLike): void {
+  if (movie.sprites?.some(sprite => sprite.imageKey === '__proto__' || sprite.matteKey === '__proto__') &&
+    (!movie.images || !hasOwn(movie.images, '__proto__'))) {
+    throw new Error('原文件包含无法安全解码的图片 Key“__proto__”，请在源文件中改名后重新导入。')
+  }
 }
 
 export function getLayerExportImageKey(layer: Layer, fallback = ''): string {

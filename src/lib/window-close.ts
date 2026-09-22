@@ -1,4 +1,5 @@
 export interface WindowCloseOptions {
+  isBusy?: () => boolean
   isDirty: () => boolean
   confirm: () => Promise<'save' | 'discard' | 'cancel'>
   save: () => Promise<boolean>
@@ -13,7 +14,7 @@ export function createWindowCloseHandler(options: WindowCloseOptions) {
   const handle = async (event: { preventDefault: () => void }) => {
     // The SDK otherwise calls destroy outside our error handler after this resolves.
     event.preventDefault()
-    if (busy || disposed) return
+    if (busy || disposed || options.isBusy?.()) return
     busy = true
     try {
       if (options.isDirty()) {

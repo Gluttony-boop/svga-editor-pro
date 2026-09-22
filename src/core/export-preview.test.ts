@@ -56,6 +56,15 @@ describe('actual export size comparison', () => {
     expect(result.params).not.toBe(params)
     expect(phases).toHaveLength(2)
   })
+  it('passes the current canvas size to automatic texture resizing', async () => {
+    const baseline = new Blob([new Uint8Array(10)])
+    const optimized = new Blob([new Uint8Array(8)])
+    const optimize = vi.spyOn(SVGAOptimizer.prototype, 'optimize').mockResolvedValue(optimized)
+    const config = structuredClone(getPreset('none')!.config)
+    config.image.autoResizeToCanvas = true
+    await generateExportPreview(async () => baseline, config, 10, { ...params, viewBoxWidth: 320, viewBoxHeight: 180 })
+    expect(optimize.mock.calls[0]?.[3]).toEqual({ width: 320, height: 180 })
+  })
   it('reports growth honestly instead of showing a successful reduction', async () => {
     vi.spyOn(SVGAOptimizer.prototype, 'optimize').mockResolvedValue(new Blob([new Uint8Array(120)]))
     const result = await generateExportPreview(async () => new Blob([new Uint8Array(100)]), getPreset('balanced')!.config, 999, params)

@@ -1,0 +1,15 @@
+{
+  // 这是部署模板，必须在确认账号和资源后填写；不会自动创建付费资源。
+  "name": "svga-editor-licensing",
+  "main": "dist/worker.mjs",
+  "compatibility_date": "2026-07-30",
+  "workers_dev": false,
+  "d1_databases": [
+    { "binding": "DB", "database_name": "svga-editor-licenses", "database_id": "REPLACE_WITH_D1_ID", "migrations_dir": "migrations" }
+  ],
+  "ratelimits": [
+    { "name": "ACTIVATION_RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } }
+  ],
+  "vars": { "LICENSE_KID": "production-key-1" }
+  // ADMIN_TOKEN、REFRESH_SECRET、LICENSE_PRIVATE_JWK 仅通过平台 Secrets 注入，不写此文件。
+}

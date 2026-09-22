@@ -4,8 +4,9 @@
  */
 
 import pako from 'pako'
-import type { MovieEntity, VideoItem, MovieParams, Sprite, AudioResource } from '@/types'
+import type { MovieEntity, VideoItem, MovieParams, Sprite, AudioResource, Audio } from '@/types'
 import SVGA_PROTO_JSON from './svga-proto'
+import { isTextKeyCandidate } from '@/utils/slot-catalog'
 
 export class SVGAParser {
   private MovieEntity: any = null
@@ -19,7 +20,7 @@ export class SVGAParser {
   /**
    * 解析 SVGA 文件
    */
-  async parse(buffer: ArrayBuffer, options?: { onImageUrlCreated?: (url: string) => void }): Promise<VideoItem> {
+  async parse(buffer: ArrayBuffer, options?: { onImageUrlCreated?: (url: string) => void; decodeImages?: boolean }): Promise<VideoItem> {
     if (!this.MovieEntity) {
       await this.init()
     }
@@ -29,10 +30,16 @@ export class SVGAParser {
       const decompressed = this.decompress(buffer)
       
       // 解码 protobuf
-      const movie = this.decodeProto(decompressed)
+      const movie = this.decodeProto(decompressed, options?.decodeImages !== false)
       
       // 解析图片
-      const images = await this.parseImages(movie.images || {}, options?.onImageUrlCreated)
+      const audioKeys = new Set((movie.audios || []).map(audio => {
+        const raw = audio as unknown as { audioKey?: string; key?: string }
+        return raw.audioKey || raw.key || ''
+      }))
+      // 交付任务先取得真实字节，再由限额、顺序解码器准备图像，避免同时分配大量位图。
+      const images = options?.decodeImages === false ? Object.create(null)
+        : await this.parseImages(movie.images || {}, options?.onImageUrlCreated, audioKeys)
       
       const buffers: Record<string, ArrayBuffer> = {}
       
@@ -66,7 +73,20 @@ export class SVGAParser {
     if (!movie.audios || movie.audios.length === 0) return []
 
     const { audioManager } = await import('./audio-manager')
-    return audioManager.parseAudioTracks(movie.audios)
+    const sources: Audio[] = []
+    for (const value of movie.audios) {
+      const raw = value as unknown as Partial<Audio> & { audioKey?: string; startFrame?: number; endFrame?: number; totalTime?: number }
+      const key = raw.audioKey || raw.key
+      if (typeof key !== 'string' || !key) continue
+      const data = raw.data || (Object.prototype.hasOwnProperty.call(movie.images || {}, key) ? movie.images[key] : undefined)
+      if (!data?.length) continue
+      const startTime = raw.audioKey && Number.isFinite(raw.startFrame) ? raw.startFrame! / movie.params.fps * 1000 : raw.startTime || 0
+      const duration = raw.audioKey && Number.isFinite(raw.endFrame) && Number.isFinite(raw.startFrame)
+        ? Math.max(0, (raw.endFrame! - raw.startFrame!) / movie.params.fps * 1000) : raw.duration || raw.totalTime || 0
+      sources.push({ key, data: new Uint8Array(data), startTime, duration })
+    }
+    // 原始音轨的 startTime 是音频内部偏移；完整调度信息仍保留在 movie.audios 中。
+    return audioManager.parseAudioTracks(sources)
   }
 
   /**
@@ -105,13 +125,14 @@ export class SVGAParser {
   /**
    * 解码 Protobuf
    */
-  private decodeProto(data: Uint8Array): MovieEntity {
+  private decodeProto(data: Uint8Array, useNumberArrays = true): MovieEntity {
     const message = this.MovieEntity.decode(data)
     // 注意：不使用 defaults: true，保留 undefined 值
     // 这样 layout.x, transform.tx 等字段如果原文件中不存在就保持 undefined
     // 否则会被填充为 0，导致动画轨迹错误
     return this.MovieEntity.toObject(message, {
-      bytes: Array,
+      // 交付回读保留紧凑字节，不能在像素预算检查前膨胀为逐字节 Number 数组。
+      bytes: useNumberArrays ? Array : Uint8Array,
       defaults: false,
       arrays: true,
       objects: true
@@ -148,12 +169,14 @@ export class SVGAParser {
    */
   private async parseImages(
     imageDataMap: Record<string, Uint8Array | number[]>,
-    onImageUrlCreated?: (url: string) => void
+    onImageUrlCreated?: (url: string) => void,
+    audioKeys: ReadonlySet<string> = new Set()
   ): Promise<Record<string, HTMLImageElement>> {
     const images: Record<string, HTMLImageElement> = {}
     
     await Promise.all(
       Object.entries(imageDataMap).map(async ([key, data]) => {
+        if (audioKeys.has(key)) return
         try {
           const uint8Data = Array.isArray(data) 
             ? new Uint8Array(data) 
@@ -227,31 +250,16 @@ export class SVGAParser {
   }
 
   /**
-   * 检测插槽名称
+   * 收集可绑定的原始 imageKey，不将命名习惯当作格式约束。
    */
   detectSlots(movie: MovieEntity): string[] {
     const slots = new Set<string>()
     
     // 从精灵图中检测插槽
     movie.sprites?.forEach((sprite: Sprite) => {
-      const imageKey = sprite.imageKey || ''
-      
-      // 检测文本插槽
-      if (imageKey.includes('_text') || imageKey.includes('text_')) {
-        slots.add(imageKey)
-      }
-      
-      // 检测图片插槽
-      if (imageKey.includes('_img') || imageKey.includes('img_') || 
-          imageKey.includes('slot') || imageKey.includes('Slot')) {
-        slots.add(imageKey)
-      }
-      
-      // 通用插槽检测
-      const slotMatch = imageKey.match(/\$(.+?)(?:@|$)/)
-      if (slotMatch) {
-        slots.add(slotMatch[1])
-      }
+      const imageKey = sprite?.imageKey
+      // $、@、大小写和空白均属于精确 Key，不能剥离后交给播放器。
+      if (typeof imageKey === 'string' && imageKey.length > 0) slots.add(imageKey)
     })
     
     return Array.from(slots)
@@ -267,12 +275,13 @@ export class SVGAParser {
     if (!movie.sprites) return result
     
     movie.sprites.forEach((sprite: Sprite, index: number) => {
-      const imageKey = sprite.imageKey || ''
+      if (!sprite) return
+      const imageKey = typeof sprite.imageKey === 'string' ? sprite.imageKey : ''
       
-      // 判断图层类型
+      // 只返回命名提示，不能由名称证明它是独立文字图层。
       let layerType = 'image'
-      if (imageKey.includes('_text') || imageKey.includes('text_')) {
-        layerType = 'text'
+      if (isTextKeyCandidate(imageKey)) {
+        layerType = 'text-candidate'
       } else if (imageKey.includes('slot') || imageKey.includes('Slot') || imageKey.includes('$')) {
         layerType = 'slot'
       }

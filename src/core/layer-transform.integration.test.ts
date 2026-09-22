@@ -55,6 +55,31 @@ const expectedPresetFrame = (base: FrameData, index: number) => {
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('真实SVGA编码回读', () => {
+  it.each(['exportSVGA', 'exportSVGALite', 'builder'] as const)('%s导出修改后的画布尺寸并保留原图层数据', async method => {
+    const buffer = encode(makeInput())
+    const source = decodeBuffer(buffer)
+    const layers = layersFor(source)
+    layers.forEach(layer => { layer.canvasTransform = undefined })
+    const nextParams = { ...params, viewBoxWidth: 640, viewBoxHeight: 480 }
+    let blob: Blob
+    if (method === 'builder') {
+      blob = await new SVGABuilder().mergeWithOriginal(buffer, { params: nextParams, layers, imageResources: new Map() })
+    } else {
+      const engine = new ExportEngine({ getContext: () => ({}) } as unknown as HTMLCanvasElement)
+      engine.setVideoItem({ movie: source, images: {}, buffers: {} } as VideoItem)
+      blob = await engine[method](buffer, { viewBoxWidth: 640, viewBoxHeight: 480, fps: params.fps, frames: params.frames, layers })
+    }
+    const output = await decode(blob)
+    expect(output.params.viewBoxWidth).toBe(640)
+    expect(output.params.viewBoxHeight).toBe(480)
+    expect(output.params.fps).toBe(params.fps)
+    expect(output.params.frames).toBe(params.frames)
+    expect(output.sprites[0].frames).toEqual(source.sprites[0].frames)
+    expect(output.sprites[0].matteKey).toBe('mask')
+    expect(output.audios).toEqual(source.audios)
+    expect(decodeBuffer(buffer).params.viewBoxWidth).toBe(params.viewBoxWidth)
+  })
+
   it.each(['exportSVGA', 'exportSVGALite', 'builder'] as const)('%s保留原运动、共享层独立性、遮罩、路径、形状和音频', async method => {
     const buffer = encode(makeInput())
     const source = decodeBuffer(buffer)

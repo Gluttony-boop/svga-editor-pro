@@ -1,0 +1,80 @@
+name: Commercial foundations checks
+
+on:
+  push:
+    paths:
+      - 'services/licensing/**'
+      - 'src-tauri/Cargo.toml'
+      - 'src-tauri/Cargo.lock'
+      - 'src-tauri/src/license_*.rs'
+      - 'src-tauri/src/commands.rs'
+      - 'src/core/license-*.ts'
+      - 'tools/native-license-core/**'
+      - 'scripts/release-manifest*'
+      - '.github/workflows/commercial-foundations.yml'
+  pull_request:
+    paths:
+      - 'services/licensing/**'
+      - 'src-tauri/Cargo.toml'
+      - 'src-tauri/Cargo.lock'
+      - 'src-tauri/src/license_*.rs'
+      - 'src-tauri/src/commands.rs'
+      - 'src/core/license-*.ts'
+      - 'tools/native-license-core/**'
+      - 'scripts/release-manifest*'
+      - '.github/workflows/commercial-foundations.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-prototypes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            services/licensing/package-lock.json
+      - name: Install editor dependencies
+        run: npm ci
+      - name: Install isolated license service dependencies
+        run: npm ci --prefix services/licensing
+      - name: Local D1 and cryptographic protocol tests
+        run: npm test --prefix services/licensing
+      - name: Build worker without production secrets
+        run: npm run build --prefix services/licensing
+      - name: Update manifest tests
+        run: node --test scripts/release-manifest.node-test.mjs
+      - name: Editor license policy tests
+        run: npx vitest run src/core/license-policy.test.ts src/core/license-client.test.ts
+
+  verify-native-license-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Native Ed25519/JWT verifier tests
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+        run: cargo test --locked --manifest-path tools/native-license-core/Cargo.toml
+
+  check-desktop-rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compile desktop native layer
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml

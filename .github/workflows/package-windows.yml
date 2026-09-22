@@ -79,6 +79,14 @@ jobs:
       - name: Build Windows installer
         run: npm run build:win
 
+      - name: Verify project file replacement on Windows
+        shell: pwsh
+        run: |
+          rustc --edition=2021 --test src-tauri/src/project_io.rs -o src-tauri/target/project-io-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & src-tauri/target/project-io-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Generate installer checksum
         shell: pwsh
         run: |

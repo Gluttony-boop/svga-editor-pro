@@ -1,0 +1,13 @@
+{
+  "name": "svga-editor-licensing-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.node-test.mjs",
+    "build": "node build.mjs"
+  },
+  "dependencies": { "jose": "6.2.12" },
+  "devDependencies": { "esbuild": "0.28.1", "miniflare": "4.20260730.0" }
+}

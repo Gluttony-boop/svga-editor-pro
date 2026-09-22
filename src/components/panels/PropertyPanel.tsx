@@ -7,6 +7,7 @@ import { getSelectedLayerIds } from '@/utils/layer-selection'
 import { LayerLayoutInspector } from './LayerLayoutInspector'
 import { LayerTimingInspector } from './LayerTimingInspector'
 import { AnimationKeyframeInspector } from './AnimationKeyframeInspector'
+import { CanvasSizeInspector } from './CanvasSizeInspector'
 
 interface PropertyPanelProps {
   className?: string
@@ -164,24 +165,7 @@ export const PropertyPanel: React.FC<PropertyPanelProps> = ({ className, collaps
           <LayerLayoutInspector key={isMultiSelection ? 'multiple-layout' : 'single-layout'} />
         </>}
 
-        {/* 尺寸信息 */}
-        <div>
-          <div className="text-[10px] text-text-muted uppercase tracking-wide mb-1.5">尺寸</div>
-          <div className="grid grid-cols-2 gap-2">
-            <NumberInput
-              label="宽度"
-              value={params?.viewBoxWidth || 0}
-              disabled
-              unit="px"
-            />
-            <NumberInput
-              label="高度"
-              value={params?.viewBoxHeight || 0}
-              disabled
-              unit="px"
-            />
-          </div>
-        </div>
+        <CanvasSizeInspector />
 
         {/* 时间设置 */}
         <div>

@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "SVGA Editor MCP for GPT Web",
+  "version": "1.0.0",
+  "description": "让 ChatGPT 网页通过本机 MCP 服务读取和操作 SVGA Editor Pro。",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "action": {
+    "default_title": "SVGA MCP",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

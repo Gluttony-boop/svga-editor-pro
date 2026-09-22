@@ -638,6 +638,27 @@ export interface MovieEntity {
 /**
  * 插槽配置
  */
+export interface SlotTextConfig {
+  text: string
+  fontSize: number
+  color: string
+  fontFamily: string
+  fontWeight?: 'normal' | 'bold'
+  textAlign?: 'left' | 'center' | 'right'
+  offsetX?: number
+  offsetY?: number
+  lineHeight?: number
+  enabled?: boolean
+  replaceImage?: boolean
+  /** 文字框与建立时的源布局尺寸成组保存；逐帧布局按相同比例扩展，底图保持原尺寸。 */
+  boxWidth?: number
+  boxHeight?: number
+  referenceWidth?: number
+  referenceHeight?: number
+  /** 默认只模拟；bake 将当前字形栅格化写入 SVGA，不代表可动态修改的文本协议。 */
+  exportMode?: 'preview' | 'bake'
+}
+
 export interface SlotConfig {
   type: 'image' | 'text'
   name: string
@@ -646,12 +667,7 @@ export interface SlotConfig {
     url: string
     scaleMode: 'fit' | 'fill' | 'stretch'
   }
-  textConfig?: {
-    text: string
-    fontSize: number
-    color: string
-    fontFamily: string
-  }
+  textConfig?: SlotTextConfig
 }
 
 /**
@@ -659,12 +675,7 @@ export interface SlotConfig {
  */
 export interface TextSlotConfig extends SlotConfig {
   type: 'text'
-  textConfig: {
-    text: string
-    fontSize: number
-    color: string
-    fontFamily: string
-  }
+  textConfig: SlotTextConfig
 }
 
 /**

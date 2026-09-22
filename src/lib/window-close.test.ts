@@ -27,6 +27,15 @@ describe('packaged main window close permissions', () => {
 })
 
 describe('unsaved close state machine', () => {
+  it('工程读写期间阻止关闭，不启动另一份保存也不丢弃当前文档', async () => {
+    const options = { isBusy: () => true, isDirty: () => true, confirm: vi.fn(), save: vi.fn(), destroy: vi.fn(), onError: vi.fn() }
+    const event = { preventDefault: vi.fn() }
+    await createWindowCloseHandler(options).handle(event)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
+    expect(options.confirm).not.toHaveBeenCalled()
+    expect(options.save).not.toHaveBeenCalled()
+    expect(options.destroy).not.toHaveBeenCalled()
+  })
   const setup = (dirty = true) => {
     const options = { isDirty: () => dirty, confirm: vi.fn(async () => 'discard' as const), save: vi.fn(async () => true), destroy: vi.fn(async () => {}), onError: vi.fn() }
     return { options, ...createWindowCloseHandler(options) }

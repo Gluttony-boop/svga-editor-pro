@@ -1,18 +1,25 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon, Button, Modal, PanelSplitter } from '@/components/ui'
-import { CanvasPreview, PlaybackControls, Timeline } from '@/components/editor'
+import { CanvasPreview, LicenseDialog, LocalProjectLibraryDialog, PlaybackControls, Timeline, UpdateDialog } from '@/components/editor'
 import { LayerPanel, ResourcePanel, SlotPanel, PropertyPanel, ExportPanel, HistoryPanel } from '@/components/panels'
 import type { ImageSelectInfo } from '@/components/panels'
 import { useEditorStore } from '@/stores'
-import { svgaParser, LayerFactory, ExportEngine, saveGeneratedFile, svgaBuilder } from '@/core'
+import { svgaParser, LayerFactory } from '@/core'
 import { tauriAPI, createNativeAPI } from '@/lib/tauri-api'
-import type { SvgaData } from '@/lib/tauri-api'
 import { cn } from '@/utils/cn'
-import type { AudioResource, ImageResource, Layer, VideoItem } from '@/types'
+import type { AudioResource } from '@/types'
 import { previewFileName } from '@/utils/preview-view'
 import { createWindowCloseHandler } from '@/lib/window-close'
 import { historyActionLabel } from '@/utils/history-label'
 import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
+import { createProjectArchive, readProjectArchive, MAX_PROJECT_BYTES } from '@/core/project-archive'
+import { hydrateProjectDocument } from '@/core/project-hydration'
+import { createProjectSaveTarget, getProjectFileName, isProjectFileName } from '@/lib/project-files'
+import { createProjectLibrary } from '@/core/project-library'
+import { ProjectRecoveryCoordinator, type RecoveryStatus } from '@/core/project-recovery'
+import { finishProjectSave } from '@/core/project-save-completion'
+import { registerMcpBridge } from '@/lib/mcp-bridge'
+import type { LocalProjectPreferences, LocalProjectSnapshot, LocalProjectSummary } from '@/types/project-library'
 
 const INSPECTOR_TABS = [
   { id: 'properties', label: '属性', icon: 'settings' },
@@ -25,147 +32,27 @@ function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
-function getCurrentParamsSnapshot() {
-  const { params, customFps, customFrames } = useEditorStore.getState()
-  if (!params) return null
-
-  return {
-    ...params,
-    fps: customFps ?? params.fps,
-    frames: customFrames ?? params.frames
-  }
-}
 
 // 初始化 Tauri 兼容层
 if (isTauriRuntime() && !window.nativeAPI) {
   ;(window as any).nativeAPI = createNativeAPI()
 }
 
-/**
- * 将 Tauri Rust 后端解析的 SvgaData 转换为前端 VideoItem
- */
-function convertTauriSvgaToVideoItem(data: SvgaData): any | null {
-  try {
-    const { version, params, sprites, images, imageMimeTypes } = data
-
-    // 构建图片 map (key -> HTMLImageElement)
-    const imageMap: Record<string, HTMLImageElement> = {}
-    const bufferMap: Record<string, ArrayBuffer> = {}
-
-    for (const img of images) {
-      const mimeInfo = imageMimeTypes.find(m => m.key === img.key)
-      const mimeType = mimeInfo?.mimeType || 'image/png'
-      const dataUrl = `data:${mimeType};base64,${img.data}`
-
-      // 同步创建 Image 对象（注意：图片可能尚未 loaded）
-      const image = new Image()
-      image.src = dataUrl
-      imageMap[img.key] = image
-
-      // base64 -> ArrayBuffer
-      const binary = atob(img.data)
-      const bytes = new Uint8Array(binary.length)
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i)
-      }
-      bufferMap[img.key] = bytes.buffer
-    }
-
-    // 等待图片加载的辅助函数
-    const waitForImages = async () => {
-      const promises = Object.entries(imageMap).map(([key, img]) => {
-        if (img.complete && img.width > 0) return Promise.resolve()
-        return new Promise<void>((resolve) => {
-          img.onload = () => resolve()
-          img.onerror = () => {
-            console.warn(`[convertTauriSvgaToVideoItem] Image load failed: ${key}`)
-            resolve()
-          }
-        })
-      })
-      await Promise.all(promises)
-    }
-
-    // 构造 VideoItem
-    const videoItem = {
-      version,
-      movie: {
-        params: {
-          viewBoxWidth: params.viewBoxWidth,
-          viewBoxHeight: params.viewBoxHeight,
-          fps: params.fps,
-          frames: params.frames,
-        },
-        sprites: sprites.map(sprite => ({
-          imageKey: sprite.imageKey,
-          matteKey: sprite.matteKey || '',
-          frames: sprite.frames.map(frame => ({
-            alpha: frame.alpha,
-            layout: frame.layout,
-            transform: frame.transform,
-            clipPath: frame.clipPath || '',
-            shapes: frame.shapes || [],
-          })),
-        })),
-      },
-      images: imageMap,
-      buffers: bufferMap,
-      // 标记：需要等待图片加载
-      _waitForImages: waitForImages,
-    }
-
-    return videoItem
-  } catch (err) {
-    console.error('[convertTauriSvgaToVideoItem] Error:', err)
-    return null
-  }
-}
 
 function base64ToArrayBuffer(data: string): ArrayBuffer {
   const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0))
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
 }
 
-async function blobToBase64(blob: Blob): Promise<string> {
-  const bytes = new Uint8Array(await blob.arrayBuffer())
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i])
-  }
-  return btoa(binary)
-}
 
 function isSvgaFileName(fileName: string): boolean {
   return fileName.toLowerCase().endsWith('.svga')
 }
 
-function getDefaultSvgaName(source: string | null): string {
-  if (!source) return 'export.svga'
-  const normalized = source.replace(/\\/g, '/')
-  const fileName = normalized.split('/').pop() || 'export.svga'
-  return isSvgaFileName(fileName) ? fileName : `${fileName}.svga`
+function isSupportedFileName(fileName: string): boolean {
+  return isSvgaFileName(fileName) || isProjectFileName(fileName)
 }
 
-function hasExportableLayerEdits(
-  videoItem: VideoItem,
-  layers: Layer[],
-  imageResources: Map<string, ImageResource>
-): boolean {
-  const originalLayerCount = videoItem.movie.sprites?.length ?? 0
-  const activeOriginalLayerCount = layers.filter((layer) => !layer.isNew && layer.editableIndex !== undefined).length
-  const hasDeletedOriginalLayers = activeOriginalLayerCount < originalLayerCount
-  const hasNewLayers = layers.some((layer) => layer.isNew)
-  const hasNewImages = Array.from(imageResources.values()).some((resource) => resource.isNew)
-  const hasAnimations = layers.some((layer) =>
-    Object.values(layer.tracks).some((track) => track.keyframes.length > 0)
-  )
-  const hasLayerNameChanges = layers.some((layer) => {
-    const nextName = layer.name.trim()
-    return layer.imageKey && nextName.length > 0 && nextName !== layer.imageKey
-  })
-
-  return hasDeletedOriginalLayers || hasNewLayers || hasNewImages || hasAnimations || hasLayerNameChanges
-}
 
 // Windows 窗口控制组件 - 使用 Tauri API
 const WindowControls: React.FC<{ onError: (message: string) => void }> = ({ onError }) => {
@@ -230,6 +117,8 @@ interface MenuBarProps {
   showHistory: boolean
   onToggleHistory: () => void
   onShowAbout: () => void
+  onCheckUpdates: () => void
+  onShowLicense: () => void
 }
 
 // 菜单栏组件
@@ -244,10 +133,13 @@ const MenuBar: React.FC<MenuBarProps> = ({
   onRedo,
   showHistory,
   onToggleHistory,
-  onShowAbout
+  onShowAbout,
+  onCheckUpdates,
+  onShowLicense
 }) => {
   const videoItem = useEditorStore((s) => s.videoItem)
   const currentSource = useEditorStore((s) => s.currentSource)
+  const projectName = useEditorStore(s => s.projectName)
   const isDirty = useEditorStore((s) => s.isDirty)
   const canUndo = useEditorStore((s) => s.canUndo)
   const canRedo = useEditorStore((s) => s.canRedo)
@@ -287,11 +179,11 @@ const MenuBar: React.FC<MenuBarProps> = ({
 
   const menus: Record<MenuId, MenuAction[]> = {
     file: [
-      { label: '打开文件', shortcut: 'Ctrl+O', onSelect: onOpenFile },
+      { label: '打开 SVGA / 工程', shortcut: 'Ctrl+O', onSelect: onOpenFile },
       { label: '打开 URL', shortcut: 'Ctrl+Shift+O', onSelect: onOpenUrl },
-      { label: '保存', shortcut: 'Ctrl+S', disabled: !videoItem, onSelect: onSave },
-      { label: '另存为...', shortcut: 'Ctrl+Shift+S', disabled: !videoItem, onSelect: onSaveAs },
-      { label: '导出', shortcut: 'Ctrl+E', disabled: !videoItem, onSelect: onExport }
+      { label: '保存工程', shortcut: 'Ctrl+S', disabled: !videoItem, onSelect: onSave },
+      { label: '工程另存为...', shortcut: 'Ctrl+Shift+S', disabled: !videoItem, onSelect: onSaveAs },
+      { label: '导出 SVGA / 图片', shortcut: 'Ctrl+E', disabled: !videoItem, onSelect: onExport }
     ],
     edit: [
       { label: undoLabel, shortcut: 'Ctrl+Z', disabled: !canUndo, onSelect: onUndo },
@@ -310,6 +202,8 @@ const MenuBar: React.FC<MenuBarProps> = ({
       }
     ],
     help: [
+      { label: '检查桌面更新', onSelect: onCheckUpdates },
+      { label: '授权状态', onSelect: onShowLicense },
       { label: '关于 SVGA Editor Pro', onSelect: onShowAbout }
     ]
   }
@@ -356,7 +250,7 @@ const MenuBar: React.FC<MenuBarProps> = ({
       {/* 中间标题 */}
       <div className="absolute left-1/2 -translate-x-1/2 flex max-w-[36%] items-center gap-2 pointer-events-none">
         <Icon name="play" size={16} className="text-accent" />
-        <span className="truncate text-sm text-text-primary">{videoItem ? previewFileName(currentSource) : 'SVGA Editor Pro'}</span>
+        <span className="truncate text-sm text-text-primary">{videoItem ? projectName || previewFileName(currentSource) : 'SVGA Editor Pro'}</span>
         {isDirty && <span className="flex-shrink-0 h-1.5 w-1.5 rounded-full bg-warning" title="有未保存修改" />}
       </div>
 
@@ -389,6 +283,7 @@ const MenuButton: React.FC<{
 const StatusBar: React.FC = () => {
   const videoItem = useEditorStore((s) => s.videoItem)
   const isDirty = useEditorStore((s) => s.isDirty)
+  const projectName = useEditorStore(s => s.projectName)
   const fps = useEditorStore((s) => s.playback.fps)
   const totalFrames = useEditorStore((s) => s.playback.totalFrames)
   const currentFrame = useEditorStore((s) => s.playback.currentFrame)
@@ -409,7 +304,7 @@ const StatusBar: React.FC = () => {
   return (
     <div className="h-6 bg-bg-tertiary border-t border-border flex items-center justify-between px-4 text-xs text-text-muted">
       <div className="flex items-center gap-4">
-        <span>{videoItem ? (isDirty ? '未保存' : '已保存') : '等待文件'}</span>
+        <span>{videoItem ? (isDirty ? '工程未保存' : projectName ? '工程已保存' : '源文件已载入 · 尚未保存工程') : '等待文件'}</span>
         {videoItem && (
           <span>内存: {memory}</span>
         )}
@@ -431,10 +326,27 @@ const StatusBar: React.FC = () => {
 export const App: React.FC = () => {
   const [showUrlModal, setShowUrlModal] = useState(false)
   const [showAboutModal, setShowAboutModal] = useState(false)
+  const [mcpStatus, setMcpStatus] = useState<{ enabled: boolean; endpoint: string; token: string; protocol_version: string; image_generation_configured: boolean } | null>(null)
+  const [showUpdateModal, setShowUpdateModal] = useState(false)
+  const [showLicenseModal, setShowLicenseModal] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [showUnsavedModal, setShowUnsavedModal] = useState(false)
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [projectNotice, setProjectNotice] = useState<string | null>(null)
+  const [showProjectLibrary, setShowProjectLibrary] = useState(false)
+  const [projectLibrarySnapshot, setProjectLibrarySnapshot] = useState<LocalProjectSnapshot | null>(null)
+  const [projectLibraryLoading, setProjectLibraryLoading] = useState(false)
+  const [projectLibraryError, setProjectLibraryError] = useState<string | null>(null)
+  const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus | null>(null)
+  const [startupRecoveryHint, setStartupRecoveryHint] = useState(false)
+  const [localProjectNotice, setLocalProjectNotice] = useState<string | null>(null)
+  const libraryReadSequenceRef = useRef(0)
+  const documentBusyRef = useRef(false)
+  const projectDisposeRef = useRef<(() => void) | null>(null)
+  const projectLibraryRef = useRef<ReturnType<typeof createProjectLibrary> | null>(null)
+  const recoveryRef = useRef<ProjectRecoveryCoordinator | null>(null)
   const [launchFileChecked, setLaunchFileChecked] = useState(false)
   const devAutoLoadRef = useRef(false)
   const launchFileAutoLoadRef = useRef(false)
@@ -453,6 +365,7 @@ export const App: React.FC = () => {
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('properties')
   const [isImmersive, setIsImmersive] = useState(false)
   const previewVideoItem = useEditorStore((s) => s.videoItem)
+  const updateDirty = useEditorStore((s) => s.isDirty)
   const toggleImmersive = useCallback(() => {
     if (useEditorStore.getState().videoItem) setIsImmersive(value => !value)
   }, [])
@@ -469,7 +382,6 @@ export const App: React.FC = () => {
   const setDetectedSlots = useEditorStore((s) => s.setDetectedSlots)
   const setAudioResources = useEditorStore((s) => s.setAudioResources)
   const setRendererMode = useEditorStore((s) => s.setRendererMode)
-  const reset = useEditorStore((s) => s.reset)
   const undo = useEditorStore((s) => s.undo)
   const redo = useEditorStore((s) => s.redo)
   const undoLabel = useEditorStore((s) => s.history.timelineSnapshot ? '撤销：选择快照' : historyActionLabel('撤销', s.history.past[s.history.past.length - 1]))
@@ -482,6 +394,47 @@ export const App: React.FC = () => {
   const selectLayer = useEditorStore((s) => s.selectLayer)
   const params = useEditorStore((s) => s.params)
   const addImageResource = useEditorStore((s) => s.addImageResource)
+
+  const refreshProjectLibrary = useCallback(async () => {
+    const repository = projectLibraryRef.current
+    if (!repository) return
+    const sequence = ++libraryReadSequenceRef.current
+    setProjectLibraryLoading(true)
+    const isCurrent = () => repository === projectLibraryRef.current && sequence === libraryReadSequenceRef.current
+    try {
+      const snapshot = await repository.snapshot()
+      if (isCurrent()) setProjectLibrarySnapshot(snapshot)
+    } catch (error) {
+      if (isCurrent()) setProjectLibraryError(error instanceof Error ? error.message : String(error))
+    } finally { if (isCurrent()) setProjectLibraryLoading(false) }
+  }, [])
+
+  useEffect(() => {
+    const repository = createProjectLibrary()
+    projectLibraryRef.current = repository
+    let active = true
+    const coordinator = new ProjectRecoveryCoordinator({ repository, onStatus: status => { if (active) setRecoveryStatus(status) } })
+    recoveryRef.current = coordinator
+    const unsubscribe = repository.subscribe(() => { void refreshProjectLibrary() })
+    void coordinator.start()
+    void refreshProjectLibrary()
+    void repository.snapshot().then(snapshot => {
+      if (active) setStartupRecoveryHint(snapshot.entries.some(entry => entry.kind === 'recovery'))
+    }).catch(() => {})
+    return () => {
+      active = false
+      unsubscribe(); coordinator.stop(); repository.close()
+      if (projectLibraryRef.current === repository) projectLibraryRef.current = null
+      if (recoveryRef.current === coordinator) recoveryRef.current = null
+    }
+  }, [refreshProjectLibrary])
+
+  const openProjectLibrary = useCallback(() => {
+    setProjectLibraryError(null)
+    setStartupRecoveryHint(false)
+    setShowProjectLibrary(true)
+    void refreshProjectLibrary()
+  }, [refreshProjectLibrary])
 
   // 处理图片选择 - 创建新图层
   const handleImageSelect = useCallback((info: ImageSelectInfo) => {
@@ -527,6 +480,9 @@ export const App: React.FC = () => {
   }, [])
 
   const confirmDiscardUnsavedChanges = useCallback(async (): Promise<UnsavedChoice> => {
+    // 同时收到打开/关闭请求时，后来的操作不能替换正在等待的确认回调。
+    if (unsavedResolverRef.current) return 'cancel'
+    useEditorStore.getState().endCanvasTransform(true)
     if (!useEditorStore.getState().isDirty) return 'discard'
 
     return new Promise((resolve) => {
@@ -536,6 +492,7 @@ export const App: React.FC = () => {
   }, [])
 
   const runWithUnsavedProtection = useCallback(async (operation: () => Promise<void> | void) => {
+    if (documentBusyRef.current) return
     const choice = await confirmDiscardUnsavedChanges()
     if (choice === 'cancel') return
     if (choice === 'save') {
@@ -547,8 +504,11 @@ export const App: React.FC = () => {
 
   // 加载 SVGA 文件
   const loadSVGA = useCallback(async (buffer: ArrayBuffer, source: string, type: 'url' | 'file') => {
+    documentBusyRef.current = true
+    const previousInputs = captureExportInputs(useEditorStore.getState())
     setLoading(true)
     setError(null)
+    setProjectNotice(null)
 
     try {
       await svgaParser.init()
@@ -565,6 +525,9 @@ export const App: React.FC = () => {
         console.warn('[App] 音频解析失败，不影响主流程:', audioErr)
       }
 
+      if (!sameExportInputs(previousInputs, captureExportInputs(useEditorStore.getState()))) throw new Error('打开期间当前工程已修改，请再次打开文件。')
+      projectDisposeRef.current?.()
+      projectDisposeRef.current = null
       setVideoItem(videoItem)
       setSource(source, type)
       setOriginalBuffer(buffer)
@@ -578,62 +541,53 @@ export const App: React.FC = () => {
     } catch (err) {
       console.error('[App] Load error:', err)
       setError(`加载失败: ${(err as Error).message}`)
-      reset()
     } finally {
+      documentBusyRef.current = false
       setLoading(false)
     }
-  }, [setVideoItem, setSource, setOriginalBuffer, setDetectedSlots, setAudioResources, setRendererMode, reset])
+  }, [setVideoItem, setSource, setOriginalBuffer, setDetectedSlots, setAudioResources, setRendererMode])
+
+  const loadProject = useCallback(async (buffer: ArrayBuffer, displayName: string, filePath: string | null, localCopy = false): Promise<boolean> => {
+    documentBusyRef.current = true
+    const previousInputs = captureExportInputs(useEditorStore.getState())
+    setLoading(true); setError(null); setProjectNotice(null)
+    let prepared: Awaited<ReturnType<typeof hydrateProjectDocument>> | undefined
+    try {
+      const document = await readProjectArchive(buffer)
+      prepared = await hydrateProjectDocument(document)
+      if (!sameExportInputs(previousInputs, captureExportInputs(useEditorStore.getState()))) throw new Error('打开期间当前工程已修改，请重新打开工程。')
+      useEditorStore.getState().restoreProjectDocument(prepared.document, filePath, displayName)
+      // 本机副本不是已确认写入的磁盘工程；恢复后必须另行保存，不能丢掉关闭保护。
+      if (localCopy) useEditorStore.setState({ isDirty: true, projectFilePath: null })
+      projectDisposeRef.current?.()
+      projectDisposeRef.current = prepared.dispose
+      prepared = undefined
+      setProjectNotice(localCopy ? '已打开本机工程副本；请保存为工程文件，原磁盘文件不会自动覆盖。' : '工程已恢复，关键帧、文字和素材均可继续编辑。')
+      if (!localCopy) {
+        try { await recoveryRef.current?.recordRecent(new Blob([buffer]), displayName) }
+        catch { setLocalProjectNotice('工程已打开，但未能保留最近工程的本机副本。磁盘文件不受影响。') }
+      }
+      return true
+    } catch (error) { prepared?.dispose(); setError(`工程未打开，当前工作保留：${(error as Error).message}`); return false }
+    finally { documentBusyRef.current = false; setLoading(false) }
+  }, [])
 
   const loadSVGAFromFilePath = useCallback(async (filePath: string) => {
-    if (!isSvgaFileName(filePath)) return
-
-    setLoading(true)
-    setError(null)
-
-    let originalBuffer: ArrayBuffer | null = null
-    let fileReadError: string | undefined
-
+    if (!isSupportedFileName(filePath) || documentBusyRef.current) return
+    documentBusyRef.current = true
+    const previousInputs = captureExportInputs(useEditorStore.getState())
+    setLoading(true); setError(null)
     try {
-      const fileResult = await tauriAPI.file.read(filePath)
-      if (fileResult.success && fileResult.data) {
-        originalBuffer = base64ToArrayBuffer(fileResult.data)
-      } else {
-        fileReadError = fileResult.error
-      }
-
-      try {
-        const svgaData = await tauriAPI.svga.parseFromFile(filePath)
-        const videoItem = convertTauriSvgaToVideoItem(svgaData)
-        if (videoItem) {
-          const slots = svgaParser.detectSlots(videoItem.movie)
-          const hasMatte = videoItem.movie.sprites?.some((sprite: { matteKey?: string | null }) => Boolean(sprite.matteKey))
-          setVideoItem(videoItem)
-          setSource(filePath, 'file')
-          setOriginalBuffer(originalBuffer)
-          setDetectedSlots(slots)
-          if (hasMatte) {
-            setRendererMode('official')
-          }
-          useEditorStore.getState().initializeHistory()
-          return
-        }
-      } catch (rustErr) {
-        console.warn('[App] Rust SVGA parse failed, falling back to frontend parser:', rustErr)
-      }
-
-      if (!originalBuffer) {
-        throw new Error(fileReadError || 'Unable to read SVGA file')
-      }
-
-      await loadSVGA(originalBuffer, filePath, 'file')
-    } catch (err) {
-      console.error('[App] File path load error:', err)
-      setError(`打开文件失败: ${(err as Error).message}`)
-      reset()
-    } finally {
-      setLoading(false)
-    }
-  }, [loadSVGA, setVideoItem, setSource, setOriginalBuffer, setDetectedSlots, setRendererMode, reset])
+      const result = isProjectFileName(filePath) ? await tauriAPI.file.readProject(filePath) : await tauriAPI.file.read(filePath)
+      if (!result.success || !result.data) throw new Error(result.error || '文件读取失败')
+      if (!sameExportInputs(previousInputs, captureExportInputs(useEditorStore.getState()))) throw new Error('读取期间当前工程已修改，请再次打开。')
+      const buffer = base64ToArrayBuffer(result.data)
+      if (isProjectFileName(filePath)) await loadProject(buffer, filePath.split(/[\\\\/]/).pop()!, filePath)
+      // 桌面与网页使用同一完整解析结果，避免原生简化传输遗漏音频和形状字段。
+      else await loadSVGA(buffer, filePath, 'file')
+    } catch (error) { setError('打开文件失败，当前工作保留：' + (error instanceof Error ? error.message : String(error))) }
+    finally { documentBusyRef.current = false; setLoading(false) }
+  }, [loadSVGA, loadProject])
 
   useEffect(() => {
     if (launchFileAutoLoadRef.current) return
@@ -680,14 +634,22 @@ export const App: React.FC = () => {
   }, [loadSVGA])
 
   const handleSvgaFile = useCallback(async (file: File) => {
-    if (!isSvgaFileName(file.name)) {
-      setError('请选择 .svga 文件')
+    if (documentBusyRef.current) return
+    if (!isSupportedFileName(file.name)) {
+      setError('请选择 .svga 或 .svgaproj 文件')
       return
     }
-
-    const buffer = await file.arrayBuffer()
-    await loadSVGA(buffer, file.name, 'file')
-  }, [loadSVGA])
+    if (file.size > MAX_PROJECT_BYTES) { setError('文件超过 128 MiB，未打开。'); return }
+    documentBusyRef.current = true
+    const previousInputs = captureExportInputs(useEditorStore.getState())
+    setLoading(true)
+    try {
+      const buffer = await file.arrayBuffer()
+      if (!sameExportInputs(previousInputs, captureExportInputs(useEditorStore.getState()))) throw new Error('读取期间当前工程已修改，请再次打开。')
+      if (isProjectFileName(file.name)) await loadProject(buffer, file.name, null)
+      else await loadSVGA(buffer, file.name, 'file')
+    } finally { documentBusyRef.current = false; setLoading(false) }
+  }, [loadSVGA, loadProject])
 
   const handleSvgaFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -703,13 +665,9 @@ export const App: React.FC = () => {
 
   // 打开文件 - Tauri 使用系统对话框，Web 使用隐藏 input
   const handleOpenFile = useCallback(async () => {
+    if (documentBusyRef.current) return
     if (!isTauriRuntime()) {
-      const choice = await confirmDiscardUnsavedChanges()
-      if (choice === 'cancel') return
-      if (choice === 'save') {
-        const saved = await handleSaveRef.current?.()
-        if (!saved) return
-      }
+      // 先选择文件，选择成功后再询问；取消文件对话框不会提前放弃当前修改。
       svgaFileInputRef.current?.click()
       return
     }
@@ -717,6 +675,7 @@ export const App: React.FC = () => {
     try {
       const filePath = await tauriAPI.dialog.openFile({
         filters: [
+          { name: 'SVGA / 编辑工程', extensions: ['svga', 'svgaproj'] },
           { name: 'SVGA Files', extensions: ['svga'] },
           { name: 'All Files', extensions: ['*'] }
         ]
@@ -726,19 +685,27 @@ export const App: React.FC = () => {
     } catch (err) {
       setError(`打开文件失败: ${(err as Error).message}`)
     }
-  }, [confirmDiscardUnsavedChanges, loadSVGAFromFilePath, runWithUnsavedProtection])
+  }, [loadSVGAFromFilePath, runWithUnsavedProtection])
 
   // 打开 URL
   const handleOpenUrl = async () => {
-    if (!url) return
+    if (!url || documentBusyRef.current) return
 
     try {
       await runWithUnsavedProtection(async () => {
-        const response = await fetch(url)
-        const buffer = await response.arrayBuffer()
-        await loadSVGA(buffer, url, 'url')
-        setShowUrlModal(false)
-        setUrl('')
+        documentBusyRef.current = true
+        const previousInputs = captureExportInputs(useEditorStore.getState())
+        setLoading(true)
+        try {
+          const response = await fetch(url)
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const buffer = await response.arrayBuffer()
+          if (!sameExportInputs(previousInputs, captureExportInputs(useEditorStore.getState()))) throw new Error('下载期间当前工程已修改，请再次打开。')
+          if (isProjectFileName(new URL(url).pathname)) await loadProject(buffer, new URL(url).pathname.split('/').pop()!, null)
+          else await loadSVGA(buffer, url, 'url')
+          setShowUrlModal(false)
+          setUrl('')
+        } finally { documentBusyRef.current = false; setLoading(false) }
       })
     } catch (err) {
       setError(`加载 URL 失败: ${(err as Error).message}`)
@@ -782,7 +749,7 @@ export const App: React.FC = () => {
         unlisten = await getCurrentWebview().onDragDropEvent(async (event) => {
           if (event.payload.type !== 'drop') return
 
-          const filePath = event.payload.paths.find(isSvgaFileName)
+          const filePath = event.payload.paths.find(isSupportedFileName)
           if (filePath) {
             await runWithUnsavedProtection(() => loadSVGAFromFilePath(filePath))
           }
@@ -816,6 +783,7 @@ export const App: React.FC = () => {
         if (disposed) return
         const nativeWindow = getCurrentWebviewWindow()
         closeHandler = createWindowCloseHandler({
+          isBusy: () => documentBusyRef.current,
           isDirty: () => useEditorStore.getState().isDirty,
           confirm: confirmDiscardUnsavedChanges,
           save: async () => await handleSaveRef.current?.() ?? false,
@@ -863,125 +831,153 @@ export const App: React.FC = () => {
     }
   }, [loadSVGA, launchFileChecked])
 
-  // 保存文件（覆盖原文件或另存为）
-  const buildCurrentSvgaBlob = useCallback(async (): Promise<Blob> => {
+  // 保存工程与导出运行时 SVGA 分离；只有确认写入且内容未改变才清除未保存状态。
+  const saveProject = useCallback(async (saveAs = false): Promise<boolean> => {
+    if (documentBusyRef.current || !useEditorStore.getState().videoItem) return false
     useEditorStore.getState().endCanvasTransform(true)
-    const { videoItem, originalBuffer, compressionConfig, slotConfigs, layers, imageResources } = useEditorStore.getState()
-    const params = getCurrentParamsSnapshot()
-    if (!videoItem || !params || !originalBuffer) {
-      throw new Error('没有可保存的 SVGA 数据')
-    }
-
-    const canvas = document.createElement('canvas')
-    canvas.width = params.viewBoxWidth
-    canvas.height = params.viewBoxHeight
-    const engine = new ExportEngine(canvas)
-    engine.setVideoItem(videoItem)
-
-    const hasEditableContent = hasExportableLayerEdits(videoItem, layers, imageResources)
-    if (hasEditableContent) {
-      const imageSizes = new Map<string, { width: number; height: number }>()
-      imageResources.forEach((resource, key) => {
-        if (resource.width > 0 && resource.height > 0) {
-          imageSizes.set(key, { width: resource.width, height: resource.height })
+    const before = useEditorStore.getState()
+    documentBusyRef.current = true
+    setLoading(true); setError(null); setProjectNotice(null)
+    try {
+      const target = await createProjectSaveTarget(getProjectFileName(before.projectName || before.currentSource), saveAs ? null : before.projectFilePath)
+      if (!target) { setProjectNotice('已取消保存工程，当前修改保留。'); return false }
+      if (useEditorStore.getState().videoItem !== before.videoItem) throw new Error('当前文件已变化，请重新保存。')
+      const document = useEditorStore.getState().captureProjectDocument()
+      const inputs = captureExportInputs(useEditorStore.getState())
+      const blob = await createProjectArchive(document)
+      await target.write(blob)
+      if (target.confirmation === 'download') {
+        setProjectNotice('工程下载已发起；浏览器无法确认落盘，请检查下载文件。未保存标记保留。')
+        // 下载快照可用于最近工程，但不能清除未保存状态或恢复副本。
+        if (sameExportInputs(inputs, captureExportInputs(useEditorStore.getState()))) {
+          try { await recoveryRef.current?.recordRecent(blob, target.displayName) }
+          catch { setLocalProjectNotice('未能保留最近工程副本，请检查已发起的工程下载。') }
         }
-      })
-
-      const originalImages: Record<string, Uint8Array> = {}
-      if (videoItem.buffers) {
-        Object.entries(videoItem.buffers).forEach(([key, buffer]) => {
-          originalImages[key] = new Uint8Array(buffer)
-        })
+        return false
       }
+      const { current, localWarning } = await finishProjectSave({ archive: blob, inputs, filePath: target.filePath, displayName: target.displayName, recovery: recoveryRef.current })
+      if (localWarning) setLocalProjectNotice(localWarning)
+      void refreshProjectLibrary()
+      setProjectNotice(current ? '工程已保存；文字、关键帧和素材可在下次打开时继续编辑。' : '已保存先前快照；保存期间出现的新修改仍未保存。')
+      return current
+    } catch (error) {
+      setError('工程未保存：' + (error instanceof Error ? error.message : String(error)))
+      return false
+    } finally { documentBusyRef.current = false; setLoading(false) }
+  }, [refreshProjectLibrary])
 
-      return svgaBuilder.mergeWithOriginal(originalBuffer, {
-        params,
-        layers,
-        imageResources,
-        originalImages,
-        slotConfigs,
-        imageSizes
-      })
-    }
+  const handleSave = useCallback(() => saveProject(false), [saveProject])
+  const handleSaveAs = useCallback(() => saveProject(true), [saveProject])
 
-    return engine.exportSVGALite(originalBuffer, {
-      fps: params.fps,
-      frames: params.frames,
-      compression: compressionConfig,
-      slotConfigs,
-      layers
-    })
+  const openLocalProject = useCallback(async (entry: LocalProjectSummary) => {
+    if (documentBusyRef.current) return
+    setProjectLibraryError(null)
+    let ownsBusy = false
+    try {
+      const repository = projectLibraryRef.current
+      if (!repository) throw new Error('本机工程库尚未准备好')
+      const choice = await confirmDiscardUnsavedChanges()
+      if (choice === 'cancel') return
+      if (choice === 'save' && !await handleSaveRef.current?.()) {
+        setProjectLibraryError('当前工程尚未确认保存，已取消打开副本。当前修改保留；请关闭工程库查看保存提示，确认保存后再打开。')
+        return
+      }
+      if (documentBusyRef.current) return
+      documentBusyRef.current = true; ownsBusy = true
+      const inputs = captureExportInputs(useEditorStore.getState())
+      const record = await repository.get(entry.id)
+      if (!record) throw new Error('本机副本已不存在，请刷新列表。')
+      if (record.revision !== entry.revision) throw new Error('该本机副本已被更新，请刷新列表后再选择。')
+      const bytes = await record.archive.arrayBuffer()
+      if (!sameExportInputs(inputs, captureExportInputs(useEditorStore.getState()))) throw new Error('读取期间当前工程有新修改，请再次打开。')
+      if (!await loadProject(bytes, getProjectFileName(record.name), null, true)) throw new Error('副本未能打开，当前工程和原副本均保留。请下载副本检查，或重新选择磁盘工程。')
+      setShowProjectLibrary(false)
+    } catch (error) { setProjectLibraryError(error instanceof Error ? error.message : String(error)); throw error }
+    finally { if (ownsBusy) documentBusyRef.current = false }
+  }, [confirmDiscardUnsavedChanges, loadProject])
+
+  const downloadLocalProject = useCallback(async (entry: LocalProjectSummary) => {
+    setProjectLibraryError(null)
+    try {
+      const repository = projectLibraryRef.current
+      if (!repository) throw new Error('本机工程库尚未准备好')
+      // 在 IndexedDB 异步读取之前请求保存目标，保留文件对话框需要的用户手势。
+      const target = await createProjectSaveTarget(entry.name, null)
+      if (!target) return
+      const record = await repository.get(entry.id)
+      if (!record) throw new Error('本机副本已不存在，请刷新列表。')
+      if (record.revision !== entry.revision) throw new Error('该副本已更新，请刷新后再下载。')
+      await target.write(record.archive)
+      setLocalProjectNotice(target.confirmation === 'written' ? '本机工程副本已保存到所选文件。' : '工程下载已发起，请检查下载目录。')
+    } catch (error) { setProjectLibraryError(error instanceof Error ? error.message : String(error)); throw error }
   }, [])
 
-  const handleSaveAs = useCallback(async () => {
-    useEditorStore.getState().endCanvasTransform(true)
-    const { videoItem, currentSource } = useEditorStore.getState()
-    if (!videoItem) return false
-    const savedInputs = captureExportInputs(useEditorStore.getState())
-
-    setLoading(true)
-    setError(null)
+  const removeLocalProject = useCallback(async (entry: LocalProjectSummary) => {
+    const repository = projectLibraryRef.current
+    setProjectLibraryError(null)
     try {
-      const blob = await buildCurrentSvgaBlob()
-      if (isTauriRuntime()) {
-        const filePath = await tauriAPI.dialog.saveFile({
-          defaultPath: getDefaultSvgaName(currentSource),
-          filters: [
-            { name: 'SVGA Files', extensions: ['svga'] },
-            { name: 'All Files', extensions: ['*'] }
-          ]
-        })
-        if (!filePath) return false
-        const result = await tauriAPI.file.write(filePath, await blobToBase64(blob))
-        if (result && !result.success) {
-          throw new Error(result.error || '写入失败')
-        }
-        if (sameExportInputs(savedInputs, captureExportInputs(useEditorStore.getState()))) {
-          useEditorStore.setState({ currentSource: filePath, sourceType: 'file', isDirty: false })
-        }
-      } else {
-        const saved = await saveGeneratedFile(blob, getDefaultSvgaName(currentSource))
-        if (!saved) return false
-        if (sameExportInputs(savedInputs, captureExportInputs(useEditorStore.getState()))) useEditorStore.setState({ isDirty: false })
-      }
-      return true
-    } catch (err) {
-      setError(`保存失败: ${(err as Error).message}`)
-      return false
-    } finally {
-      setLoading(false)
-    }
-  }, [buildCurrentSvgaBlob])
+      if (!repository) throw new Error('本机工程库尚未准备好')
+      await repository.remove(entry.id)
+      await refreshProjectLibrary()
+    } catch (error) { setProjectLibraryError(error instanceof Error ? error.message : String(error)); throw error }
+  }, [refreshProjectLibrary])
 
-  // 保存文件（本地文件覆盖保存；URL/浏览器来源转为另存为）
-  const handleSave = useCallback(async () => {
-    useEditorStore.getState().endCanvasTransform(true)
-    const { videoItem, currentSource, sourceType } = useEditorStore.getState()
-    if (!videoItem) return false
-    const shouldOverwriteSource = isTauriRuntime() && sourceType === 'file' && currentSource
-
-    if (!shouldOverwriteSource) {
-      return handleSaveAs()
-    }
-    const savedInputs = captureExportInputs(useEditorStore.getState())
-
-    setLoading(true)
-    setError(null)
+  const clearLocalProjects = useCallback(async () => {
+    const repository = projectLibraryRef.current
+    setProjectLibraryError(null)
     try {
-      const blob = await buildCurrentSvgaBlob()
-      const result = await tauriAPI.file.write(currentSource, await blobToBase64(blob))
-      if (result && !result.success) {
-        throw new Error(result.error || '写入失败')
-      }
-      if (sameExportInputs(savedInputs, captureExportInputs(useEditorStore.getState()))) useEditorStore.setState({ isDirty: false })
-      return true
-    } catch (err) {
-      setError(`保存失败: ${(err as Error).message}`)
-      return false
-    } finally {
-      setLoading(false)
+      if (!repository) throw new Error('本机工程库尚未准备好')
+      await repository.clear()
+      setStartupRecoveryHint(false)
+      await refreshProjectLibrary()
+    } catch (error) { setProjectLibraryError(error instanceof Error ? error.message : String(error)); throw error }
+  }, [refreshProjectLibrary])
+
+  const configureLocalProjects = useCallback(async (patch: Partial<Pick<LocalProjectPreferences, 'recoveryEnabled' | 'recentEnabled'>>) => {
+    const repository = projectLibraryRef.current
+    setProjectLibraryError(null)
+    try {
+      if (!repository) throw new Error('本机工程库尚未准备好')
+      await repository.configure(patch)
+      await refreshProjectLibrary()
+    } catch (error) { setProjectLibraryError(error instanceof Error ? error.message : String(error)); throw error }
+  }, [refreshProjectLibrary])
+
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (useEditorStore.getState().isDirty || documentBusyRef.current) { event.preventDefault(); event.returnValue = '' }
     }
-  }, [buildCurrentSvgaBlob, handleSaveAs])
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => {
+      window.removeEventListener('beforeunload', beforeUnload)
+      unsavedResolverRef.current?.('cancel')
+      unsavedResolverRef.current = null
+      projectDisposeRef.current?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!showAboutModal) return
+    if (isTauriRuntime()) {
+      void tauriAPI.app.getMcpStatus().then(setMcpStatus).catch(() => setMcpStatus(null))
+      return
+    }
+    void fetch('/mcp/status').then(response => response.ok ? response.json() : Promise.reject(new Error('MCP web status unavailable'))).then(setMcpStatus).catch(() => setMcpStatus(null))
+  }, [showAboutModal])
+
+  // 桌面端 MCP 请求通过事件进入前端，复用 Zustand actions，避免第二套编辑逻辑。
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void registerMcpBridge().then(cleanup => {
+      if (disposed) cleanup?.()
+      else unlisten = cleanup
+    }).catch(error => console.warn('[MCP] 桥接初始化失败：', error))
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
 
   const handleFocusExportPanel = useCallback(() => {
     setIsImmersive(false)
@@ -1100,12 +1096,14 @@ export const App: React.FC = () => {
         showHistory={showHistory}
         onToggleHistory={toggleHistory}
         onShowAbout={() => setShowAboutModal(true)}
+        onCheckUpdates={() => setShowUpdateModal(true)}
+        onShowLicense={() => setShowLicenseModal(true)}
       />
 
       <input
         ref={svgaFileInputRef}
         type="file"
-        accept=".svga,application/octet-stream"
+        accept=".svga,.svgaproj,application/octet-stream,application/zip"
         className="hidden"
         onChange={handleSvgaFileInputChange}
       />
@@ -1113,7 +1111,7 @@ export const App: React.FC = () => {
       {/* 工具栏 */}
       <div className={cn('min-h-14 gap-3 bg-bg-secondary border-b border-border flex items-center justify-between px-4', isImmersive && !loading && !error && '!hidden')}>
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={handleOpenFile}>
+          <Button variant="ghost" size="sm" onClick={handleOpenFile} disabled={loading} title="打开 SVGA 或可编辑工程（Ctrl+O）">
             <Icon name="folder-open" size={16} />
             打开文件
           </Button>
@@ -1133,6 +1131,9 @@ export const App: React.FC = () => {
             <Icon name="history" size={16} />
             <span className="hidden xl:inline">历史记录</span>
           </Button>
+          <Button variant="ghost" size="sm" onClick={openProjectLibrary} aria-label="恢复与最近工程" title="查看本机恢复副本与最近工程">
+            <Icon name="history" size={15} /><span>恢复 / 最近</span>
+          </Button>
         </div>
 
         <div className="flex min-w-0 items-center gap-2">
@@ -1149,10 +1150,23 @@ export const App: React.FC = () => {
             <Icon name="refresh" size={15} />
             <span className="hidden xl:inline">重置面板</span>
           </Button>
-          <Button variant="secondary" size="sm" disabled={!previewVideoItem || loading} onClick={handleSave} title="保存（Ctrl+S）"><Icon name="save" size={15} />保存</Button>
+          <Button variant="secondary" size="sm" disabled={!previewVideoItem || loading} onClick={handleSave} title="保存可编辑工程（Ctrl+S），导出 SVGA 不替代工程备份"><Icon name="save" size={15} />保存工程</Button>
           <Button variant="primary" size="sm" disabled={!previewVideoItem} onClick={handleFocusExportPanel} title="打开导出设置（Ctrl+E）"><Icon name="export" size={15} />导出</Button>
         </div>
       </div>
+
+      {projectNotice && !isImmersive && <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-bg-tertiary px-4 py-1.5 text-[11px] text-text-secondary">
+        <span>{projectNotice}</span><button type="button" aria-label="关闭工程提示" onClick={() => setProjectNotice(null)} className="shrink-0 text-text-muted hover:text-accent">×</button>
+      </div>}
+
+      {startupRecoveryHint && projectLibrarySnapshot?.entries.some(entry => entry.kind === 'recovery') && !isImmersive && <div role="status" className="flex shrink-0 items-center gap-3 border-b border-warning/25 bg-warning/5 px-4 py-2 text-xs">
+        <span className="mr-auto text-text-secondary">发现 {projectLibrarySnapshot.entries.filter(entry => entry.kind === 'recovery').length} 份本机恢复副本，可查看是否包含上次未保存的修改。</span>
+        <button type="button" onClick={openProjectLibrary} className="text-accent">查看恢复副本</button>
+        <button type="button" onClick={() => setStartupRecoveryHint(false)} className="text-text-muted">稍后查看</button>
+      </div>}
+      {localProjectNotice && !isImmersive && <div role="status" className="flex shrink-0 items-center gap-2 border-b border-border bg-bg-tertiary px-4 py-1.5 text-[11px] text-text-secondary">
+        <span className="mr-auto">{localProjectNotice}</span><button type="button" aria-label="关闭本机副本提示" onClick={() => setLocalProjectNotice(null)}>×</button>
+      </div>}
 
       {/* 主内容区 */}
       <div className="flex-1 flex overflow-hidden">
@@ -1238,7 +1252,7 @@ export const App: React.FC = () => {
             <SlotPanel className="h-full rounded-none border-0" collapsible={false} />
           </div>
           <div role="tabpanel" id="inspector-view-export" aria-labelledby="inspector-tab-export" hidden={inspectorTab !== 'export'} ref={exportPanelRef} className={cn('inspector-view flex-1 min-h-0', inspectorTab !== 'export' && '!hidden')}>
-            <ExportPanel className="h-full rounded-none border-0" collapsible={false} />
+            <ExportPanel className="h-full rounded-none border-0" collapsible={false} onBusyChange={setExporting} />
           </div>
           {showHistory && (
             <>
@@ -1250,6 +1264,15 @@ export const App: React.FC = () => {
       </div>
 
       {/* 状态栏 */}
+      {!isImmersive && <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-bg-secondary px-4 py-1 text-[10px]">
+        <span role="status" aria-label="本机自动恢复状态" title={recoveryStatus?.message} className={cn('truncate', recoveryStatus?.phase === 'error' ? 'text-warning' : 'text-text-muted')}>
+          {recoveryStatus?.message || '正在准备本机恢复…'}{recoveryStatus?.updatedAt ? `（${new Date(recoveryStatus.updatedAt).toLocaleTimeString()}）` : ''}
+        </span>
+        <div className="flex shrink-0 gap-3">
+          <button type="button" disabled={loading || !previewVideoItem || recoveryStatus?.phase === 'saving' || recoveryStatus?.phase === 'disabled'} onClick={() => { void recoveryRef.current?.flush() }} className="text-accent disabled:opacity-40">{recoveryStatus?.phase === 'error' ? '重试本机备份' : '立即备份'}</button>
+          <button type="button" onClick={openProjectLibrary} className="text-text-muted hover:text-accent">本机副本设置</button>
+        </div>
+      </div>}
       <StatusBar />
 
       {/* URL 输入模态框 */}
@@ -1289,9 +1312,10 @@ export const App: React.FC = () => {
       </Modal>
 
       <Modal
+        isolateKeyboard
         isOpen={showUnsavedModal}
         onClose={() => resolveUnsavedChoice('cancel')}
-        title="保存当前修改？"
+        title="保存当前工程？"
         footer={
           <>
             <Button variant="ghost" onClick={() => resolveUnsavedChoice('cancel')}>
@@ -1301,13 +1325,13 @@ export const App: React.FC = () => {
               不保存
             </Button>
             <Button variant="primary" onClick={() => resolveUnsavedChoice('save')}>
-              保存
+              保存工程
             </Button>
           </>
         }
       >
         <p className="text-sm text-text-secondary">
-          当前 SVGA 还有未保存修改，继续操作会丢失这些修改。
+          当前工程还有未保存修改。保存 .svgaproj 可保留文字模拟、可编辑关键帧与素材；仅导出 SVGA 不会保存完整编辑状态。
         </p>
       </Modal>
 
@@ -1327,11 +1351,57 @@ export const App: React.FC = () => {
           <div className="rounded border border-border bg-bg-tertiary p-3 text-xs">
             <div>打开文件：Ctrl+O</div>
             <div>打开 URL：Ctrl+Shift+O</div>
-            <div>保存：Ctrl+S</div>
+            <div>保存工程：Ctrl+S（保留可编辑状态）</div>
             <div>导出：Ctrl+E</div>
+          </div>
+          <div className="rounded border border-accent/30 bg-accent/5 p-3 text-xs">
+            <div className="mb-1 font-medium text-text-primary">AI / MCP</div>
+            {mcpStatus ? <>
+              <div className={mcpStatus.enabled ? 'text-success' : 'text-warning'}>{mcpStatus.enabled ? '本机 MCP 已启动' : '本机 MCP 未启动（端口可能被占用）'}</div>
+              <div className="mt-1 break-all select-all text-text-muted">地址：{mcpStatus.endpoint}</div>
+              <div className="mt-1 break-all select-all text-text-muted">令牌：{mcpStatus.token}</div>
+              <div className={cn('mt-1', mcpStatus.image_generation_configured ? 'text-success' : 'text-warning')}>
+                生图 API：{mcpStatus.image_generation_configured ? '已读取 OPENAI_API_KEY' : '未配置 OPENAI_API_KEY'}
+              </div>
+              <div className="mt-2 text-text-muted">扩展目录：integrations/gpt-web-extension</div>
+            </> : <div className="text-text-muted">桌面端启动后可查看 MCP 地址和令牌。</div>}
           </div>
         </div>
       </Modal>
+
+      <LocalProjectLibraryDialog
+        isOpen={showProjectLibrary && !showUnsavedModal}
+        onClose={() => setShowProjectLibrary(false)}
+        snapshot={projectLibrarySnapshot}
+        loading={projectLibraryLoading}
+        error={projectLibraryError}
+        onRefresh={async () => { setProjectLibraryError(null); await refreshProjectLibrary(); await recoveryRef.current?.refreshSettings() }}
+        onConfigure={configureLocalProjects}
+        onClear={clearLocalProjects}
+        onRemove={removeLocalProject}
+        onOpen={openLocalProject}
+        onDownload={downloadLocalProject}
+      />
+      <UpdateDialog
+        isOpen={showUpdateModal}
+        onClose={() => setShowUpdateModal(false)}
+        dirty={updateDirty}
+        busy={loading || documentBusyRef.current || !!projectLibraryLoading}
+        exporting={exporting}
+        currentInputs={captureExportInputs(useEditorStore.getState())}
+        getGuards={() => ({
+          dirty: useEditorStore.getState().isDirty,
+          busy: loading || documentBusyRef.current || !!projectLibraryLoading,
+          exporting,
+          currentInputs: captureExportInputs(useEditorStore.getState()),
+        })}
+        beforeInstall={() => {
+          useEditorStore.getState().endCanvasTransform(true)
+          useEditorStore.getState().setPlaying(false)
+        }}
+        onSave={async () => Boolean(await handleSaveRef.current?.())}
+      />
+      <LicenseDialog isOpen={showLicenseModal} onClose={() => setShowLicenseModal(false)} />
     </div>
   )
 }

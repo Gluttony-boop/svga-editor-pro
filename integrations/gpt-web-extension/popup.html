@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SVGA MCP</title>
+    <style>
+      body { width: 330px; margin: 0; padding: 16px; color: #e7e9ee; background: #17191e; font: 13px system-ui, sans-serif; }
+      h1 { margin: 0 0 12px; font-size: 16px; } label { display: block; margin: 10px 0 4px; color: #aeb4c0; }
+      input, textarea, select, button { box-sizing: border-box; width: 100%; border: 1px solid #3c424d; border-radius: 6px; padding: 8px; color: inherit; background: #22262e; }
+      textarea { min-height: 76px; resize: vertical; font-family: ui-monospace, monospace; }
+      button { margin-top: 10px; cursor: pointer; background: #5b72f2; border-color: #7286ff; } button.secondary { background: #2a2f3a; }
+      #status { min-height: 18px; margin-top: 10px; color: #aeb4c0; white-space: pre-wrap; } #result { margin-top: 10px; max-height: 180px; overflow: auto; white-space: pre-wrap; color: #c9f6d2; }
+    </style>
+  </head>
+  <body>
+    <h1>SVGA Editor MCP</h1>
+    <label for="endpoint">MCP 地址</label>
+    <input id="endpoint" value="http://127.0.0.1:5174/mcp" spellcheck="false">
+    <label for="token">令牌</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false">
+    <button id="connect">保存并连接</button>
+    <button id="refresh" class="secondary">读取工具列表</button>
+    <label for="tool">工具</label>
+    <select id="tool"></select>
+    <label for="arguments">参数 JSON</label>
+    <textarea id="arguments">{}</textarea>
+    <button id="call">调用工具</button>
+    <div id="status"></div><pre id="result"></pre>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "generator": "jose SignJWT / RFC 8032 test key",
+  "publicJwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+  },
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImludGVyb3Ata2V5LTEifQ.eyJwbGFuIjoicHJvIiwiZGV2aWNlSGFzaCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJub25jZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwibGljZW5zZUV4cGlyZXNBdCI6MTc5MDAwNzIwMCwiaXNzIjoic3ZnYS1lZGl0b3ItcHJvLWxpY2Vuc2luZyIsImF1ZCI6ImNvbS5zdmdhLmVkaXRvci5wcm8iLCJzdWIiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDciLCJpYXQiOjE3OTAwMDAwMDAsIm5iZiI6MTc5MDAwMDAwMCwiZXhwIjoxNzkwMDAwOTAwfQ.WhyOzf-anoJYX60jcyI18I1Nt1LPjVrhziSxBVIt7UsfkYDpeRo_6tfk2oZSh1ja3JG4H-LCYBpsa95jqnHjBA",
+  "expectation": {
+    "kid": "interop-key-1",
+    "now": 1790000000,
+    "deviceHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "nonce": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

@@ -18,13 +18,18 @@ import type {
 import { AnimationEngine } from './animation-engine'
 import { applyLayerFrameEdits, bakeLayerFrames, findOriginalLayer } from './layer-transform'
 import { getLayerSourceFrame } from './layer-time'
+import { getSlotImageUrl } from '@/utils/slot-config'
 import {
+  assertDecodedImageReferences,
   createLayerImageAliases,
   normalizeMovieImageReferences
 } from './layer-name-sync'
 import SVGA_PROTO_JSON from './svga-proto'
+import { mapSlotsToExportImages, mapSlotsToSourceImages, prepareTextSlotsForExport, resolveTextExportImageSizes } from './text-export'
+import type { ExportSpriteBinding } from '@/types/export-artifact'
+import { createExportSpriteBinding, emitExportBindings, throwIfExportAborted, type ExportProvenanceOptions } from './export-provenance'
 
-export interface SVGABuildConfig {
+export interface SVGABuildConfig extends ExportProvenanceOptions {
   params: MovieParams
   layers: Layer[]
   imageResources: Map<string, ImageResource>
@@ -62,6 +67,21 @@ function fitSpriteFrameCount(sprite: Sprite, frameCount: number): Sprite {
   }
 }
 
+function exportImageSizes(
+  sizes: Map<string, { width: number; height: number }>,
+  layers: Layer[],
+  aliases: ReadonlyMap<string, string>,
+  sourceKeys: ReadonlyMap<string, string> = new Map()
+) {
+  const result = new Map(sizes)
+  for (const layer of layers) {
+    const alias = aliases.get(layer.id)
+    const size = sizes.get(layer.imageKey || '') || sizes.get(sourceKeys.get(layer.id) || '')
+    if (alias && size) result.set(alias, size)
+  }
+  return result
+}
+
 export class SVGABuilder {
   private MovieEntity: any = null
 
@@ -74,18 +94,23 @@ export class SVGABuilder {
    * 构建 SVGA 文件
    */
   async build(config: SVGABuildConfig): Promise<Blob> {
+    throwIfExportAborted(config.signal)
     if (!this.MovieEntity) {
       await this.init()
     }
 
     // 1. 构建 Movie 对象
-    const movie = this.buildMovie(config)
+    const bindings: ExportSpriteBinding[] = []
+    const movie = await this.buildMovie(config, bindings)
+    throwIfExportAborted(config.signal)
+    normalizeMovieImageReferences(movie)
 
     // 2. 编码为 protobuf
     const encoded = this.MovieEntity.encode(this.MovieEntity.fromObject(movie)).finish()
 
     // 3. 官方 SVGA 2.0 是 zlib 压缩后的 protobuf MovieEntity。
     const compressed = pako.deflate(encoded, { level: 6 })
+    emitExportBindings(config, bindings, movie.sprites)
 
     return new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer], {
       type: 'application/octet-stream'
@@ -95,11 +120,11 @@ export class SVGABuilder {
   /**
    * 构建 Movie 对象
    */
-  private buildMovie(config: SVGABuildConfig): any {
-    const { params, layers, imageResources, originalImages, imageSizes } = config
+  private async buildMovie(config: SVGABuildConfig, bindings: ExportSpriteBinding[]): Promise<any> {
+    const { params, layers, imageResources, originalImages } = config
 
     // 收集所有图片资源
-    const images: Record<string, Uint8Array> = {}
+    const images: Record<string, Uint8Array> = Object.create(null)
 
     // 添加原始图片
     if (originalImages) {
@@ -113,10 +138,27 @@ export class SVGABuilder {
       }
     })
 
+    const knownSizes = new Map(config.imageSizes)
+    imageResources.forEach((resource, key) => {
+      if (resource.width > 0 && resource.height > 0) knownSizes.set(key, { width: resource.width, height: resource.height })
+    })
+    const sourceSprites = layers.map(layer => ({ ...layer.sprites, imageKey: layer.imageKey }))
+    const sourceSlots = mapSlotsToSourceImages(config.slotConfigs, sourceSprites, undefined)
+    const imageSizes = await resolveTextExportImageSizes({ images, sprites: sourceSprites }, sourceSlots, knownSizes)
+    throwIfExportAborted(config.signal)
+
+    for (const [key, slot] of Object.entries(config.slotConfigs || {})) {
+      throwIfExportAborted(config.signal)
+      const url = getSlotImageUrl(slot)
+      if (url) images[key] = new Uint8Array(await this.convertToPng(url))
+    }
+
     const imageAliases = createLayerImageAliases(images, layers)
 
     // 构建 sprites
-    const sprites = this.buildSprites(layers, params, imageSizes, imageAliases)
+    const sprites = this.buildSprites(layers, params, imageSizes, imageAliases, (layer, sprite) => {
+      bindings.push(createExportSpriteBinding(bindings.length, layer, null, layer.imageKey, sprite.imageKey, config.slotConfigs))
+    })
 
     // 构建 Movie 对象
     const movie = {
@@ -131,7 +173,8 @@ export class SVGABuilder {
       sprites
     }
 
-    return movie
+    return prepareTextSlotsForExport(movie, mapSlotsToExportImages(config.slotConfigs, layers, imageAliases),
+      exportImageSizes(imageSizes, layers, imageAliases))
   }
 
   /**
@@ -141,7 +184,8 @@ export class SVGABuilder {
     layers: Layer[], 
     params: MovieParams,
     imageSizes?: Map<string, { width: number; height: number }>,
-    imageAliases?: Map<string, string>
+    imageAliases?: Map<string, string>,
+    onSprite?: (layer: Layer, sprite: Sprite) => void
   ): Sprite[] {
     const sprites: Sprite[] = []
 
@@ -154,6 +198,7 @@ export class SVGABuilder {
       const size = imageSizes?.get(layer.imageKey)
       const sprite = this.buildSprite(layer, params, size, imageAliases?.get(layer.id))
       sprites.push(sprite)
+      onSprite?.(layer, sprite)
     }
 
     return sprites
@@ -271,29 +316,36 @@ export class SVGABuilder {
     return new Promise((resolve, reject) => {
       const img = new Image()
       img.crossOrigin = 'anonymous'
-
-      img.onload = () => {
-        const canvas = document.createElement('canvas')
-        canvas.width = img.width
-        canvas.height = img.height
-        const ctx = canvas.getContext('2d')
-        if (!ctx) {
-          reject(new Error('Failed to get canvas context'))
-          return
-        }
-
-        ctx.drawImage(img, 0, 0)
-        canvas.toBlob(async (blob) => {
-          if (!blob) {
-            reject(new Error('Failed to convert image to PNG'))
-            return
-          }
-          resolve(await blob.arrayBuffer())
-        }, 'image/png')
+      let canvas: HTMLCanvasElement | undefined
+      const cleanup = () => {
+        img.onload = null
+        img.onerror = null
+        if (canvas) { canvas.width = 0; canvas.height = 0 }
       }
 
-      img.onerror = () => reject(new Error(`Failed to load image: ${url}`))
-      img.src = url
+      img.onload = () => {
+        try {
+          canvas = document.createElement('canvas')
+          canvas.width = img.width
+          canvas.height = img.height
+          const ctx = canvas.getContext('2d')
+          if (!ctx) throw new Error('Failed to get canvas context')
+          ctx.drawImage(img, 0, 0)
+          canvas.toBlob(async (blob) => {
+            try {
+              if (!blob) throw new Error('Failed to convert image to PNG')
+              resolve(await blob.arrayBuffer())
+            } catch (error) { reject(error) }
+            finally { cleanup() }
+          }, 'image/png')
+        } catch (error) {
+          cleanup()
+          reject(error)
+        }
+      }
+
+      img.onerror = () => { cleanup(); reject(new Error(`Failed to load image: ${url}`)) }
+      try { img.src = url } catch (error) { cleanup(); reject(error) }
     })
   }
 
@@ -304,9 +356,11 @@ export class SVGABuilder {
     originalBuffer: ArrayBuffer,
     config: SVGABuildConfig
   ): Promise<Blob> {
+    throwIfExportAborted(config.signal)
     if (!this.MovieEntity) {
       await this.init()
     }
+    throwIfExportAborted(config.signal)
 
     // 解压原始 SVGA
     const data = new Uint8Array(originalBuffer)
@@ -330,6 +384,7 @@ export class SVGABuilder {
 
     // 解码原始 Movie
     const originalMovie = this.MovieEntity.decode(decompressed)
+    assertDecodedImageReferences(originalMovie)
     const originalObj = this.MovieEntity.toObject(originalMovie, {
       bytes: Uint8Array,
       arrays: true,
@@ -338,31 +393,30 @@ export class SVGABuilder {
     })
 
     // 合并图片
-    const mergedImages = { ...(originalObj.images || {}) }
+    const mergedImages = Object.assign(Object.create(null), originalObj.images)
     config.imageResources.forEach((resource, key) => {
       if (resource.data.byteLength > 0) {
         mergedImages[key] = resource.data
       }
     })
 
-    const slotConfigs = config.slotConfigs || {}
+    const slotConfigs = mapSlotsToSourceImages(config.slotConfigs, originalObj.sprites, config.layers)
+    const knownSizes = new Map<string, { width: number; height: number }>(config.imageSizes)
+    config.imageResources.forEach((resource, key) => {
+      if (resource.width > 0 && resource.height > 0) knownSizes.set(key, { width: resource.width, height: resource.height })
+    })
+    const imageSizes = await resolveTextExportImageSizes({ images: mergedImages, sprites: originalObj.sprites }, slotConfigs, knownSizes, config.layers)
+    throwIfExportAborted(config.signal)
     const replacementKeys = Object.keys(slotConfigs).filter(
-      key => slotConfigs[key]?.type === 'image' && slotConfigs[key]?.value
+      key => !!getSlotImageUrl(slotConfigs[key])
     )
 
     for (const key of replacementKeys) {
+      throwIfExportAborted(config.signal)
       const slotConfig = slotConfigs[key]
-      if (!slotConfig?.value) continue
-      mergedImages[key] = new Uint8Array(await this.convertToPng(slotConfig.value as string))
+      if (!getSlotImageUrl(slotConfig)) continue
+      mergedImages[key] = new Uint8Array(await this.convertToPng(getSlotImageUrl(slotConfig)))
     }
-
-    // 构建图片尺寸映射
-    const imageSizes = new Map<string, { width: number; height: number }>(config.imageSizes)
-    config.imageResources.forEach((resource, key) => {
-      if (resource.width > 0 && resource.height > 0) {
-        imageSizes.set(key, { width: resource.width, height: resource.height })
-      }
-    })
 
     // 构建原始 key → 图层映射，优先使用解码后的原始 sprite imageKey
     // 这样 renameImageKey 后 layer.imageKey 已变，但 images map 里还是旧 key
@@ -377,16 +431,23 @@ export class SVGABuilder {
       })
     }
 
+    // 导入层的副本仍引用同一资源；重命名后的当前Key不能成为丢失源图片的新占位图。
+    const sourceByCurrentKey = new Map<string, string>()
+    for (const layer of config.layers) {
+      const sourceKey = sourceKeyByLayerId.get(layer.id)
+      if (sourceKey && layer.imageKey) sourceByCurrentKey.set(layer.imageKey, sourceKey)
+    }
+    for (const layer of config.layers) {
+      const sourceKey = layer.imageKey ? sourceByCurrentKey.get(layer.imageKey) : undefined
+      if (sourceKey && !sourceKeyByLayerId.has(layer.id)) sourceKeyByLayerId.set(layer.id, sourceKey)
+    }
+
     const imageAliases = createLayerImageAliases(mergedImages, config.layers, sourceKeyByLayerId)
+    throwIfExportAborted(config.signal)
 
     // 合并 sprites
     const originalSprites = originalObj.sprites || []
-    const newSprites = this.buildSprites(
-      config.layers.filter(l => l.isNew),
-      config.params,
-      imageSizes,
-      imageAliases
-    )
+    const bindings: ExportSpriteBinding[] = []
 
     // 更新现有图层的动画；缺失的原始图层视为已删除
     const updatedOriginalSprites = originalSprites.flatMap((sprite: Sprite, index: number) => {
@@ -401,8 +462,19 @@ export class SVGABuilder {
         ...nextSprite,
         frames: bakeLayerFrames(sprite.frames, layer, config.params.frames, imageSizes.get(layer.imageKey || ''))
       }
+      bindings.push(createExportSpriteBinding(bindings.length, layer, index,
+        sourceKeyByLayerId.get(layer.id) || sprite.imageKey, nextSprite.imageKey, config.slotConfigs))
       return [fitSpriteFrameCount(nextSprite, config.params.frames)]
     })
+
+    const newSprites = this.buildSprites(
+      config.layers.filter(l => l.isNew), config.params, imageSizes, imageAliases,
+      (layer, sprite) => {
+        // 副本有独立图层身份，不能仅因共享图片 Key 就推测它来自某一个原 sprite。
+        bindings.push(createExportSpriteBinding(bindings.length, layer, null,
+          sourceKeyByLayerId.get(layer.id) || layer.imageKey, sprite.imageKey, config.slotConfigs))
+      }
+    )
 
     const sourceToExportKey = new Map<string, string>()
     config.layers.forEach((layer) => {
@@ -410,6 +482,8 @@ export class SVGABuilder {
       if (layer.imageKey && exportKey && exportKey !== layer.imageKey) {
         sourceToExportKey.set(layer.imageKey, exportKey)
       }
+      const originalKey = sourceKeyByLayerId.get(layer.id)
+      if (originalKey && exportKey && exportKey !== originalKey) sourceToExportKey.set(originalKey, exportKey)
     })
 
     const mergedSprites = [...updatedOriginalSprites, ...newSprites].map((sprite) => {
@@ -433,7 +507,12 @@ export class SVGABuilder {
       audios: originalObj.audios || []
     }
 
-    const normalizedReferences = normalizeMovieImageReferences(mergedMovie)
+    const preparedMovie = await prepareTextSlotsForExport(mergedMovie,
+      mapSlotsToExportImages(config.slotConfigs, config.layers, imageAliases, sourceKeyByLayerId),
+      exportImageSizes(imageSizes, config.layers, imageAliases, sourceKeyByLayerId))
+    throwIfExportAborted(config.signal)
+
+    const normalizedReferences = normalizeMovieImageReferences(preparedMovie)
     if (normalizedReferences.missingImageKeys.length > 0) {
       console.warn(
         '[SVGABuilder] Missing image data for sprite references:',
@@ -443,8 +522,9 @@ export class SVGABuilder {
 
     // 编码并压缩
     // 编辑态形状可能使用 RECT / SHAPE 等字符串枚举，编码前统一转换为协议数值。
-    const encoded = this.MovieEntity.encode(this.MovieEntity.fromObject(mergedMovie)).finish()
+    const encoded = this.MovieEntity.encode(this.MovieEntity.fromObject(preparedMovie)).finish()
     const compressed = pako.deflate(encoded, { level: 6 })
+    emitExportBindings(config, bindings, preparedMovie.sprites)
 
     return new Blob([compressed.buffer.slice(compressed.byteOffset, compressed.byteOffset + compressed.byteLength) as ArrayBuffer], {
       type: 'application/octet-stream'

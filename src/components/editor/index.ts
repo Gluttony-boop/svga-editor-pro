@@ -1,3 +1,6 @@
 export { CanvasPreview } from './CanvasPreview'
 export { PlaybackControls } from './PlaybackControls'
 export { Timeline } from './Timeline'
+export { LocalProjectLibraryDialog } from './LocalProjectLibraryDialog'
+export { UpdateDialog } from './UpdateDialog'
+export { LicenseDialog } from './LicenseDialog'

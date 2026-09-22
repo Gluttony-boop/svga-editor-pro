@@ -9,6 +9,7 @@ import { formatResourceBytes } from '@/utils/resource-catalog'
 import { CanvasTransformOverlay } from './CanvasTransformOverlay'
 import { PreviewRenderQueue } from '@/core/preview-render-queue'
 import { startPlaybackClock } from '@/core/playback-clock'
+import { hasTextPreview } from '@/core/text-preview'
 
 type PreviewRenderer = HighPerformanceRenderer | OfficialSvgRenderer | SVGAPixiRendererType
 type PreviewState = ReturnType<typeof useEditorStore.getState>
@@ -103,6 +104,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   // 使用选择器获取状态，避免不必要的重渲染
   const videoItem = useEditorStore((s) => s.videoItem)
   const params = useEditorStore((s) => s.params)
+  const textPreviewCount = useEditorStore(s => Object.values(s.slotConfigs).filter(hasTextPreview).length)
+  const bakedTextCount = useEditorStore(s => Object.values(s.slotConfigs).filter(slot => hasTextPreview(slot) && slot.textConfig?.exportMode === 'bake').length)
   const zoom = useEditorStore((s) => s.zoom)
   const setZoom = useEditorStore((s) => s.setZoom)
   const canvasOffset = useEditorStore((s) => s.canvasOffset)
@@ -209,6 +212,8 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   // 初始化渲染器 - 使用 ref 回调确保在 DOM 元素创建时立即执行
   const canvasRefCallback = useCallback((canvas: HTMLElement | null) => {
     canvasRef.current = canvas instanceof HTMLCanvasElement ? canvas : null
+    if (canvas instanceof HTMLCanvasElement) window.__SVGA_CANVAS__ = canvas
+    else if (window.__SVGA_CANVAS__) delete window.__SVGA_CANVAS__
     const mountRevision = ++mountRevisionRef.current
     renderQueueRef.current?.invalidate()
     if (!canvas) {
@@ -614,6 +619,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
         </div>
       )}
       {!immersive && !usePixi && videoItem && params && <CanvasTransformOverlay viewportRef={containerRef} disabled={!rendererReady || pixiLoading} />}
+      {textPreviewCount > 0 && <div className="pointer-events-none absolute left-3 top-16 z-10 rounded border border-accent/30 bg-bg-secondary/95 px-2 py-1 text-[10px] text-accent">文字预览 · {textPreviewCount} 个 Key · {bakedTextCount > 0 ? `${bakedTextCount} 个转图片写入 SVGA` : '文案仅模拟，不写入 SVGA'}</div>}
 
       {/* 缩放控制 */}
       <div ref={previewToolsRef} aria-label="画布工具" className="absolute bottom-4 right-4 z-10 flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-end gap-2 bg-bg-secondary/90 backdrop-blur rounded-lg border border-border/60 p-2" onMouseDown={e => e.stopPropagation()}>
@@ -812,7 +818,7 @@ const DropZone: React.FC<{
       onClick={onOpenFile}
       role="button"
       tabIndex={0}
-      aria-label="选择 SVGA 文件"
+      aria-label="选择 SVGA 或工程文件"
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onOpenFile?.() } }}
     >
       <div className="text-center">
@@ -828,9 +834,9 @@ const DropZone: React.FC<{
           开始编辑你的动画
         </p>
         <p className="text-text-muted text-sm">
-          拖入 SVGA 文件，或点击选择
+          拖入 SVGA 或 .svgaproj 工程，或点击选择
         </p>
-        <div className="mt-6 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-[#21131a]"><Icon name="folder-open" size={16} />选择 SVGA 文件</div>
+        <div className="mt-6 inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-[#21131a]"><Icon name="folder-open" size={16} />打开动画 / 工程</div>
         <p className="mt-5 text-xs text-text-muted">图层编辑 · 素材替换 · 压缩导出</p>
         <p className="mt-2 text-xs text-text-muted">也可以按 <kbd className="rounded border border-border px-1 py-0.5 font-mono">Ctrl+O</kbd> 打开文件</p>
       </div>

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyLayerNamesToMovie,
+  assertDecodedImageReferences,
   createLayerImageAliases,
   getCompatibleImageKey,
   hasIncompatibleMovieImageReferences,
@@ -47,6 +48,37 @@ function createLayer(overrides: Partial<Layer>): Layer {
 }
 
 describe('layer-name-sync', () => {
+  it('特殊__proto__使用兼容名称，constructor与普通Key保持原样', () => {
+    expect(getCompatibleImageKey('__proto__', '__proto__', 0)).toBe('image_1')
+    expect(getCompatibleImageKey('constructor', 'constructor', 0)).toBe('constructor')
+    expect(getCompatibleImageKey('title', 'title', 0)).toBe('title')
+  })
+
+  it('规范化__proto__处理名称碰撞并同时更新sprite和matte引用', () => {
+    const images: Record<string, Uint8Array> = Object.create(null)
+    const original = new Uint8Array([1, 2, 3])
+    images.__proto__ = original
+    images.image_1 = new Uint8Array([4, 5, 6])
+    images.content = new Uint8Array([7])
+    const movie = { images, sprites: [{ imageKey: '__proto__' }, { imageKey: 'content', matteKey: '__proto__' }] }
+    const result = normalizeMovieImageReferences(movie)
+    expect(result).toEqual({ changed: true, missingImageKeys: [] })
+    expect(movie.sprites[0].imageKey).toBe('image_1_1')
+    expect(movie.sprites[1].matteKey).toBe('image_1_1')
+    expect(images.image_1_1).toBe(original)
+    expect(images.image_1).toEqual(new Uint8Array([4, 5, 6]))
+    expect(Object.prototype.hasOwnProperty.call(images, '__proto__')).toBe(false)
+    expect(Object.getPrototypeOf(images)).toBe(null)
+  })
+
+  it('已被旧protobuf decoder丢失的__proto__不能当透明图片继续导出', () => {
+    const images: Record<string, Uint8Array> = {}
+    Object.setPrototypeOf(images, new Uint8Array([1, 2, 3]))
+    expect(() => assertDecodedImageReferences({ images, sprites: [{ imageKey: '__proto__' }] })).toThrow('源文件中改名')
+    const safe = { ['__proto__']: new Uint8Array([1, 2, 3]) }
+    expect(() => assertDecodedImageReferences({ images: safe, sprites: [{ imageKey: '__proto__' }] })).not.toThrow()
+  })
+
   it('normalizes inline image data keys to player-compatible names', () => {
     const inlineWebpKey = `UklGR${'A'.repeat(220)}==`
 

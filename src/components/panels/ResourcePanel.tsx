@@ -1,4 +1,5 @@
 import React from 'react'
+import { mergeSlotImageConfig, withoutSlotImageConfig } from '@/utils/slot-config'
 import { Panel, Icon, Button, Modal } from '@/components/ui'
 import { useEditorStore } from '@/stores'
 import { resourceManager, createSaveFileTarget, saveGeneratedFile } from '@/core'
@@ -435,7 +436,10 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
 
   // 恢复原始图片
   const handleRestoreImage = (key: string) => {
-    removeSlotConfig(key)
+    const state = useEditorStore.getState()
+    const remaining = withoutSlotImageConfig(Object.prototype.hasOwnProperty.call(state.slotConfigs, key) ? state.slotConfigs[key] : undefined)
+    if (remaining) setSlotConfig(key, remaining)
+    else removeSlotConfig(key)
   }
 
   const cancelReplacement = () => {
@@ -447,11 +451,9 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     const current = pendingReplacement
     if (!isReplacementTargetCurrent(current.target, useEditorStore.getState())) { setReplacementError('原素材已变化，请关闭后重新替换'); return }
     const dataUrl = replacementPreview.dataUrl
-    setSlotConfig(current.key, {
-      type: 'image', name: current.key, value: dataUrl,
-      // Fitting is already baked into the exact preview pixels.
-      imageConfig: { url: dataUrl, scaleMode: 'stretch' }
-    })
+    // 拟合已烘焙进 PNG；换图不清除同 Key 的独立文字模拟。
+    const configs = useEditorStore.getState().slotConfigs
+    setSlotConfig(current.key, mergeSlotImageConfig(Object.prototype.hasOwnProperty.call(configs, current.key) ? configs[current.key] : undefined, current.key, dataUrl, 'stretch'))
     setExtractionStatus(`已应用替换：${current.key}（${current.mode === 'fit' ? '等比适应' : current.mode === 'fill' ? '裁切填充' : '拉伸'}）`)
     setPendingReplacement(null)
   }
@@ -813,7 +815,7 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
         onFilter={filter => { setResourceFilter(filter); setSearchQuery(''); if (filter === 'heavy') setSortOrder('memory-desc'); setShowAudit(false) }}
         onInspect={key => { setShowAudit(false); setInspectedKey(key) }} onLocate={locateLayer} />}
       {inspectedResource && <ResourceInspector key={inspectedResource.key} resource={inspectedResource} sourceUrl={inspectedSourceUrl}
-        replacementUrl={inspectedReplacementUrl} textSlot={inspectedSlot?.type === 'text'}
+        replacementUrl={inspectedReplacementUrl} textSlot={inspectedSlot?.type === 'text' || !!inspectedSlot?.textConfig}
         onClose={() => setInspectedKey(null)} onLocate={locateLayer}
         onReplace={() => { const key = inspectedResource.key; setInspectedKey(null); handleReplaceImage(key) }}
         downloading={isExtracting} onDownload={() => handleExportImage(inspectedResource.key)} />}

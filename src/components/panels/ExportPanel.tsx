@@ -4,17 +4,21 @@ import { useEditorStore, useCanExport, useCurrentParams } from '@/stores'
 import { ExportEngine, saveGeneratedFile, createSaveFileTarget, svgaBuilder, OPTIMIZATION_PRESETS } from '@/core'
 import { captureExportInputs, sameExportInputs, generateExportPreview, ExportInputsChangedError, type ExportPreviewResult } from '@/core/export-preview'
 import { ExportPreviewDialog } from '@/components/editor/ExportPreviewDialog'
+import { DeliveryPackageDialog } from '@/components/editor/DeliveryPackageDialog'
 import { cn } from '@/utils/cn'
 import { SVGAValidator } from '@/utils/svga-validator'
 import { OperationStatus, type OperationStatusValue } from '@/components/ui/OperationStatus'
+import { hasTextPreview } from '@/core/text-preview'
+import { ImageResizeControls } from './ImageResizeControls'
 
 interface ExportPanelProps {
   className?: string
   collapsible?: boolean
   defaultCollapsed?: boolean
+  onBusyChange?: (busy: boolean) => void
 }
 
-export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible = true, defaultCollapsed = false }) => {
+export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible = true, defaultCollapsed = false, onBusyChange }) => {
   const canExport = useCanExport()
   const videoItem = useEditorStore((s) => s.videoItem)
   const originalBuffer = useEditorStore((s) => s.originalBuffer)
@@ -28,6 +32,8 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   
   // 优化相关状态
   const optimizationConfig = useEditorStore((s) => s.optimizationConfig)
+  const specifiedSizeEnabled = optimizationConfig.image.sizeLimitEnabled
+    ?? (optimizationConfig.image.resizeEnabled && (optimizationConfig.image.maxWidth > 0 || optimizationConfig.image.maxHeight > 0))
   const selectedPresetId = useEditorStore((s) => s.selectedPresetId)
   const optimizationStats = useEditorStore((s) => s.optimizationStats)
   const setOptimizationConfig = useEditorStore((s) => s.setOptimizationConfig)
@@ -41,6 +47,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   const [showMoreExports, setShowMoreExports] = React.useState(false)
   const [preview, setPreview] = React.useState<{ inputs: readonly unknown[]; result: ExportPreviewResult } | null>(null)
   const [showPreview, setShowPreview] = React.useState(false)
+  const [showDelivery, setShowDelivery] = React.useState(false)
   const busyRef = React.useRef(false)
   const mountedRef = React.useRef(true)
   const previewIsCurrent = !!preview && sameExportInputs(preview.inputs, captureExportInputs(useEditorStore.getState()))
@@ -49,6 +56,8 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
+
+  React.useEffect(() => { onBusyChange?.(isExporting); return () => onBusyChange?.(false) }, [isExporting, onBusyChange])
 
   React.useEffect(() => {
     setPreview(null)
@@ -73,8 +82,8 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
     const hasDeletedOriginalLayers = activeOriginalLayerCount < originalLayerCount
     const hasNewLayers = layers.some(l => l.isNew)
     const hasNewImages = Array.from(imageResources.values()).some(r => r.isNew)
-    const hasAnimations = layers.some(l => 
-      Object.values(l.tracks).some(track => track.keyframes.length > 0)
+    const hasAnimations = layers.some(l =>
+      [...Object.values(l.tracks), ...Object.values(l.animationTracks || {})].some(track => track.keyframes.length > 0)
     )
     const hasLayerNameChanges = layers.some(l => {
       const nextName = l.name.trim()
@@ -303,6 +312,8 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
       defaultCollapsed={defaultCollapsed}
     >
       <div className="space-y-3">
+        <p className="rounded border border-border bg-bg-tertiary p-2 text-[11px] text-text-secondary">此处导出播放器产物；继续编辑请用顶部“保存工程”备份 .svgaproj。导出不会清除工程未保存标记。</p>
+        {Object.values(slotConfigs).some(hasTextPreview) && <p role="status" className="rounded border border-warning/30 bg-warning/5 p-2 text-[11px] leading-relaxed text-warning">文字框扩展会写入 SVGA。文案仅在该 Key 选择“转图片写入 SVGA”时包含于文件及导出对比，成为不能动态改字的图片；其余文案仅模拟。PNG 序列 / WebP 包含当前预览文字。可编辑文案请另存 .svgaproj 工程。</p>}
         {/* 编辑内容提示 */}
         {hasNewContent && (
           <div className="text-xs bg-accent/10 text-accent px-2 py-1.5 rounded">
@@ -343,6 +354,12 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
               {OPTIMIZATION_PRESETS.find(p => p.id === selectedPresetId)?.description}
             </p>
           )}
+          <ImageResizeControls
+            image={optimizationConfig.image}
+            canvasSize={params ? { width: params.viewBoxWidth, height: params.viewBoxHeight } : null}
+            disabled={isExporting}
+            onChange={image => setOptimizationConfig({ image })}
+          />
         </div>
 
         {/* 主导出按钮 */}
@@ -364,9 +381,17 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
         </Button>
         {preview && !previewIsCurrent && <p className="text-xs text-warning">编辑或配置已变化，请重新生成导出预览。</p>}
 
+        <div className="space-y-1.5 rounded-lg border border-accent/25 bg-accent/5 p-2">
+          <Button variant="secondary" className="w-full" disabled={!canExport || isExporting} onClick={() => setShowDelivery(true)}>
+            <Icon name="export" size={16} />
+            专业交付包…
+          </Button>
+          <p className="px-1 text-[11px] leading-relaxed text-text-muted">SVGA + Key / 文字清单 + 预览 + 检查报告，一包交付开发团队。</p>
+        </div>
+
         {/* 高级配置切换 */}
         <p className="text-[11px] text-text-muted">主导出使用此配置；未优化副本不压缩素材。预设不改变画布和动画坐标，手动精简帧数据需验证效果。</p>
-        {optimizationConfig.enabled && <p className="text-xs text-text-secondary">当前：{optimizationConfig.image.format === 'webp' ? `WebP ${optimizationConfig.image.quality}%` : (optimizationConfig.image.pngColors ? `PNG ${optimizationConfig.image.pngColors} 色（有损）` : 'PNG 全彩')} · 图片分辨率 {optimizationConfig.image.resizeEnabled ? optimizationConfig.image.resizePercent : 100}%</p>}
+        {optimizationConfig.enabled && <p className="text-xs text-text-secondary">当前：{optimizationConfig.image.format === 'webp' ? `WebP ${optimizationConfig.image.quality}%` : (optimizationConfig.image.pngColors ? `PNG ${optimizationConfig.image.pngColors} 色（有损）` : 'PNG 全彩')} · 图片分辨率 {optimizationConfig.image.resizeEnabled ? optimizationConfig.image.resizePercent : 100}%{specifiedSizeEnabled && (optimizationConfig.image.maxWidth > 0 || optimizationConfig.image.maxHeight > 0) ? ` · 最大 ${optimizationConfig.image.maxWidth || '不限'} × ${optimizationConfig.image.maxHeight || '不限'} px` : ''}{optimizationConfig.image.autoResizeToCanvas ? ' · 按当前画布自动缩图' : ''}</p>}
         {!!optimizationStats?.warnings?.length && <div role="status" className="space-y-1 text-xs text-warning">{optimizationStats.warnings.slice(0, 5).map((warning, index) => <p key={index}>{warning}</p>)}</div>}
         <button
           type="button"
@@ -451,12 +476,6 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
                   </div>
                 )}
               </div>
-
-              {optimizationConfig.image.resizeEnabled && <div className="flex flex-wrap gap-2 text-xs text-text-muted">
-                <label>最大宽 <input aria-label="图片最大宽度" type="number" min={0} max={8192} value={optimizationConfig.image.maxWidth} onChange={e => setOptimizationConfig({image:{...optimizationConfig.image,maxWidth:Math.max(0,Math.min(8192,Number(e.target.value)||0))}})} className="w-16 rounded border border-border bg-bg-primary px-1" /></label>
-                <label>最大高 <input aria-label="图片最大高度" type="number" min={0} max={8192} value={optimizationConfig.image.maxHeight} onChange={e => setOptimizationConfig({image:{...optimizationConfig.image,maxHeight:Math.max(0,Math.min(8192,Number(e.target.value)||0))}})} className="w-16 rounded border border-border bg-bg-primary px-1" /></label>
-                <span>0 为不限；逐张等比缩小。</span>
-              </div>}
 
               <div className="flex items-center gap-2">
                 <input
@@ -644,6 +663,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
       <OperationStatus status={exportStatus} className="mt-2 text-center" />
     </Panel>
     {showPreview && preview && <ExportPreviewDialog result={preview.result} stale={!previewIsCurrent} saving={isExporting} status={exportStatus} onClose={() => setShowPreview(false)} onSave={handleSavePreview} />}
+    {showDelivery && <DeliveryPackageDialog isOpen onClose={() => setShowDelivery(false)} />}
     </>
   )
 }

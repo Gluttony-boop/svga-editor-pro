@@ -8,6 +8,7 @@ interface CommitNumberFieldProps {
   disabled?: boolean
   min?: number
   max?: number
+  step?: number
   context: unknown
   onStart: () => void
   onCommit: (value: number) => void
@@ -16,7 +17,7 @@ interface CommitNumberFieldProps {
 const formatNumber = (value: number) => String(Math.round(value * 100) / 100)
 
 /** 草稿绑定图层、帧与编辑模式；切换上下文不会将旧值提交到新目标。 */
-export function CommitNumberField({ label, accessibleLabel, value, unit, disabled, min, max, context, onStart, onCommit }: CommitNumberFieldProps) {
+export function CommitNumberField({ label, accessibleLabel, value, unit, disabled, min, max, step = 0.1, context, onStart, onCommit }: CommitNumberFieldProps) {
   const [draft, setDraft] = React.useState(() => formatNumber(value))
   const editing = React.useRef(false)
   const changed = React.useRef(false)
@@ -38,7 +39,7 @@ export function CommitNumberField({ label, accessibleLabel, value, unit, disable
       </span>
       <input
         type="number" aria-label={accessibleLabel} title="回车或失焦应用，Esc 取消"
-        value={draft} min={min} max={max} step={0.1} disabled={disabled}
+        value={draft} min={min} max={max} step={step} disabled={disabled}
         className="w-full rounded border border-border bg-bg-tertiary px-2 py-1.5 text-xs font-mono text-text-primary outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-40"
         onFocus={() => { editing.current = true; changed.current = false; source.current = context; onStart() }}
         onChange={event => {

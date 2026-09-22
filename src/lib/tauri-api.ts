@@ -24,6 +24,35 @@ export interface SvgaData {
   imageMimeTypes: Array<{ key: string; mimeType: string }>
 }
 
+export interface UpdateConfigurationSummary {
+  configured: boolean
+  reason: string
+  currentVersion: string
+}
+
+export interface LicenseConfigurationSummary {
+  configured: boolean
+  reason: string
+  currentVersion: string
+}
+
+export interface LicenseStatusSummary {
+  configured: boolean
+  state: string
+  reason: string
+  expiresAt: number | null
+  licenseExpiresAt: number | null
+  advancedEnabled: boolean
+}
+
+export interface McpStatusSummary {
+  enabled: boolean
+  endpoint: string
+  token: string
+  protocol_version: string
+  image_generation_configured: boolean
+}
+
 export interface SvgaSprite {
   imageKey: string
   matteKey: string
@@ -94,6 +123,14 @@ export const tauriAPI = {
 
   // ---------- 文件读写 ----------
   file: {
+    readProject: async (filePath: string): Promise<{ success: boolean; data?: string; error?: string }> => {
+      try { return { success: true, data: await invoke<string>('read_project_file', { filePath }) } }
+      catch (error) { return { success: false, error: String(error) } }
+    },
+    writeProject: async (filePath: string, data: string): Promise<{ success: boolean; error?: string }> => {
+      try { await invoke('write_project_file', { filePath, dataBase64: data }); return { success: true } }
+      catch (error) { return { success: false, error: String(error) } }
+    },
     read: async (filePath: string): Promise<{ success: boolean; data?: string; error?: string }> => {
       try {
         const base64 = await invoke<string>('read_file', { filePath })
@@ -160,6 +197,27 @@ export const tauriAPI = {
     },
     getLaunchSvgaFile: async (): Promise<string | null> => {
       return invoke<string | null>('get_launch_svga_file')
+    },
+    getUpdateConfiguration: async (): Promise<UpdateConfigurationSummary> => {
+      return invoke<UpdateConfigurationSummary>('get_update_configuration')
+    },
+    getLicenseConfiguration: async (): Promise<LicenseConfigurationSummary> => {
+      return invoke<LicenseConfigurationSummary>('get_license_configuration')
+    },
+    getLicenseStatus: async (): Promise<LicenseStatusSummary> => {
+      return invoke<LicenseStatusSummary>('get_license_status')
+    },
+    activateLicense: async (code: string): Promise<LicenseStatusSummary> => {
+      return invoke<LicenseStatusSummary>('activate_license', { code })
+    },
+    refreshLicense: async (): Promise<LicenseStatusSummary> => {
+      return invoke<LicenseStatusSummary>('refresh_license')
+    },
+    clearLicense: async (): Promise<void> => {
+      await invoke('clear_license')
+    },
+    getMcpStatus: async (): Promise<McpStatusSummary> => {
+      return invoke<McpStatusSummary>('mcp_status')
     }
   },
 

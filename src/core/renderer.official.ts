@@ -9,6 +9,8 @@ import type { RenderOptions } from './renderer'
 import { applyLayerFrameEdits, getFrameAlpha, getFrameTransform, getLayerBaseFrame, getOriginalLayerIndex } from './layer-transform'
 import { getLayerSourceFrame, getLayerTimeOffset } from './layer-time'
 import { RendererImageCache } from './renderer-images'
+import { TextPreviewCache, applyTextFrameLayout, getTextPreviewSize, hasTextBox, hasTextPreview } from './text-preview'
+import { getActiveMatteKeys } from './renderer-matte'
 
 export type { RenderOptions } from './renderer'
 
@@ -74,6 +76,11 @@ export class OfficialSvgRenderer {
   // 图片缓存
   private imageCache: Map<string, HTMLImageElement> = new Map()
   private liveImages = new RendererImageCache(() => this.clearFrameCache())
+  private textPreview = new TextPreviewCache()
+  private activeSlotConfigs: Record<string, SlotConfig> = {}
+  private applySlotPreviews = true
+  private previewImageSizes: RenderOptions['imageResources']
+  private matteKeys = new Set<string>()
   private videoGeneration = 0
   private renderSignature = ''
 
@@ -110,6 +117,9 @@ export class OfficialSvgRenderer {
     this.videoItem = videoItem
     this.params = null
     this.liveImages.clear()
+    this.textPreview.clear()
+    this.activeSlotConfigs = {}
+    this.matteKeys = new Set((videoItem?.movie.sprites || []).flatMap(sprite => sprite.matteKey ? [sprite.matteKey] : []))
     this.renderSignature = ''
     this.imageCache.clear()
     this.frameCache.clear()
@@ -182,6 +192,11 @@ export class OfficialSvgRenderer {
       useFrameCache = true
     } = options
 
+    this.activeSlotConfigs = slotConfigs
+    this.applySlotPreviews = options.applySlots !== false
+    this.matteKeys = getActiveMatteKeys(this.videoItem, options.layers)
+    this.previewImageSizes = options.imageResources
+
     if (!this.videoItem || !this.params || options.shouldRender?.() === false) {
       return
     }
@@ -223,7 +238,7 @@ export class OfficialSvgRenderer {
     const sprites = this.videoItem.movie.sprites || []
     let spriteCount = 0
     
-    const matteKeys = new Set(sprites.map(sprite => sprite.matteKey).filter(Boolean))
+    const matteKeys = this.matteKeys
     for (let index = 0; index < sprites.length; index++) {
       const sprite = sprites[index]
       const { imageKey, frames, matteKey } = sprite
@@ -247,12 +262,14 @@ export class OfficialSvgRenderer {
       }
 
       // 获取图片
-      const img = this.getImage(layerState?.imageKey || imageKey, imageKey) || (frameData.shapes?.length ? this.canvas : undefined)
+      const resolvedKey = layerState?.imageKey || imageKey
+      const rawImg = this.getImage(resolvedKey, imageKey)
+      const img = this.withTextPreview(resolvedKey, rawImg, frameData.layout || undefined) || rawImg || (frameData.shapes?.length ? this.canvas : undefined)
       
       if (!img || img.width === 0) {
         continue
       }
-      frameData = this.editFrame(frameData, layerState, img, frameIndex)
+      frameData = this.withTextFrame(resolvedKey, this.editFrame(frameData, layerState, img, frameIndex, resolvedKey))
       const finalAlpha = frameData.alpha
       if (finalAlpha <= 0) continue
 
@@ -265,8 +282,10 @@ export class OfficialSvgRenderer {
         const matteExists = matteIndex >= 0 && (options.layers === undefined || !!matteLayer)
         const matteFrame = matteExists && matteInClip && matteSourceFrame >= 0 && matteSourceFrame < sprites[matteIndex].frames.length
           ? this.getInterpolatedFrameData(sprites[matteIndex], matteSourceFrame) : null
-        const matteImg = this.getImage(matteLayer?.imageKey || matteKey, matteKey) || (matteFrame?.shapes?.length ? this.canvas : undefined)
-        const editedMatte = matteFrame && matteImg ? this.editFrame(matteFrame, matteLayer, matteImg, frameIndex) : null
+        const resolvedMatteKey = matteLayer?.imageKey || matteKey
+        const rawMatteImg = this.getImage(resolvedMatteKey, matteKey)
+        const matteImg = this.withTextPreview(resolvedMatteKey, rawMatteImg, matteFrame?.layout || undefined) || rawMatteImg || (matteFrame?.shapes?.length ? this.canvas : undefined)
+        const editedMatte = matteFrame && matteImg ? this.editFrame(matteFrame, matteLayer, matteImg, frameIndex, resolvedMatteKey) : null
         const matteAlpha = editedMatte?.alpha ?? 1
         this.renderSpriteWithMatte(img, frameData, matteImg, editedMatte, finalAlpha, matteAlpha)
       } else {
@@ -280,10 +299,11 @@ export class OfficialSvgRenderer {
       if (!layer.isNew || !layer.visible || !layer.imageKey) continue
       const base = getLayerBaseFrame(layer, frameIndex, this.videoItem, options.imageResources)
       if (!base || (base.alpha ?? 1) <= 0) continue
-      const image = this.getImage(layer.imageKey)
+      const rawImage = this.getImage(layer.imageKey)
+      const image = this.withTextPreview(layer.imageKey, rawImage, base.layout) || rawImage
       if (!image) continue
-      const edited = applyLayerFrameEdits(base, layer, frameIndex, { width: image.width, height: image.height })
-      this.renderSprite(image, this.convertFrameData(edited), getFrameAlpha(edited))
+      const edited = applyLayerFrameEdits(base, layer, frameIndex, this.textSourceSize(layer.imageKey, base.layout, image))
+      this.renderSprite(image, this.withTextFrame(layer.imageKey, this.convertFrameData(edited)), getFrameAlpha(edited))
       spriteCount++
     }
 
@@ -785,20 +805,44 @@ export class OfficialSvgRenderer {
     return fallbackKey && fallbackKey !== key ? this.getImage(fallbackKey) : undefined
   }
 
-  private editFrame(frame: InterpolatedFrameData, layer: Layer | undefined, image: HTMLImageElement | HTMLCanvasElement, frameIndex: number): InterpolatedFrameData {
+  private editFrame(frame: InterpolatedFrameData, layer: Layer | undefined, image: HTMLImageElement | HTMLCanvasElement, frameIndex: number, key: string): InterpolatedFrameData {
     if (!layer) return frame
     return this.convertFrameData(applyLayerFrameEdits(
       { ...frame, clipPath: frame.clipPath ?? null },
       layer,
       frameIndex,
-      { width: image.width, height: image.height }
+      this.textSourceSize(key, frame.layout, image)
     ))
+  }
+
+  private withTextPreview(key: string, image: HTMLImageElement | undefined, layout: { width?: number; height?: number } | null | undefined): HTMLImageElement | HTMLCanvasElement | undefined {
+    const slot = Object.prototype.hasOwnProperty.call(this.activeSlotConfigs, key) ? this.activeSlotConfigs[key] : undefined
+    if (!this.applySlotPreviews || (!hasTextPreview(slot) && !hasTextBox(slot)) || this.matteKeys.has(key) || /\.(matte|vector)$/i.test(key)) return image
+    return this.textPreview.compose(key, slot, image || null, this.textSourceSize(key, layout)) || undefined
+  }
+
+  private textSourceSize(key: string, layout: { width?: number; height?: number } | null | undefined, fallback?: HTMLImageElement | HTMLCanvasElement) {
+    const source = this.previewImageSizes?.get(key) || this.imageCache.get(key)
+      || (Object.prototype.hasOwnProperty.call(this.videoItem?.images || {}, key) ? this.videoItem?.images[key] : undefined)
+    const original = getTextPreviewSize(null, source)
+    const config = Object.prototype.hasOwnProperty.call(this.activeSlotConfigs, key) ? this.activeSlotConfigs[key].textConfig : undefined
+    const backup = getTextPreviewSize(null, fallback)
+    return getTextPreviewSize(layout, {
+      width: original.width > 0 ? original.width : config?.referenceWidth ?? backup.width,
+      height: original.height > 0 ? original.height : config?.referenceHeight ?? backup.height
+    })
+  }
+
+  private withTextFrame(key: string, frame: InterpolatedFrameData): InterpolatedFrameData {
+    if (!this.applySlotPreviews || this.matteKeys.has(key) || /\.(matte|vector)$/i.test(key) || frame.shapes?.length) return frame
+    const slot = Object.prototype.hasOwnProperty.call(this.activeSlotConfigs, key) ? this.activeSlotConfigs[key] : undefined
+    return applyTextFrameLayout(frame, slot, this.textSourceSize(key, frame.layout))
   }
 
   private createRenderSignature(slots: Record<string, SlotConfig>, layers: Layer[], applySlots: boolean): string {
     return JSON.stringify({
       layers: layers.map(layer => [layer.id, layer.editableIndex, layer.imageKey, layer.visible, layer.opacity, layer.clip, getLayerTimeOffset(layer), layer.canvasTransform, layer.animationTracks, layer.tracks]),
-      slots: applySlots ? Object.entries(slots).map(([key, slot]) => [key, slot.type, slot.imageConfig?.url || slot.value]) : []
+      slots: applySlots ? Object.entries(slots).map(([key, slot]) => [key, slot.type, slot.imageConfig?.url, slot.value, slot.textConfig]) : []
     })
   }
 
@@ -830,6 +874,8 @@ export class OfficialSvgRenderer {
     this.videoItem = null
     this.params = null
     this.imageCache.clear()
+    this.textPreview.clear()
+    this.activeSlotConfigs = {}
     this.liveImages.clear()
     this.frameCache.clear()
     for (const c of this.offscreenCanvasPool) {

@@ -13,6 +13,10 @@
     "build:win": "tauri build --target x86_64-pc-windows-msvc",
     "package:github": "node scripts/package-github.mjs",
     "test:packaging": "node --test scripts/package-github.node-test.mjs scripts/publish-workspace.node-test.mjs",
+    "test:licensing": "npm test --prefix services/licensing",
+    "build:licensing": "npm run build --prefix services/licensing",
+    "release:manifest": "node scripts/release-manifest.mjs",
+    "test:release-manifest": "node --test scripts/release-manifest.node-test.mjs",
     "build:mac": "tauri build --target universal-apple-darwin",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
@@ -22,9 +26,11 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-shell": "^2.3.5",
+    "@tauri-apps/plugin-updater": "^2.12.0",
+    "idb": "8.0.3",
     "jszip": "^3.10.1",
     "pako": "^2.1.0",
     "pixi.js": "^8.18.1",
@@ -38,7 +44,7 @@
     "zustand": "^4.5.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.10.1",
+    "@tauri-apps/cli": "^2.11.5",
     "@types/node": "^20.11.0",
     "@types/react": "^18.2.48",
     "@types/react-dom": "^18.2.18",
@@ -50,6 +56,7 @@
     "eslint": "^8.56.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.5",
+    "fake-indexeddb": "6.2.5",
     "javascript-obfuscator": "^4.1.0",
     "postcss": "^8.4.33",
     "protoc": "^33.6.0",

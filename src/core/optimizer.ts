@@ -7,6 +7,12 @@ import pako from 'pako'
 import protobuf from 'protobufjs'
 import SVGA_PROTO_JSON from './svga-proto'
 
+/** 合并两个可选的正数上限；0 表示该侧没有限制。 */
+const minPositive = (first: number, second: number): number => {
+  if (first > 0 && second > 0) return Math.min(first, second)
+  return first > 0 ? first : second > 0 ? second : 0
+}
+
 /**
  * 优化预设配置
  */
@@ -40,6 +46,10 @@ export interface OptimizationConfig {
     maxWidth: number
     /** 最大高度限制 (0 表示不限制) */
     maxHeight: number
+    /** 是否启用指定最大宽高；未保存该字段的旧工程沿用 resizeEnabled 的旧语义 */
+    sizeLimitEnabled?: boolean
+    /** 是否按当前导出画布自动限制纹理尺寸；只影响图片像素，不改变画布和图层坐标 */
+    autoResizeToCanvas?: boolean
     /** 是否去重相同图片 */
     deduplicate: boolean
   }
@@ -92,7 +102,7 @@ const makePreset = (id: string, name: string, description: string, pngColors: 0 
   id, name, description,
   config: {
     enabled: id !== 'none',
-    image: { format: 'png', quality: 85, pngColors, resizeEnabled: resizePercent < 100, resizePercent, maxWidth: 0, maxHeight: 0, deduplicate: false },
+    image: { format: 'png', quality: 85, pngColors, resizeEnabled: resizePercent < 100, resizePercent, maxWidth: 0, maxHeight: 0, autoResizeToCanvas: false, deduplicate: false },
     frames: { simplify: false, keyframeThreshold: 0.01, removeInvisible: false, precision: 6 },
     compression: { level: 9, useBestCompression: true }
   }
@@ -170,7 +180,8 @@ export class SVGAOptimizer {
   async optimize(
     buffer: ArrayBuffer,
     config: OptimizationConfig,
-    onProgress?: (completed: number, total: number) => void
+    onProgress?: (completed: number, total: number) => void,
+    canvasSize?: { width: number; height: number }
   ): Promise<Blob> {
     const startTime = performance.now()
     this.resetStats()
@@ -193,6 +204,7 @@ export class SVGAOptimizer {
       || ![0,64,128,256].includes(config.image.pngColors ?? 0)
       || !Number.isFinite(config.image.resizePercent) || config.image.resizePercent < 1 || config.image.resizePercent > 100
       || ![config.image.maxWidth, config.image.maxHeight].every(value => Number.isFinite(value) && value >= 0)
+      || (config.image.sizeLimitEnabled !== undefined && typeof config.image.sizeLimitEnabled !== 'boolean')
       || !Number.isInteger(config.compression.level) || config.compression.level < 1 || config.compression.level > 9) {
       throw new Error('压缩参数无效，请重新选择一个预设')
     }
@@ -226,7 +238,7 @@ export class SVGAOptimizer {
     // 3. 图片优化（包含去重和更新引用）
     // 直接修改 decodedMessage，不创建新对象
     if (config.image) {
-      await this.optimizeImages(decodedMessage, config.image, onProgress)
+      await this.optimizeImages(decodedMessage, config.image, onProgress, canvasSize)
     }
 
     // 4. 帧数据优化
@@ -269,13 +281,30 @@ export class SVGAOptimizer {
   private async optimizeImages(
     decodedMessage: any,
     config: OptimizationConfig['image'],
-    onProgress?: (completed: number, total: number) => void
+    onProgress?: (completed: number, total: number) => void,
+    canvasSize?: { width: number; height: number }
   ): Promise<void> {
     if (!decodedMessage.images) return
     if (config.deduplicate) this.deduplicateImagesWithReferences(decodedMessage)
     const audioKeys = new Set((decodedMessage.audios || []).map((audio: any) => audio.audioKey || audio.key))
     const keys = Object.keys(decodedMessage.images).filter(key => !audioKeys.has(key))
-    const scale = config.resizeEnabled ? Math.max(0.01, Math.min(1, config.resizePercent / 100)) : 1
+    const resizeByPercent = config.resizeEnabled
+      ? Math.max(0.01, Math.min(1, config.resizePercent / 100))
+      : 1
+    // 直接调用优化器时从 SVGA 自带 viewBox 读取画布；导出预览传入的尺寸优先。
+    const activeCanvasSize = canvasSize ?? {
+      width: decodedMessage.params?.viewBoxWidth,
+      height: decodedMessage.params?.viewBoxHeight
+    }
+    const hasCanvasSize = config.autoResizeToCanvas === true
+      && Number.isFinite(activeCanvasSize?.width) && Number.isFinite(activeCanvasSize?.height)
+      && (activeCanvasSize?.width ?? 0) > 0 && (activeCanvasSize?.height ?? 0) > 0
+    const sizeLimitEnabled = config.sizeLimitEnabled ?? config.resizeEnabled
+    const maxWidth = sizeLimitEnabled && config.maxWidth > 0 ? config.maxWidth : 0
+    const maxHeight = sizeLimitEnabled && config.maxHeight > 0 ? config.maxHeight : 0
+    const canvasMaxWidth = hasCanvasSize ? Math.max(1, Math.floor(activeCanvasSize!.width)) : 0
+    const canvasMaxHeight = hasCanvasSize ? Math.max(1, Math.floor(activeCanvasSize!.height)) : 0
+    const resizeRequested = config.resizeEnabled || sizeLimitEnabled || hasCanvasSize
     let completed = 0
     for (const key of keys) {
       let url: string | undefined
@@ -285,14 +314,17 @@ export class SVGAOptimizer {
         const mime = this.getImageMimeType(data)
         url = URL.createObjectURL(new Blob([new Uint8Array(data).buffer], { type: mime }))
         const result = await this.processImageWithScale(
-          url, config.quality / 100, scale,
+          url, config.quality / 100, resizeRequested ? resizeByPercent : 1,
           config.format === 'webp' || (config.format === 'auto' && mime === 'image/webp'),
-          config.resizeEnabled ? config.maxWidth : 0,
-          config.resizeEnabled ? config.maxHeight : 0,
+          minPositive(maxWidth, canvasMaxWidth),
+          minPositive(maxHeight, canvasMaxHeight),
           config.pngColors ?? 0
         )
         if (result.buffer.byteLength < data.byteLength) {
           decodedMessage.images[key] = new Uint8Array(result.buffer)
+          if (result.targetWidth < result.sourceWidth || result.targetHeight < result.sourceHeight) {
+            this.preserveImplicitFrameDisplaySizes(decodedMessage, key, result.sourceWidth, result.sourceHeight)
+          }
           this.stats.imagesOptimized++
         } else {
           this.stats.imagesSkipped++
@@ -308,7 +340,26 @@ export class SVGAOptimizer {
       // Give painting, progress and document-change checks a chance between textures.
       await new Promise<void>(resolve => setTimeout(resolve, 0))
     }
-    // Texture resolution is independent of layout, transforms, paths and viewBox.
+    // 纹理分辨率独立于显式布局、变换、路径和 viewBox。
+    // 仅在实际降采样后补齐缺失的布局尺寸，以保留渲染器原本的固有尺寸回退，不改写作者坐标。
+  }
+
+  /**
+   * 保留没有完整 layout 的帧的原始显示尺寸。
+   * SVGA 播放器在 layout 缺失时会使用图片固有尺寸；纹理降采样后若不补尺寸，画面会意外变小。
+   */
+  private preserveImplicitFrameDisplaySizes(decodedMessage: any, imageKey: string, width: number, height: number): void {
+    for (const sprite of decodedMessage.sprites || []) {
+      // 仅处理实际绘制该纹理的精灵；同一 Key 作为别的精灵遮罩时，不能把遮罩尺寸写到内容图层。
+      if (sprite.imageKey !== imageKey) continue
+      for (const frame of sprite.frames || []) {
+        if (!frame) continue
+        // protobufjs 的 Message 只编码已声明的自有字段；补建 layout 时必须创建正式消息实例。
+        if (!frame.layout) frame.layout = this.MovieEntity.root.lookupType('com.opensource.svga.Layout').create()
+        if (typeof frame.layout.width !== 'number' || frame.layout.width <= 0) frame.layout.width = width
+        if (typeof frame.layout.height !== 'number' || frame.layout.height <= 0) frame.layout.height = height
+      }
+    }
   }
   /**
    * 图片去重（同时更新 sprites 引用）
@@ -360,7 +411,7 @@ export class SVGAOptimizer {
   private async processImageWithScale(
     url: string, quality: number, scale: number, useWebP: boolean,
     maxWidth: number, maxHeight: number, pngColors: number = 0
-  ): Promise<{ buffer: ArrayBuffer; actualScale: number }> {
+  ): Promise<{ buffer: ArrayBuffer; actualScale: number; sourceWidth: number; sourceHeight: number; targetWidth: number; targetHeight: number }> {
     return new Promise((resolve, reject) => {
       const img = new Image()
       let canvas: HTMLCanvasElement | undefined
@@ -404,7 +455,7 @@ export class SVGAOptimizer {
           }
           if (settled) return
           settled = true; cleanup()
-          resolve({ buffer, actualScale: targetWidth / width })
+          resolve({ buffer, actualScale: targetWidth / width, sourceWidth: width, sourceHeight: height, targetWidth, targetHeight })
         } catch (error) { fail(error) }
       }
       img.onerror = () => fail(new Error('图片解码失败'))

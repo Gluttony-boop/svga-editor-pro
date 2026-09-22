@@ -40,6 +40,12 @@
     ],
     "fileAssociations": [
       {
+        "ext": ["svgaproj"],
+        "name": "SVGA Editor Project",
+        "description": "Editable SVGA Editor Project",
+        "role": "Editor"
+      },
+      {
         "ext": ["svga"],
         "name": "SVGA Animation",
         "description": "SVGA Animation File",

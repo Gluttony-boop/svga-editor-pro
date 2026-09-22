@@ -1,24 +1,23 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 /// SVGA 解析器
 /// 支持 SVGA 1.0 和 2.0 格式
-/// 
+///
 /// 文件格式:
 ///   bytes[0-3]: "SVGA" magic
 ///   byte[4]:    版本号 (0x01=无压缩, 0x02=zlib压缩)
 ///   bytes[5-7]: 保留 (0x00)
 ///   bytes[8..]: 压缩的 Protobuf 数据
-
 use flate2::read::ZlibDecoder;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 
 // 引入 protoc 生成的模块
 pub mod svga_proto {
     include!(concat!(env!("OUT_DIR"), "/com.opensource.svga.rs"));
 }
 
-use svga_proto::{MovieEntity, SpriteEntity, FrameEntity, Layout, Transform, ShapeEntity};
+use svga_proto::{FrameEntity, Layout, MovieEntity, ShapeEntity, SpriteEntity, Transform};
 
 // ==================== 前端传输结构 ====================
 
@@ -139,8 +138,15 @@ fn detect_image_mime_type(data: &[u8]) -> String {
         return "image/jpeg".to_string();
     }
     // WebP: RIFF....WEBP
-    if data.len() >= 12 && data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46
-        && data[8] == 0x57 && data[9] == 0x45 && data[10] == 0x42 && data[11] == 0x50
+    if data.len() >= 12
+        && data[0] == 0x52
+        && data[1] == 0x49
+        && data[2] == 0x46
+        && data[3] == 0x46
+        && data[8] == 0x57
+        && data[9] == 0x45
+        && data[10] == 0x42
+        && data[11] == 0x50
     {
         return "image/webp".to_string();
     }
@@ -172,11 +178,12 @@ fn decompress_svga(data: &[u8]) -> Result<Vec<u8>, String> {
                 // zlib 压缩
                 let mut decoder = ZlibDecoder::new(compressed_data);
                 let mut decompressed = Vec::new();
-                decoder.read_to_end(&mut decompressed)
+                decoder
+                    .read_to_end(&mut decompressed)
                     .map_err(|e| format!("zlib 解压失败: {}", e))?;
                 Ok(decompressed)
             }
-            _ => Err(format!("不支持的 SVGA 版本: {}", version))
+            _ => Err(format!("不支持的 SVGA 版本: {}", version)),
         }
     } else {
         // 无文件头，尝试直接解压
@@ -211,10 +218,13 @@ fn convert_layout(layout: &Layout) -> SvgaLayout {
 fn convert_transform(transform: &Transform) -> SvgaTransform {
     // 检查是否为默认值（全零或单位矩阵）
     // 单位矩阵: a=1, b=0, c=0, d=1, tx=0, ty=0
-    let is_identity = transform.a == 1.0 && transform.b == 0.0 
-        && transform.c == 0.0 && transform.d == 1.0 
-        && transform.tx == 0.0 && transform.ty == 0.0;
-    
+    let is_identity = transform.a == 1.0
+        && transform.b == 0.0
+        && transform.c == 0.0
+        && transform.d == 1.0
+        && transform.tx == 0.0
+        && transform.ty == 0.0;
+
     if is_identity {
         // 单位矩阵也传输，前端需要完整数据
         SvgaTransform {
@@ -317,12 +327,20 @@ pub fn parse_svga_data(buffer: &[u8]) -> Result<SvgaData, String> {
     for (key, data) in &movie.images {
         let mime_type = detect_image_mime_type(data);
         let b64 = BASE64.encode(data);
-        images.push(SvgaImage { key: key.clone(), data: b64 });
-        image_mime_types.push(SvgaMimeType { key: key.clone(), mime_type });
+        images.push(SvgaImage {
+            key: key.clone(),
+            data: b64,
+        });
+        image_mime_types.push(SvgaMimeType {
+            key: key.clone(),
+            mime_type,
+        });
     }
 
     // 4. 转换参数
-    let params = movie.params.as_ref()
+    let params = movie
+        .params
+        .as_ref()
         .map(|p| SvgaParams {
             view_box_width: p.view_box_width,
             view_box_height: p.view_box_height,
@@ -350,7 +368,6 @@ pub fn parse_svga_data(buffer: &[u8]) -> Result<SvgaData, String> {
 
 /// 从文件路径解析 SVGA
 pub fn parse_svga_file(path: &str) -> Result<SvgaData, String> {
-    let buffer = std::fs::read(path)
-        .map_err(|e| format!("读取文件失败: {}", e))?;
+    let buffer = std::fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
     parse_svga_data(&buffer)
 }

@@ -32,6 +32,8 @@ export {
 export type { Interpolator } from './animation-engine'
 export { SVGABuilder, svgaBuilder } from './svga-builder'
 export type { SVGABuildConfig } from './svga-builder'
+export { MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS, getCanvasSizeError, getCanvasSizeFromParams, replaceCanvasSize } from './canvas-size'
+export { TextPreviewCache, hasTextPreview, normalizeTextConfig, getTextPreviewSize } from './text-preview'
 export { 
   SVGAOptimizer, 
   svgaOptimizer, 
@@ -46,3 +48,7 @@ export type {
 
 // 音频管理
 export { AudioManager, audioManager } from './audio-manager'
+export { durationSeconds, evaluateLicense, validateLeaseClaims } from './license-policy'
+export type { LicenseEvaluation, LicenseEvaluationInput, LicenseExpectation, LicenseState, LeaseClaims } from './license-policy'
+export { LicenseClient } from './license-client'
+export type { LicenseStorage, LicenseTransport, LeaseVerifier, LicenseClientOptions, StoredLicense } from './license-client'

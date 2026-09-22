@@ -35,6 +35,10 @@ import {
   type AnimationValue, type KeyframeEditResult
 } from '@/core/keyframe-editing'
 import { getLayerSourceFrame } from '@/core/layer-time'
+import { getCanvasSizeError, replaceCanvasSize } from '@/core/canvas-size'
+import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
+import type { ProjectDocument } from '@/types/project'
+import { previewFileName } from '@/utils/preview-view'
 
 interface EditorSnapshot {
   videoItem: VideoItem | null
@@ -73,6 +77,9 @@ interface EditorStore {
   sourceType: 'url' | 'file' | null
   videoItem: VideoItem | null
   originalBuffer: ArrayBuffer | null
+  projectName: string | null
+  projectFilePath: string | null
+  // 表示工程编辑数据尚未保存；导出 SVGA 不等于保存可继续编辑的工程。
   isDirty: boolean
 
   // 动画参数
@@ -123,12 +130,18 @@ interface EditorStore {
   canUndo: boolean
   canRedo: boolean
   isCanvasTransforming: boolean
+  isSlotConfigEditing: boolean
 
   // Actions
   setVideoItem: (videoItem: VideoItem | null) => void
   setSource: (source: string | null, type: 'url' | 'file' | null) => void
   setOriginalBuffer: (buffer: ArrayBuffer | null) => void
+  captureProjectDocument: () => ProjectDocument
+  captureProjectRecovery: () => ProjectDocument | null
+  restoreProjectDocument: (document: ProjectDocument, filePath: string | null, displayName: string) => void
+  markProjectSaved: (expectedInputs: readonly unknown[], filePath: string | null, displayName: string) => boolean
   setParams: (params: MovieParams | null) => void
+  setCanvasSize: (width: number, height: number) => { changed: boolean; error?: string }
   setCustomFps: (fps: number | null) => void
   setCustomFrames: (frames: number | null) => void
   
@@ -169,6 +182,9 @@ interface EditorStore {
   // 插槽操作
   setSlotConfig: (key: string, config: SlotConfig) => void
   removeSlotConfig: (key: string) => void
+  beginSlotConfigEdit: (key: string) => boolean
+  previewSlotConfig: (key: string, config: SlotConfig) => void
+  endSlotConfigEdit: (commit: boolean) => void
   setDetectedSlots: (slots: string[]) => void
 
   // 播放控制
@@ -301,8 +317,8 @@ const cloneLayer = (layer: Layer): Layer => ({
         ...layer.sprites,
         frames: layer.sprites.frames.map((frame) => ({
           ...frame,
-          layout: frame.layout ? { ...frame.layout } : null,
-          transform: { ...frame.transform },
+          layout: frame.layout ? { ...frame.layout } : frame.layout,
+          transform: frame.transform ? { ...frame.transform } : frame.transform,
           shapes: frame.shapes ? structuredClone(frame.shapes) : undefined
         }))
       }
@@ -347,6 +363,47 @@ const cloneOptimizationConfig = (config: OptimizationConfig): OptimizationConfig
 })
 
 const cloneCompressionConfig = (config: CompressionConfig): CompressionConfig => ({ ...config })
+
+/** 工程保留来源名称，但不把本地目录、带鉴权参数的 URL 或临时 Blob 地址写入工程名。 */
+const projectBaseName = (source: string | null, fallback = '未命名动画'): string => {
+  if (!source || /^(blob|data):/i.test(source)) return fallback
+  if (/^https?:\/\//i.test(source)) {
+    try { new URL(source) } catch { return fallback }
+  }
+  const name = previewFileName(source).replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, '_').trim()
+  return name && name !== '.' && name !== '..' ? name : fallback
+}
+
+/** HTMLImageElement 仅供预览共享；可修改的帧数据与字节必须与异步保存任务隔离。 */
+const cloneProjectVideo = (videoItem: VideoItem): VideoItem => ({
+  movie: structuredClone(videoItem.movie),
+  images: { ...videoItem.images },
+  buffers: Object.fromEntries(Object.entries(videoItem.buffers).map(([key, buffer]) => [key, buffer.slice(0)]))
+})
+
+/** 纯快照构建器：手动保存和后台恢复共享数据格式，但不共享提交输入或暂停播放的副作用。 */
+const captureProjectState = (state: EditorStore): ProjectDocument | null => {
+  if (!state.videoItem || !state.params || !state.originalBuffer) return null
+  return {
+    formatVersion: 1,
+    name: projectBaseName(state.currentSource),
+    originalBuffer: state.originalBuffer.slice(0),
+    videoItem: cloneProjectVideo(state.videoItem),
+    params: { ...state.params },
+    customFps: state.customFps,
+    customFrames: state.customFrames,
+    layers: state.layers.map(cloneLayer),
+    imageResources: cloneImageResources(state.imageResources),
+    audioResources: cloneAudioResources(state.audioResources),
+    slotConfigs: cloneSlotConfigs(state.slotConfigs),
+    detectedSlots: [...state.detectedSlots],
+    compressionConfig: cloneCompressionConfig(state.compressionConfig),
+    optimizationConfig: cloneOptimizationConfig(state.optimizationConfig),
+    selectedPresetId: state.selectedPresetId,
+    currentFrame: state.playback.currentFrame,
+    ...selectionForLayers(getSelectedLayerIds(state), state.layers)
+  }
+}
 
 const createSnapshot = (state: EditorStore): EditorSnapshot => ({
   // 原始解码资源按不可变引用共享；重命名会替换 videoItem，撤回时须一同恢复资源键。
@@ -397,6 +454,15 @@ export const useEditorStore = create<EditorStore>()(
       originalLayers: Layer[]; latestLayers: Layer[]; dirty: boolean
       mode: 'whole' | 'keyframe'; outputFrame: number
     } | null = null
+    let slotEdit: {
+      before: EditorSnapshot
+      key: string
+      video: VideoItem
+      buffer: ArrayBuffer | null
+      originalSlotConfigs: Record<string, SlotConfig>
+      latestSlotConfigs: Record<string, SlotConfig>
+      dirty: boolean
+    } | null = null
     const applySnapshot = (snapshot: EditorSnapshot, history: EditorHistoryState, current: EditorSnapshot) => {
       const sameDocument = isSameDocumentSnapshot(current, snapshot)
       set((state) => {
@@ -435,6 +501,7 @@ export const useEditorStore = create<EditorStore>()(
           playback: samePlayback ? state.playback : { ...state.playback, isPlaying: false, totalFrames, fps, currentFrame },
           isDirty: sameDocument ? state.isDirty : true,
           isCanvasTransforming: false,
+          isSlotConfigEditing: false,
           history,
           canUndo: Boolean(history.timelineSnapshot) || history.past.length > 0,
           canRedo: !history.timelineSnapshot && history.future.length > 0
@@ -463,7 +530,52 @@ export const useEditorStore = create<EditorStore>()(
       })
     }
 
+    const ownSlotConfig = (configs: Record<string, SlotConfig>, key: string) =>
+      Object.prototype.hasOwnProperty.call(configs, key) ? configs[key] : undefined
+    const slotConfigSignature = (config: SlotConfig | undefined) => {
+      if (!config) return 'null'
+      const sortedFields = (fields: object | undefined) => fields
+        ? Object.entries(fields).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)) : null
+      return JSON.stringify([config.type, config.name, config.value, sortedFields(config.imageConfig), sortedFields(config.textConfig)])
+    }
+
+    const isKnownSlotKey = (state: EditorStore, key: string) => {
+      if (!key || !state.videoItem) return false
+      if (Object.prototype.hasOwnProperty.call(state.slotConfigs, key)) return true
+      if (state.detectedSlots.includes(key)) return true
+      if (state.imageResources.has(key)) return true
+      if (state.videoItem.images && Object.prototype.hasOwnProperty.call(state.videoItem.images, key)) return true
+      if (state.videoItem.buffers && Object.prototype.hasOwnProperty.call(state.videoItem.buffers, key)) return true
+      if (Object.prototype.hasOwnProperty.call(state.videoItem.movie.images || {}, key)) return true
+      return state.layers.some(layer => layer.imageKey === key)
+        || state.videoItem.movie.sprites.some(sprite => sprite.imageKey === key || sprite.matteKey === key)
+    }
+
+    // 文本面板的输入只在失焦时写入一次历史；期间所有预览均属于可取消草稿。
+    const finishSlotConfigEdit = (commit: boolean) => {
+      const edit = slotEdit
+      if (!edit) return
+      slotEdit = null
+      const state = get()
+      if (state.videoItem !== edit.video || state.originalBuffer !== edit.buffer
+        || state.slotConfigs !== edit.latestSlotConfigs) {
+        set({ isSlotConfigEditing: false })
+        return
+      }
+
+      const changed = slotConfigSignature(ownSlotConfig(state.slotConfigs, edit.key))
+        !== slotConfigSignature(ownSlotConfig(edit.before.slotConfigs, edit.key))
+      if (!commit || !changed) {
+        set({ slotConfigs: edit.originalSlotConfigs, isDirty: edit.dirty, isSlotConfigEditing: false })
+        return
+      }
+
+      set({ isDirty: true, isSlotConfigEditing: false })
+      pushHistory(edit.before, `模拟文字：${edit.key}`)
+    }
+
     const withHistory = (updater: Parameters<typeof set>[0], label?: string) => {
+      finishSlotConfigEdit(true)
       finishCanvasEdit(true)
       const state = get()
       const before = createSnapshot(state)
@@ -496,6 +608,7 @@ export const useEditorStore = create<EditorStore>()(
     }
 
     const clearHistoryState = () => {
+      finishSlotConfigEdit(true)
       finishCanvasEdit(true)
       set((state) => ({
         history: {
@@ -512,6 +625,7 @@ export const useEditorStore = create<EditorStore>()(
       const initial = get()
       const total = initial.history.past.length + initial.history.future.length
       if (!Number.isInteger(index) || index < 0 || index > total) return
+      finishSlotConfigEdit(false)
       finishCanvasEdit(false)
       const state = get()
       const history = state.history
@@ -556,6 +670,8 @@ export const useEditorStore = create<EditorStore>()(
     sourceType: null,
     videoItem: null,
     originalBuffer: null,
+    projectName: null,
+    projectFilePath: null,
     isDirty: false,
 
     params: null,
@@ -602,6 +718,7 @@ export const useEditorStore = create<EditorStore>()(
     canUndo: false,
     canRedo: false,
     isCanvasTransforming: false,
+    isSlotConfigEditing: false,
     canvasKeepRatio: true,
     transformEditMode: 'whole',
 
@@ -610,9 +727,12 @@ export const useEditorStore = create<EditorStore>()(
       const previous = get()
       if (videoItem === previous.videoItem) return
       canvasEdit = null
+      // 切换文件后，旧面板事件不得把草稿写回新文件。
+      slotEdit = null
       const params = videoItem?.movie.params ?? null
       set({
-        videoItem, isDirty: false, isCanvasTransforming: false,
+        videoItem, isDirty: false, isCanvasTransforming: false, isSlotConfigEditing: false,
+        projectName: null, projectFilePath: null,
         originalBuffer: null, params, customFps: null, customFrames: null,
         layers: [], imageResources: new Map<string, ImageResource>(),
         audioResources: new Map<string, AudioResource>(), slotConfigs: {}, detectedSlots: [],
@@ -697,8 +817,93 @@ export const useEditorStore = create<EditorStore>()(
       set({ originalBuffer: buffer })
     },
 
+    captureProjectDocument: () => {
+      finishSlotConfigEdit(true)
+      finishCanvasEdit(true)
+      get().setPlaying(false)
+      // 暂停回调会同步真实绘制帧，必须在暂停后获取文档与游标。
+      const document = captureProjectState(get())
+      if (!document) {
+        throw new Error('工程数据不完整，请先打开一个有效的 SVGA 文件。')
+      }
+      return document
+    },
+
+    captureProjectRecovery: () => {
+      const state = get()
+      // 草稿可能随后被 Esc 取消；自动恢复不能擅自提交草稿、打断手势或暂停动画。
+      if (state.isCanvasTransforming || state.isSlotConfigEditing) return null
+      return captureProjectState(state)
+    },
+
+    restoreProjectDocument: (document, filePath, displayName) => {
+      // 解码、校验和图片水化完成后才进入此方法；构建新状态期间不触碰正在编辑的文件。
+      const previous = get()
+      const layers = document.layers.map(cloneLayer)
+      const selection = selectionForLayers(document.selectedLayerIds, layers)
+      if (document.selectedLayerId && layers.some(layer => layer.id === document.selectedLayerId)) {
+        selection.selectedLayerIds = [...selection.selectedLayerIds.filter(id => id !== document.selectedLayerId), document.selectedLayerId]
+        selection.selectedLayerId = document.selectedLayerId
+      }
+      const totalFrames = document.customFrames ?? document.params.frames
+      const fps = document.customFps ?? document.params.fps
+      const currentFrame = Math.max(0, Math.min(Number.isFinite(document.currentFrame) ? Math.floor(document.currentFrame) : 0, Math.max(0, totalFrames - 1)))
+      const restored = {
+        currentSource: projectBaseName(document.name),
+        // 工程中的来源只有名称，不能当作可覆盖的原始 SVGA 路径。
+        sourceType: null,
+        projectName: projectBaseName(displayName, '未命名工程.svgaproj'),
+        projectFilePath: filePath,
+        // 每次打开均建立新文档引用，旧文件的异步保存和草稿回调不能命中新文件。
+        videoItem: cloneProjectVideo(document.videoItem),
+        originalBuffer: document.originalBuffer.slice(0),
+        params: { ...document.params },
+        customFps: document.customFps,
+        customFrames: document.customFrames,
+        layers,
+        ...selection,
+        imageResources: cloneImageResources(document.imageResources),
+        audioResources: cloneAudioResources(document.audioResources),
+        slotConfigs: cloneSlotConfigs(document.slotConfigs),
+        detectedSlots: [...document.detectedSlots],
+        compressionConfig: cloneCompressionConfig(document.compressionConfig),
+        optimizationConfig: cloneOptimizationConfig(document.optimizationConfig),
+        selectedPresetId: document.selectedPresetId,
+        optimizationStats: null,
+        playback: { ...previous.playback, isPlaying: false, totalFrames, fps, currentFrame },
+        keyframes: [],
+        selectedKeyframeIds: [],
+        isDirty: false,
+        isCanvasTransforming: false,
+        isSlotConfigEditing: false,
+        canUndo: false,
+        canRedo: false
+      }
+      const snapshot = createSnapshot({ ...previous, ...restored })
+      canvasEdit = null
+      slotEdit = null
+      set({
+        ...restored,
+        history: {
+          past: [], future: [], maxDepth: previous.history.maxDepth, isApplyingHistory: false,
+          baseLabel: '打开工程', snapshots: [{ id: uuid(), name: '打开工程', snapshot }],
+          activeSnapshotId: null, timelineSnapshot: null
+        }
+      })
+    },
+
+    markProjectSaved: (expectedInputs, filePath, displayName) => {
+      const state = get()
+      if (!state.videoItem || !state.params || !state.originalBuffer
+        || !sameExportInputs(expectedInputs, captureExportInputs(state))) return false
+      // 新手势还未修改数据时也不结束用户输入；避免取消草稿恢复旧的 dirty 标记。
+      if (canvasEdit || slotEdit) return false
+      set({ isDirty: false, projectName: projectBaseName(displayName, '未命名工程.svgaproj'), projectFilePath: filePath })
+      return true
+    },
+
     setParams: (params) => {
-      withHistory({ params }, '修改动画参数')
+      withHistory({ params, isDirty: true }, '修改动画参数')
       if (params) {
         set({
           playback: {
@@ -708,6 +913,28 @@ export const useEditorStore = create<EditorStore>()(
           }
         })
       }
+    },
+
+    setCanvasSize: (width, height) => {
+      const size = { width, height }
+      const error = getCanvasSizeError(size)
+      if (error) return { changed: false, error }
+      const current = get()
+      if (!current.params || !current.videoItem) return { changed: false, error: '请先打开 SVGA 文件。' }
+      if (current.params.viewBoxWidth === width && current.params.viewBoxHeight === height) return { changed: false }
+
+      finishCanvasEdit(true)
+      get().setPlaying(false)
+      const state = get()
+      if (!state.params || !state.videoItem) return { changed: false, error: '当前文件已关闭。' }
+      const nextParams = replaceCanvasSize(state.params, size)
+      // 渲染器、手柄命中与画布排版都读取 movie.params；不可原地改共享对象，否则污染撤销快照。
+      const nextVideoItem = {
+        ...state.videoItem,
+        movie: { ...state.videoItem.movie, params: replaceCanvasSize(state.videoItem.movie.params, size) }
+      }
+      withHistory({ params: nextParams, videoItem: nextVideoItem, isDirty: true }, `修改画布尺寸：${width} × ${height}`)
+      return { changed: true }
     },
 
     setCustomFps: (fps) => {
@@ -765,6 +992,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     beginCanvasTransforms: (layerIds) => {
+      finishSlotConfigEdit(true)
       finishCanvasEdit(true)
       let state = get()
       const ids = [...new Set(layerIds)]
@@ -833,7 +1061,12 @@ export const useEditorStore = create<EditorStore>()(
       set({ layers, isDirty: true })
     },
 
-    endCanvasTransform: finishCanvasEdit,
+    endCanvasTransform: (commit) => {
+      // 既有保存/导出入口会调用此方法，必须先收束当前文字草稿。
+      // 画布自身的取消/卸载不得连带取消另一个面板的输入。
+      if (commit) finishSlotConfigEdit(true)
+      finishCanvasEdit(commit)
+    },
 
     arrangeLayers: (operation, target) => {
       finishCanvasEdit(true)
@@ -1137,6 +1370,59 @@ export const useEditorStore = create<EditorStore>()(
         const { [key]: _, ...rest } = state.slotConfigs
         return { slotConfigs: rest, isDirty: true }
       }, `清除素材替换：${key}`)
+    },
+
+    beginSlotConfigEdit: (key) => {
+      const current = get()
+      if (!isKnownSlotKey(current, key)) return false
+      const active = slotEdit
+      if (active && active.key === key && current.videoItem === active.video
+        && current.originalBuffer === active.buffer && current.slotConfigs === active.latestSlotConfigs) return true
+      // 文本预览与画布拖动共用“单一活动事务”，切换工具时先提交上一个草稿。
+      finishSlotConfigEdit(true)
+      finishCanvasEdit(true)
+      const state = get()
+      if (!isKnownSlotKey(state, key)) return false
+      slotEdit = {
+        before: createSnapshot(state),
+        key,
+        video: state.videoItem!,
+        buffer: state.originalBuffer,
+        originalSlotConfigs: state.slotConfigs,
+        latestSlotConfigs: state.slotConfigs,
+        dirty: state.isDirty
+      }
+      set({ isSlotConfigEditing: true })
+      return true
+    },
+
+    previewSlotConfig: (key, config) => {
+      const edit = slotEdit
+      if (!edit || edit.key !== key) return
+      const state = get()
+      // 文件、原始缓冲区或配置引用发生变化时，当前回调已过期，直接丢弃。
+      if (state.videoItem !== edit.video || state.originalBuffer !== edit.buffer
+        || state.slotConfigs !== edit.latestSlotConfigs || !isKnownSlotKey(state, key)) {
+        slotEdit = null
+        set({ isSlotConfigEditing: false })
+        return
+      }
+      if (config.name !== key || (config.type !== 'image' && config.type !== 'text')) return
+      const nextConfig: SlotConfig = {
+        ...config,
+        imageConfig: config.imageConfig ? { ...config.imageConfig } : undefined,
+        textConfig: config.textConfig ? { ...config.textConfig } : undefined
+      }
+      const previous = ownSlotConfig(state.slotConfigs, key)
+      if (slotConfigSignature(previous) === slotConfigSignature(nextConfig)) return
+      const slotConfigs = { ...state.slotConfigs, [key]: nextConfig }
+      edit.latestSlotConfigs = slotConfigs
+      const changed = slotConfigSignature(nextConfig) !== slotConfigSignature(ownSlotConfig(edit.before.slotConfigs, key))
+      set({ slotConfigs, isDirty: changed ? true : edit.dirty, isSlotConfigEditing: true })
+    },
+
+    endSlotConfigEdit: (commit) => {
+      finishSlotConfigEdit(commit)
     },
 
     setDetectedSlots: (slots) => {
@@ -1501,12 +1787,14 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     undo: () => {
+      if (slotEdit) { finishSlotConfigEdit(false); return }
       if (canvasEdit) { finishCanvasEdit(false); return }
       const { history } = get()
       moveToHistory(history.past.length - (history.timelineSnapshot ? 0 : 1))
     },
 
     redo: () => {
+      if (slotEdit) { finishSlotConfigEdit(false); return }
       if (canvasEdit) { finishCanvasEdit(false); return }
       const { history } = get()
       if (!history.timelineSnapshot) moveToHistory(history.past.length + 1)
@@ -1521,6 +1809,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     initializeHistory: () => {
+      finishSlotConfigEdit(false)
       finishCanvasEdit(false)
       const state = get()
       set({
@@ -1534,6 +1823,7 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     createHistorySnapshot: (name) => {
+      finishSlotConfigEdit(true)
       finishCanvasEdit(true)
       const state = get()
       const snapshots = state.history.snapshots ?? []
@@ -1549,6 +1839,7 @@ export const useEditorStore = create<EditorStore>()(
 
     restoreHistorySnapshot: (id) => {
       if (!get().history.snapshots?.some(snapshot => snapshot.id === id)) return
+      finishSlotConfigEdit(false)
       finishCanvasEdit(false)
       const state = get()
       const entry = state.history.snapshots?.find(snapshot => snapshot.id === id)
@@ -1582,6 +1873,10 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     commitHistory: (label) => {
+      const hadActiveEdit = Boolean(slotEdit || canvasEdit)
+      finishSlotConfigEdit(true)
+      finishCanvasEdit(true)
+      if (hadActiveEdit) return
       const state = get()
       const snapshot = createSnapshot(state)
       const previous = state.history.past[state.history.past.length - 1]?.snapshot
@@ -1594,13 +1889,17 @@ export const useEditorStore = create<EditorStore>()(
     // 重置
     reset: () => {
       canvasEdit = null
+      slotEdit = null
       set({
         isCanvasTransforming: false,
+        isSlotConfigEditing: false,
         canvasKeepRatio: true,
         currentSource: null,
         sourceType: null,
         videoItem: null,
         originalBuffer: null,
+        projectName: null,
+        projectFilePath: null,
         isDirty: false,
         params: null,
         customFps: null,

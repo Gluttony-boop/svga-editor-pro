@@ -14,6 +14,8 @@ import type { RenderOptions } from './renderer'
 import { applyLayerFrameEdits, getFrameAlpha, getFrameTransform, getLayerBaseFrame, getOriginalLayerIndex } from './layer-transform'
 import { RendererImageCache } from './renderer-images'
 import { getLayerSourceFrame, getLayerTimeOffset } from './layer-time'
+import { TextPreviewCache, applyTextFrameLayout, getTextPreviewSize, hasTextBox, hasTextPreview } from './text-preview'
+import { getActiveMatteKeys } from './renderer-matte'
 
 export type { RenderOptions } from './renderer'
 
@@ -73,6 +75,10 @@ export class HighPerformanceRenderer {
 
   // 插槽图片缓存
   private liveImages = new RendererImageCache(() => this.clearFrameCache())
+  private textPreview = new TextPreviewCache()
+  private activeSlotConfigs: Record<string, SlotConfig> = {}
+  private applySlotPreviews = true
+  private previewImageSizes: RenderOptions['imageResources']
   private videoGeneration = 0
 
   // 预计算的关键帧索引（二分查找加速）
@@ -82,6 +88,7 @@ export class HighPerformanceRenderer {
   private precomputedFrames: Map<number, PrecomputedSprite[]> = new Map()
   private precomputedLayerFrames: Map<number, Map<number, PrecomputedSprite>> = new Map()
   private referencedMatteKeys: Set<string> = new Set()
+  private activeMatteKeys: Set<string> = new Set()
 
   // 图层状态缓存，播放时避免每帧重建 Map
   private layerStates: Array<LayerRenderState | undefined> = []
@@ -148,6 +155,8 @@ export class HighPerformanceRenderer {
     this.videoItem = videoItem
     this.params = null
     this.liveImages.clear()
+    this.textPreview.clear()
+    this.activeSlotConfigs = {}
     this.frameCache.clear()
     this.lastRenderSignature = ''
     this.layerStates = []
@@ -324,7 +333,7 @@ export class HighPerformanceRenderer {
       const sprite = sprites[spriteIndex]
       const { imageKey, frames } = sprite
       if (!frames || frames.length === 0) continue
-      if (!this.imageCache.has(imageKey) && !this.imageBitmapCache.has(imageKey) && !frames.some(frame => frame.shapes?.length)) continue
+      // 无位图的动态插槽也保留帧索引，文字模拟或后续图片替换可提供实际内容。
       const layerFrames = new Map<number, PrecomputedSprite>()
       this.precomputedLayerFrames.set(spriteIndex, layerFrames)
 
@@ -423,6 +432,10 @@ export class HighPerformanceRenderer {
       layers = [],
       useFrameCache = true
     } = options
+    this.activeSlotConfigs = slotConfigs
+    this.applySlotPreviews = applySlots
+    this.activeMatteKeys = getActiveMatteKeys(this.videoItem, options.layers)
+    this.previewImageSizes = options.imageResources
 
     if (!this.videoItem || !this.params || options.shouldRender?.() === false) return
     const shouldUseCache = this.cacheEnabled && useFrameCache
@@ -484,10 +497,10 @@ export class HighPerformanceRenderer {
       if (!layer.isNew || !layer.visible || !layer.imageKey) continue
       const frame = getLayerBaseFrame(layer, frameIndex, this.videoItem, options.imageResources)
       if (!frame || (frame.alpha ?? 1) <= 0) continue
-      const img = this.getImage(layer.imageKey)
+      const img = this.withTextPreview(layer.imageKey, this.getImage(layer.imageKey), frame.layout)
       if (!img) continue
-      const edited = applyLayerFrameEdits(frame, layer, frameIndex, this.getDrawSize(img, frame.layout))
-      this.renderSpriteToCtx(this.ctx, img, edited, getFrameAlpha(edited))
+      const edited = applyLayerFrameEdits(frame, layer, frameIndex, this.textSourceSize(layer.imageKey, frame.layout, img))
+      this.renderSpriteToCtx(this.ctx, img, this.withTextFrame(layer.imageKey, edited), getFrameAlpha(edited))
       this.metrics.spriteCount++
     }
 
@@ -526,7 +539,7 @@ export class HighPerformanceRenderer {
   ): void {
     let spriteCount = 0
     // 纯遮罩身份来自全局引用，不能因为关联内容本帧未出现就把遮罩画到画布。
-    const matteLayerKeys = this.referencedMatteKeys
+    const matteLayerKeys = this.activeMatteKeys
 
     if (matteLayerKeys.size === 0) {
       for (const sprite of frameSprites) {
@@ -575,18 +588,20 @@ export class HighPerformanceRenderer {
     if (layerState?.visible === false) return false
 
     // 获取图片
-    const img = this.getImage(layerState?.layer.imageKey || sprite.imageKey, sprite.imageKey) || (sprite.frame.shapes?.length ? this.canvas : null)
+    const imageKey = layerState?.layer.imageKey || sprite.imageKey
+    const img = this.withTextPreview(imageKey, this.getImage(imageKey, sprite.imageKey) || (sprite.frame.shapes?.length ? this.canvas : null), sprite.frame.layout)
     if (!img) return false
 
     const editedSprite = {
       ...sprite,
-      frame: layerState ? applyLayerFrameEdits(sprite.frame, layerState.layer, frameIndex, this.getDrawSize(img, sprite.frame.layout)) : sprite.frame
+      frame: this.withTextFrame(imageKey, layerState ? applyLayerFrameEdits(sprite.frame, layerState.layer, frameIndex, this.textSourceSize(imageKey, sprite.frame.layout, img)) : sprite.frame)
     }
     const finalAlpha = getFrameAlpha(editedSprite.frame)
     if (finalAlpha <= 0) return false
 
     const matteState = layerStates[matteSprite.spriteIndex]
-    const matteImg = this.getImage(matteState?.layer.imageKey || matteSprite.imageKey, matteSprite.imageKey) || (matteSprite.frame.shapes?.length ? this.canvas : null)
+    const matteKey = matteState?.layer.imageKey || matteSprite.imageKey
+    const matteImg = this.withTextPreview(matteKey, this.getImage(matteKey, matteSprite.imageKey) || (matteSprite.frame.shapes?.length ? this.canvas : null), matteSprite.frame.layout)
     // 缺失或时间范围外的遮罩是透明结果，不能退回未遮罩的内容。
     if (!matteImg) return false
 
@@ -604,7 +619,7 @@ export class HighPerformanceRenderer {
     // 应用遮罩
     offCtx.save()
     offCtx.globalCompositeOperation = 'destination-in'
-    const matteFrame = matteState ? applyLayerFrameEdits(matteSprite.frame, matteState.layer, frameIndex, this.getDrawSize(matteImg, matteSprite.frame.layout)) : matteSprite.frame
+    const matteFrame = matteState ? applyLayerFrameEdits(matteSprite.frame, matteState.layer, frameIndex, this.textSourceSize(matteKey, matteSprite.frame.layout, matteImg)) : matteSprite.frame
     const matteAlpha = getFrameAlpha(matteFrame)
     this.renderSpriteToCtx(offCtx, matteImg, matteFrame, matteAlpha)
     offCtx.restore()
@@ -627,10 +642,11 @@ export class HighPerformanceRenderer {
     const layerState = layerStates[sprite.spriteIndex]
     if (layerState?.visible === false) return false
 
-    const img = this.getImage(layerState?.layer.imageKey || sprite.imageKey, sprite.imageKey) || (sprite.frame.shapes?.length ? this.canvas : null)
+    const imageKey = layerState?.layer.imageKey || sprite.imageKey
+    const img = this.withTextPreview(imageKey, this.getImage(imageKey, sprite.imageKey) || (sprite.frame.shapes?.length ? this.canvas : null), sprite.frame.layout)
     if (!img) return false
 
-    const editedFrame = layerState ? applyLayerFrameEdits(sprite.frame, layerState.layer, frameIndex, this.getDrawSize(img, sprite.frame.layout)) : sprite.frame
+    const editedFrame = this.withTextFrame(imageKey, layerState ? applyLayerFrameEdits(sprite.frame, layerState.layer, frameIndex, this.textSourceSize(imageKey, sprite.frame.layout, img)) : sprite.frame)
     const finalAlpha = getFrameAlpha(editedFrame)
     if (finalAlpha <= 0) return false
     this.renderSprite(editedFrame === sprite.frame ? sprite : { ...sprite, frame: editedFrame }, this.ctx, img, finalAlpha)
@@ -724,6 +740,30 @@ export class HighPerformanceRenderer {
 
     if (fallbackKey && fallbackKey !== imageKey) return this.getImage(fallbackKey)
     return null
+  }
+
+  private withTextPreview(key: string, image: CanvasImageSource | null, layout: FrameData['layout']): CanvasImageSource | null {
+    const slot = Object.prototype.hasOwnProperty.call(this.activeSlotConfigs, key) ? this.activeSlotConfigs[key] : undefined
+    if (!this.applySlotPreviews || (!hasTextPreview(slot) && !hasTextBox(slot)) || this.activeMatteKeys.has(key) || /\.(matte|vector)$/i.test(key)) return image
+    return this.textPreview.compose(key, slot, image, this.textSourceSize(key, layout))
+  }
+
+  private textSourceSize(key: string, layout: FrameData['layout'], fallback?: CanvasImageSource) {
+    const source = this.previewImageSizes?.get(key) || this.imageCache.get(key)
+      || (Object.prototype.hasOwnProperty.call(this.videoItem?.images || {}, key) ? this.videoItem?.images[key] : undefined)
+    const original = getTextPreviewSize(null, source)
+    const config = Object.prototype.hasOwnProperty.call(this.activeSlotConfigs, key) ? this.activeSlotConfigs[key].textConfig : undefined
+    const backup = getTextPreviewSize(null, fallback as HTMLImageElement | undefined)
+    return getTextPreviewSize(layout, {
+      width: original.width > 0 ? original.width : config?.referenceWidth ?? backup.width,
+      height: original.height > 0 ? original.height : config?.referenceHeight ?? backup.height
+    })
+  }
+
+  private withTextFrame(key: string, frame: FrameData): FrameData {
+    if (!this.applySlotPreviews || this.activeMatteKeys.has(key) || /\.(matte|vector)$/i.test(key) || frame.shapes?.length) return frame
+    const slot = Object.prototype.hasOwnProperty.call(this.activeSlotConfigs, key) ? this.activeSlotConfigs[key] : undefined
+    return applyTextFrameLayout(frame, slot, this.textSourceSize(key, frame.layout))
   }
 
   /**
@@ -951,7 +991,7 @@ export class HighPerformanceRenderer {
         slot.value ?? '',
         slot.imageConfig?.url ?? '',
         slot.imageConfig?.scaleMode ?? '',
-        slot.textConfig?.text ?? ''
+        JSON.stringify(slot.textConfig || null)
       ].join(':'))
       .sort()
       .join('|')
@@ -1006,6 +1046,8 @@ export class HighPerformanceRenderer {
   clearAllCaches(): void {
     this.clearFrameCache()
     this.liveImages.clear()
+    this.textPreview.clear()
+    this.activeSlotConfigs = {}
     this.precomputedFrames.clear()
     this.precomputedLayerFrames.clear()
     this.referencedMatteKeys.clear()
