@@ -15,12 +15,16 @@
   </head>
   <body>
     <h1>SVGA Editor MCP</h1>
-    <label for="endpoint">MCP 地址</label>
-    <input id="endpoint" value="http://127.0.0.1:5174/mcp" spellcheck="false">
-    <label for="token">令牌</label>
-    <input id="token" type="password" autocomplete="off" spellcheck="false">
-    <button id="connect">保存并连接</button>
-    <button id="refresh" class="secondary">读取工具列表</button>
+    <button id="connect">自动连接本机编辑器</button>
+    <button id="refresh" class="secondary">刷新工具列表</button>
+    <details>
+      <summary>高级设置（手动地址/令牌）</summary>
+      <label for="endpoint">MCP 地址</label>
+      <input id="endpoint" value="http://127.0.0.1:5174/mcp" spellcheck="false">
+      <label for="token">令牌</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false">
+      <button id="manual" class="secondary">保存手动配置</button>
+    </details>
     <label for="tool">工具</label>
     <select id="tool"></select>
     <label for="arguments">参数 JSON</label>

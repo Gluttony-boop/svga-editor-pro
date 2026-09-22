@@ -39,8 +39,13 @@
 
   const send = message => new Promise(resolve => chrome.runtime.sendMessage(message, resolve))
   const loadTools = async () => {
+    result.textContent = '正在自动连接本机 SVGA 编辑器...'
+    const discovered = await send({ type: 'mcp:discover' })
+    if (!discovered?.ok) { result.textContent = '未发现编辑器。请打开 SVGA 编辑器，并在“关于”中开启 AI / MCP。'; return }
+    if (discovered.status?.enabled === false) { result.textContent = '已发现编辑器，但 AI / MCP 开关尚未打开。'; return }
+    if (discovered.status?.editorConnected === false) { result.textContent = '已发现网页服务，但编辑器页面尚未连接，请刷新 SVGA 编辑器页面。'; return }
     const response = await send({ type: 'mcp:listTools' })
-    if (!response?.ok) { result.textContent = response?.error || '请先在扩展弹窗配置 MCP'; return }
+    if (!response?.ok) { result.textContent = response?.error || '自动连接失败'; return }
     tool.replaceChildren(...(response.result.tools || []).map(item => {
       const option = document.createElement('option')
       option.value = item.name; option.textContent = item.name
@@ -86,4 +91,6 @@
       result.textContent = `${result.textContent}\n\n${error instanceof Error ? error.message : String(error)}`
     }
   })
+  // 页面加载后先静默探测一次；用户打开面板时通常已经完成连接。
+  window.setTimeout(() => { void loadTools() }, 250)
 })()

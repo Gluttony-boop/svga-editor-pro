@@ -11,6 +11,31 @@ async function getConfig() {
   return { ...DEFAULT_CONFIG, ...stored }
 }
 
+async function discoverEditor() {
+  const candidates = [
+    { statusUrl: 'http://127.0.0.1:5174/mcp/status', label: '网页编辑器' },
+    { statusUrl: 'http://127.0.0.1:8765/status', label: '桌面编辑器' }
+  ]
+  let lastError = '未发现正在运行的 SVGA 编辑器'
+  for (const candidate of candidates) {
+    try {
+      const response = await fetch(candidate.statusUrl, { cache: 'no-store' })
+      const status = await response.json().catch(() => ({}))
+      if (!response.ok || !status.endpoint || !status.token) {
+        lastError = status.error || `${candidate.label}不可用`
+        continue
+      }
+      const current = await getConfig()
+      await chrome.storage.local.set({ endpoint: status.endpoint, token: status.token, discoveredAt: Date.now(), editorLabel: candidate.label })
+      if (current.endpoint !== status.endpoint || current.token !== status.token) session = null
+      return { ok: true, status, label: candidate.label }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
+  }
+  return { ok: false, error: lastError }
+}
+
 async function rpc(method, params = {}) {
   const config = await getConfig()
   if (!config.endpoint || !config.token) throw new Error('请先在扩展弹窗中填写 MCP 地址和令牌')
@@ -29,7 +54,10 @@ async function rpc(method, params = {}) {
 }
 
 async function ensureSession() {
+  const discovered = await discoverEditor()
+  if (discovered.ok && discovered.status.enabled === false) throw new Error('SVGA 编辑器 AI / MCP 开关已关闭，请先打开开关')
   const config = await getConfig()
+  if (!discovered.ok && (!config.endpoint || !config.token)) throw new Error(discovered.error)
   if (session?.endpoint === config.endpoint && session?.token === config.token) return
   const result = await rpc('initialize', {
     protocolVersion: '2026-07-28',
@@ -50,10 +78,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: true })
         return
       }
+      if (message.type === 'mcp:discover') {
+        const result = await discoverEditor()
+        sendResponse(result)
+        return
+      }
       if (message.type === 'mcp:health') {
-        const config = await getConfig()
-        const response = await fetch(config.endpoint.replace(/\/mcp\/?$/, '/health'), { headers: { 'Authorization': `Bearer ${config.token}` } })
-        sendResponse({ ok: response.ok, status: response.status })
+        const result = await discoverEditor()
+        if (!result.ok) { sendResponse(result); return }
+        sendResponse({ ok: true, status: result.status })
         return
       }
       await ensureSession()

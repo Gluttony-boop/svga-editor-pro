@@ -20,6 +20,7 @@ interface McpToolResponse {
 }
 
 const MAX_MCP_IMAGE_BYTES = 10 * 1024 * 1024
+const MCP_ENABLED_STORAGE_KEY = 'svga-mcp-enabled'
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
 
 const EDITABLE_LAYER_FIELDS = new Set([
@@ -244,7 +245,13 @@ function dispatchMenuAction(action: 'save' | 'export') {
   window.dispatchEvent(new CustomEvent('menu-action', { detail: action }))
 }
 
+function isMcpEnabled(): boolean {
+  if (typeof window === 'undefined') return true
+  return window.localStorage.getItem(MCP_ENABLED_STORAGE_KEY) !== 'false'
+}
+
 async function handleTool(request: McpRequestEvent): Promise<McpToolResponse> {
+  if (!isMcpEnabled()) return fail('SVGA 编辑器 AI / MCP 开关已关闭，请先在“关于 SVGA Editor Pro”中打开')
   const args = request.arguments ?? {}
   const state = useEditorStore.getState()
 
@@ -334,8 +341,14 @@ function registerWebMcpBridge(): (() => void) | undefined {
     hot.send('svga:mcp-response', { requestId: request.requestId, response })
   }
   hot.on('svga:mcp-request', handleRequest)
-  hot.send('svga:mcp-ready', { version: 1 })
-  return () => hot.off('svga:mcp-request', handleRequest)
+  const handleEnabledChange = () => hot.send('svga:mcp-settings', { enabled: isMcpEnabled() })
+  window.addEventListener('svga-mcp-enabled-changed', handleEnabledChange)
+  hot.send('svga:mcp-ready', { version: 1, enabled: isMcpEnabled() })
+  hot.send('svga:mcp-settings', { enabled: isMcpEnabled() })
+  return () => {
+    hot.off('svga:mcp-request', handleRequest)
+    window.removeEventListener('svga-mcp-enabled-changed', handleEnabledChange)
+  }
 }
 
 export const __mcpTest = { allowedLayerUpdates, normalizeBase64Image, serializableEditorState }

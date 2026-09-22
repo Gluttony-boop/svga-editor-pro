@@ -91,10 +91,19 @@ pub fn start(app: tauri::AppHandle) -> McpServerState {
             let endpoint = format!("http://127.0.0.1:{port}/mcp");
             let state_pending = Arc::clone(&pending);
             let state_token = token.clone();
+            let server_endpoint = endpoint.clone();
             let server_app = app.clone();
             thread::Builder::new()
                 .name("svga-mcp".to_string())
-                .spawn(move || serve(listener, server_app, state_pending, state_token))
+                .spawn(move || {
+                    serve(
+                        listener,
+                        server_app,
+                        state_pending,
+                        state_token,
+                        server_endpoint,
+                    )
+                })
                 .expect("无法启动 MCP 服务线程");
             (true, endpoint)
         }
@@ -133,6 +142,7 @@ fn serve(
     app: tauri::AppHandle,
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<Value>>>>,
     token: String,
+    endpoint: String,
 ) {
     for stream in listener.incoming() {
         match stream {
@@ -140,9 +150,10 @@ fn serve(
                 let app = app.clone();
                 let pending = Arc::clone(&pending);
                 let token = token.clone();
+                let endpoint = endpoint.clone();
                 let _ = thread::Builder::new()
                     .name("svga-mcp-request".to_string())
-                    .spawn(move || handle_connection(stream, app, pending, token));
+                    .spawn(move || handle_connection(stream, app, pending, token, endpoint));
             }
             Err(error) => log::warn!("MCP 接收请求失败：{error}"),
         }
@@ -154,11 +165,12 @@ fn handle_connection(
     app: tauri::AppHandle,
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<Value>>>>,
     token: String,
+    endpoint: String,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
     let result = read_http_request(&mut stream)
-        .and_then(|request| route_request(request, &app, &pending, &token));
+        .and_then(|request| route_request(request, &app, &pending, &token, &endpoint));
     let (status, body) = match result {
         Ok((status, body)) => (status, body),
         Err((status, body)) => (status, body),
@@ -230,12 +242,25 @@ fn route_request(
     app: &tauri::AppHandle,
     pending: &Arc<Mutex<HashMap<String, mpsc::Sender<Value>>>>,
     token: &str,
+    endpoint: &str,
 ) -> Result<(u16, Value), (u16, Value)> {
     if request.method == "OPTIONS" {
         return Ok((204, Value::Null));
     }
     if request.method == "GET" && request.path == "/health" {
         return Ok((200, json!({"ok":true,"service":"svga-editor-mcp"})));
+    }
+    if request.method == "GET" && request.path == "/status" {
+        return Ok((
+            200,
+            json!({
+                "enabled": true,
+                "endpoint": endpoint,
+                "token": token,
+                "protocol_version": LATEST_PROTOCOL_VERSION,
+                "image_generation_configured": openai_api_key().is_some()
+            }),
+        ));
     }
     if request.path != "/mcp" || request.method != "POST" {
         return Err((404, json!({"error":"仅支持 POST /mcp"})));

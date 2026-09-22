@@ -67,7 +67,7 @@ function isAuthorized(request: IncomingMessage, token: string): boolean {
 
 function isLocalWebOrigin(request: IncomingMessage): boolean {
   const origin = request.headers.origin
-  return !origin || origin === 'http://127.0.0.1:5174' || origin === 'http://localhost:5174'
+  return !origin || origin === 'http://127.0.0.1:5174' || origin === 'http://localhost:5174' || origin.startsWith('chrome-extension://') || origin.startsWith('moz-extension://')
 }
 
 function rpcError(id: unknown, message: string): Json {
@@ -132,6 +132,7 @@ function mcpPlugin(): Plugin {
   const token = tokenValue()
   const pending = new Map<string, Pending>()
   let editorClient: Client | null = null
+  let editorEnabled = true
   let server: ViteDevServer | null = null
   const apiKey = process.env.OPENAI_API_KEY
 
@@ -146,6 +147,10 @@ function mcpPlugin(): Plugin {
         })
         client.send('svga:mcp-status', { endpoint: '/mcp', imageGenerationConfigured: Boolean(apiKey) })
       })
+      viteServer.ws.on('svga:mcp-settings', (payload: { enabled?: boolean }, client) => {
+        if (editorClient !== client) return
+        editorEnabled = payload?.enabled !== false
+      })
       viteServer.ws.on('svga:mcp-response', (payload: { requestId?: string; response?: Json }) => {
         if (!payload?.requestId) return
         const entry = pending.get(payload.requestId)
@@ -159,10 +164,11 @@ function mcpPlugin(): Plugin {
         if (request.method === 'GET' && request.url === '/health') { jsonResponse(response, 200, { ok: true, service: 'svga-editor-mcp-web', editorConnected: Boolean(editorClient) }); return }
         if (request.method === 'GET' && request.url === '/status') {
           if (!isLocalWebOrigin(request)) { jsonResponse(response, 403, { error: 'MCP 状态只允许编辑器本机页面读取' }); return }
-          jsonResponse(response, 200, { enabled: true, endpoint: 'http://127.0.0.1:5174/mcp', token, protocol_version: '2026-07-28', image_generation_configured: Boolean(apiKey), editorConnected: Boolean(editorClient) }); return
+          jsonResponse(response, 200, { enabled: editorEnabled, endpoint: 'http://127.0.0.1:5174/mcp', token, protocol_version: '2026-07-28', image_generation_configured: Boolean(apiKey), editorConnected: Boolean(editorClient) }); return
         }
         if (request.method !== 'POST' || request.url !== '/') { next(); return }
         if (!isAuthorized(request, token)) { jsonResponse(response, 401, { error: 'MCP 令牌无效' }); return }
+        if (!editorEnabled) { jsonResponse(response, 403, rpcError(null, 'SVGA 编辑器 AI / MCP 开关已关闭')); return }
         try {
           const rpc = JSON.parse(await readBody(request)) as { jsonrpc?: string; id?: unknown; method?: string; params?: Record<string, unknown> }
           if (rpc.jsonrpc !== '2.0' || typeof rpc.method !== 'string') { jsonResponse(response, 400, rpcError(rpc.id, 'JSON-RPC 2.0 请求无效')); return }

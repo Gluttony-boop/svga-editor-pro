@@ -14,6 +14,8 @@ async function loadConfig() {
 
 async function refreshTools() {
   status('正在读取工具...')
+  const discovered = await send({ type: 'mcp:discover' })
+  if (!discovered?.ok) { status(discovered?.error || '未发现编辑器，请先打开 SVGA 编辑器并开启 AI / MCP'); return }
   const response = await send({ type: 'mcp:listTools' })
   if (!response?.ok) { status(response?.error || '连接失败'); return }
   const select = $('tool')
@@ -23,12 +25,20 @@ async function refreshTools() {
     option.textContent = `${tool.name} - ${tool.description || ''}`
     return option
   }))
-  status(`已连接，可用工具 ${select.options.length} 个`)
+  const generation = discovered.status?.image_generation_configured ? '，已配置生图' : '，未配置生图 Key'
+  status(`已连接${generation}，可用工具 ${select.options.length} 个`)
 }
 
 $('connect').addEventListener('click', async () => {
+  status('正在自动发现本机编辑器...')
+  const response = await send({ type: 'mcp:discover' })
+  if (!response?.ok) { status(response?.error || '未发现编辑器，请先打开 SVGA 编辑器并开启 AI / MCP'); return }
+  status(response.status?.enabled === false ? '已发现编辑器，但 AI / MCP 开关未打开' : `已连接${response.label ? `：${response.label}` : ''}`)
+  if (response.status?.enabled !== false) await refreshTools()
+})
+$('manual').addEventListener('click', async () => {
   const response = await send({ type: 'mcp:configure', endpoint: $('endpoint').value.trim(), token: $('token').value.trim() })
-  status(response?.ok ? '配置已保存' : response?.error || '保存失败')
+  status(response?.ok ? '手动配置已保存' : response?.error || '保存失败')
 })
 $('refresh').addEventListener('click', refreshTools)
 $('call').addEventListener('click', async () => {

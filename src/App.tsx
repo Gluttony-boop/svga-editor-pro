@@ -326,7 +326,8 @@ const StatusBar: React.FC = () => {
 export const App: React.FC = () => {
   const [showUrlModal, setShowUrlModal] = useState(false)
   const [showAboutModal, setShowAboutModal] = useState(false)
-  const [mcpStatus, setMcpStatus] = useState<{ enabled: boolean; endpoint: string; token: string; protocol_version: string; image_generation_configured: boolean } | null>(null)
+  const [mcpEnabled, setMcpEnabled] = useState(() => typeof window === 'undefined' || window.localStorage.getItem('svga-mcp-enabled') !== 'false')
+  const [mcpStatus, setMcpStatus] = useState<{ enabled: boolean; endpoint: string; token: string; protocol_version: string; image_generation_configured: boolean; editorConnected?: boolean } | null>(null)
   const [showUpdateModal, setShowUpdateModal] = useState(false)
   const [showLicenseModal, setShowLicenseModal] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -965,6 +966,16 @@ export const App: React.FC = () => {
     void fetch('/mcp/status').then(response => response.ok ? response.json() : Promise.reject(new Error('MCP web status unavailable'))).then(setMcpStatus).catch(() => setMcpStatus(null))
   }, [showAboutModal])
 
+  const toggleMcp = useCallback((enabled: boolean) => {
+    setMcpEnabled(enabled)
+    window.localStorage.setItem('svga-mcp-enabled', String(enabled))
+    window.dispatchEvent(new Event('svga-mcp-enabled-changed'))
+    if (showAboutModal) {
+      if (isTauriRuntime()) void tauriAPI.app.getMcpStatus().then(setMcpStatus).catch(() => undefined)
+      else void fetch('/mcp/status').then(response => response.ok ? response.json() : Promise.reject(new Error('MCP web status unavailable'))).then(setMcpStatus).catch(() => undefined)
+    }
+  }, [showAboutModal])
+
   // 桌面端 MCP 请求通过事件进入前端，复用 Zustand actions，避免第二套编辑逻辑。
   useEffect(() => {
     let disposed = false
@@ -1356,8 +1367,13 @@ export const App: React.FC = () => {
           </div>
           <div className="rounded border border-accent/30 bg-accent/5 p-3 text-xs">
             <div className="mb-1 font-medium text-text-primary">AI / MCP</div>
+            <label className="flex items-center justify-between gap-3 text-text-primary">
+              <span>允许 ChatGPT 操作编辑器</span>
+              <input type="checkbox" checked={mcpEnabled} onChange={event => toggleMcp(event.target.checked)} />
+            </label>
             {mcpStatus ? <>
-              <div className={mcpStatus.enabled ? 'text-success' : 'text-warning'}>{mcpStatus.enabled ? '本机 MCP 已启动' : '本机 MCP 未启动（端口可能被占用）'}</div>
+              <div className={mcpEnabled && mcpStatus.enabled ? 'text-success' : 'text-warning'}>{mcpEnabled && mcpStatus.enabled ? '本机 MCP 已启动，可自动连接' : 'MCP 已关闭或服务未启动'}</div>
+              {mcpStatus.editorConnected === false && <div className="mt-1 text-warning">网页编辑器尚未连接，请刷新编辑器页面</div>}
               <div className="mt-1 break-all select-all text-text-muted">地址：{mcpStatus.endpoint}</div>
               <div className="mt-1 break-all select-all text-text-muted">令牌：{mcpStatus.token}</div>
               <div className={cn('mt-1', mcpStatus.image_generation_configured ? 'text-success' : 'text-warning')}>

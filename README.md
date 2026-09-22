@@ -76,7 +76,7 @@ npm run build
 
 ### 连接 GPT 网页（MCP）
 
-启动 `npm run dev` 网页版后，打开“帮助 → 关于 SVGA Editor Pro”，在“AI / MCP”区域复制本机 MCP 地址和令牌；桌面版使用 Tauri MCP 服务，地址默认是 `http://127.0.0.1:8765/mcp`，网页版开发服务默认是 `http://127.0.0.1:5174/mcp`。扩展源码位于 [`integrations/gpt-web-extension`](integrations/gpt-web-extension)，按其中的 README 在 Chrome/Edge 中加载未打包扩展并填写这两项配置。扩展只访问 `127.0.0.1`，不会把工程素材上传到云端。
+启动 `npm run dev` 网页版后，打开“帮助 → 关于 SVGA Editor Pro”，开启“允许 ChatGPT 操作编辑器”。扩展源码位于 [`integrations/gpt-web-extension`](integrations/gpt-web-extension)：首次在 Chrome/Edge 中加载一次后，点击“自动连接本机编辑器”即可自动发现网页版 `5174` 或桌面版 `8765` 服务并配对，不再需要复制 MCP 地址和令牌。扩展只访问 `127.0.0.1`，不会把工程素材上传到云端。
 
 网页版要使用 MCP，需要保持 Vite 开发服务运行；`vite.config.ts` 会同时启动本机 MCP HTTP 端点和 HMR 编辑器桥接。若要启用 `generate_and_import_image`，在启动前设置 `OPENAI_API_KEY`；该 Key 只在本机 Vite/桌面进程中使用，不会发送给浏览器扩展。
 
