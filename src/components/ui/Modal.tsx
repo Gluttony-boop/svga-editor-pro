@@ -67,7 +67,7 @@ export const Modal: React.FC<ModalProps> = ({
           e.stopPropagation()
           if ((e.ctrlKey || e.metaKey) && ['s', 'o', 'e', 'z', 'y'].includes(e.key.toLowerCase())) e.preventDefault()
           if (e.key === 'Tab') {
-            const elements = dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]')
+            const elements = dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled):not([type="hidden"]), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')
             if (!elements?.length) return
             const first = elements[0], last = elements[elements.length - 1]
             if (e.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) { e.preventDefault(); last.focus() }

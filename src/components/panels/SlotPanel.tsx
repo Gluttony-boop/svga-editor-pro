@@ -7,6 +7,8 @@ import { normalizeTextConfig } from '@/core/text-preview'
 import { saveGeneratedFile } from '@/core/exporter'
 import { SlotEditor } from './SlotEditor'
 
+const BatchPreflightDialog = React.lazy(() => import('../editor/BatchPreflightDialog').then(module => ({ default: module.BatchPreflightDialog })))
+
 interface SlotPanelProps { className?: string; collapsible?: boolean; defaultCollapsed?: boolean }
 const FILTERS = [['all', '全部'], ['image', '图片 Key'], ['text', '文字候选'], ['configured', '已配文字']] as const
 type KeyFilter = typeof FILTERS[number][0]
@@ -21,6 +23,7 @@ export const SlotPanel: React.FC<SlotPanelProps> = ({ className, collapsible = t
   const [activeKey, setActiveKey] = React.useState<string | null>(null)
   const [notice, setNotice] = React.useState('')
   const [saving, setSaving] = React.useState(false)
+  const [showBatch, setShowBatch] = React.useState(false)
   const catalog = React.useMemo(() => buildSlotCatalog(video, layers, resources, slotConfigs), [video, layers, resources, slotConfigs])
   const matches = (item: typeof catalog[number], id: KeyFilter) => id === 'all' || id === 'image' && item.imageAvailable || id === 'text' && item.textCandidate || id === 'configured' && item.textConfigured
   const filtered = catalog.filter(item => matches(item, filter) && (!search.trim() || item.key.toLowerCase().includes(search.trim().toLowerCase())))
@@ -47,9 +50,10 @@ export const SlotPanel: React.FC<SlotPanelProps> = ({ className, collapsible = t
     finally { setSaving(false) }
   }
 
-  return <Panel title="插槽与 Key" icon={<Icon name="key" size={16} />} className={className} collapsible={collapsible} defaultCollapsed={defaultCollapsed} contentClassName="p-3">
+  return <><Panel title="插槽与 Key" icon={<Icon name="key" size={16} />} className={className} collapsible={collapsible} defaultCollapsed={defaultCollapsed} contentClassName="p-3">
     {!video ? <p className="py-6 text-center text-xs text-text-muted">打开 SVGA 后识别图片 Key 与文字候选</p> : <div className="space-y-3">
       <p className="text-[11px] leading-relaxed text-text-muted">动态图片和文字共用 imageKey。文字类型仅按命名推测，可选择普通图片 Key 手动模拟；已栅格化的文字无法自动还原。</p>
+      <Button size="sm" className="w-full" disabled={!catalog.some(item => item.canSimulateText)} onClick={() => setShowBatch(true)}>批量文案预检…</Button>
       <input type="search" aria-label="搜索图片或文字 Key" placeholder="搜索完整 Key…" value={search} onChange={event => setSearch(event.target.value)} className="w-full rounded border border-border bg-bg-primary px-2 py-1.5 text-xs focus:border-accent outline-none" />
       <div role="group" aria-label="Key 类型筛选" className="flex flex-wrap gap-1">
         {FILTERS.map(([id, label]) => <button type="button" key={id} onClick={() => setFilter(id)} aria-pressed={filter === id}
@@ -71,4 +75,8 @@ export const SlotPanel: React.FC<SlotPanelProps> = ({ className, collapsible = t
       {notice && <p role="status" className="text-xs text-text-secondary">{notice}</p>}
     </div>}
   </Panel>
+    {showBatch && <React.Suspense fallback={<p role="status">正在加载批量预检…</p>}>
+      <BatchPreflightDialog initialKey={selected?.key} onClose={() => setShowBatch(false)} />
+    </React.Suspense>}
+  </>
 }

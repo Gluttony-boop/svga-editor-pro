@@ -1,0 +1,47 @@
+import { renderToStaticMarkup } from 'react-dom/server'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { useEditorStore } from '@/stores'
+import { BatchPreflightDialog } from './BatchPreflightDialog'
+
+vi.mock('@/stores', async () => {
+  const actual = await vi.importActual<typeof import('@/stores')>('@/stores')
+  return { ...actual, useEditorStore: Object.assign(() => actual.useEditorStore.getState(), actual.useEditorStore) }
+})
+const render = (initialKey?: string) => renderToStaticMarkup(<BatchPreflightDialog initialKey={initialKey} onClose={() => {}} />)
+const button = (html: string, label: string) => html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g)?.find(value => value.includes(label))
+const frame = () => ({ alpha: 1, transform: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 }, clipPath: null, layout: { x: 0, y: 0, width: 100, height: 40 } })
+const open = () => {
+  useEditorStore.getState().setVideoItem({
+    movie: { version: '2.0', params: { viewBoxWidth: 100, viewBoxHeight: 40, frames: 1, fps: 24 }, images: {}, sprites: [
+      { imageKey: 'title$', matteKey: null, frames: [frame()] },
+      { imageKey: 'mask.matte', matteKey: null, frames: [frame()] },
+    ] }, buffers: {}, images: {},
+  })
+}
+afterEach(() => useEditorStore.getState().reset())
+
+describe('批量文案预检入口与只读边界（SSR）', () => {
+  it('未打开工程不能开始检查或导出', () => {
+    const html = render()
+    expect(button(html, '开始预检')).toContain('disabled')
+    expect(button(html, '导出预检报告 JSON')).toContain('disabled')
+    expect(html).toContain('当前没有可用的文字 Key')
+  })
+  it('展示精确 Key、排除遮罩并支持初始化选中', () => {
+    open()
+    const html = render('title$')
+    expect(html).toContain('aria-label="预检 Key：title$" checked=""')
+    expect(html).not.toContain('aria-label="预检 Key：mask.matte"')
+    expect(html).toContain('批量清单内容')
+    expect(html).toContain('填入示例')
+  })
+  it('不把预检当作导出、像素溢出或自动恢复验收', () => {
+    open()
+    const before = useEditorStore.getState()
+    const html = render('title$')
+    expect(html).toContain('不修改动画、不上传素材、不生成 SVGA')
+    expect(html).toContain('通过预检不代表文字不会裁切')
+    expect(html).toContain('图片批量处理尚未开放')
+    expect(useEditorStore.getState()).toBe(before)
+  })
+})
