@@ -5,22 +5,23 @@ import { useEditorStore } from '@/stores'
 import { buildSlotCatalog } from '@/utils/slot-catalog'
 import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
 import { createSaveFileTarget } from '@/core/exporter'
+import { applyBatchTextRow, type BatchTextSession } from '@/core/batch-text-session'
 import {
   BATCH_TEMPLATE_FORMAT, MAX_BATCH_JSON_BYTES, parseVariantCsv, parseVariantJson, validateBatchRows,
-  type BatchTemplate, type BatchValidationReport, type BatchVariantRow,
+  type BatchTemplate,
 } from '@/core/batch-variants'
 
-interface Props { onClose: () => void; initialKey?: string }
-interface Prepared {
-  inputs: readonly unknown[]
-  report: BatchValidationReport
-  template: BatchTemplate
-  rows: BatchVariantRow[]
+interface Props {
+  onClose: () => void
+  initialKey?: string
+  isOpen?: boolean
+  onOpen?: () => void
+  onDiscard?: () => void
 }
 const field = 'w-full rounded border border-border bg-bg-primary px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent'
 const PAGE_SIZE = 50
 
-export function BatchPreflightDialog({ onClose, initialKey }: Props) {
+export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpen, onDiscard }: Props) {
   const editor = useEditorStore()
   const catalog = React.useMemo(() => buildSlotCatalog(editor.videoItem, editor.layers, editor.imageResources, editor.slotConfigs),
     [editor.videoItem, editor.layers, editor.imageResources, editor.slotConfigs])
@@ -29,34 +30,37 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
   const [limit, setLimit] = React.useState('20')
   const [format, setFormat] = React.useState<'csv' | 'json'>('csv')
   const [source, setSource] = React.useState('')
-  const [prepared, setPrepared] = React.useState<Prepared | null>(null)
+  const [prepared, setPrepared] = React.useState<BatchTextSession | null>(null)
   const [notice, setNotice] = React.useState('')
   const [reading, setReading] = React.useState(false)
   const [saving, setSaving] = React.useState(false)
   const [page, setPage] = React.useState(0)
   const [onlyIssues, setOnlyIssues] = React.useState(false)
+  const [appliedRow, setAppliedRow] = React.useState<number | null>(null)
   const readToken = React.useRef(0)
   const mounted = React.useRef(true)
   const savingRef = React.useRef(false)
   const input = React.useRef<HTMLInputElement>(null)
   const resultRef = React.useRef<HTMLElement>(null)
-  const originalVideo = React.useRef(editor.videoItem)
+  // 画布尺寸修改也会替换 videoItem，但原始文件未变，不能因此丢掉清单。
+  const originalSource = React.useRef(editor.originalBuffer ?? editor.videoItem)
   React.useEffect(() => {
     const token = readToken
     mounted.current = true
     return () => { mounted.current = false; token.current++ }
   }, [])
   React.useEffect(() => {
-    if (prepared) resultRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [prepared])
-  const changedProject = originalVideo.current !== editor.videoItem
+    if (prepared && isOpen) resultRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [prepared, isOpen])
+  const changedProject = originalSource.current !== (editor.originalBuffer ?? editor.videoItem)
   const stale = !!prepared && !sameExportInputs(prepared.inputs, captureExportInputs(editor))
   const canCheck = !!editor.videoItem && !changedProject && !!source.trim() && selected.length > 0 &&
     Number.isInteger(Number(limit)) && Number(limit) >= 1 && Number(limit) <= 500 && !reading && !saving
-  const invalidate = () => { readToken.current++; setReading(false); setPrepared(null); setNotice(''); setPage(0) }
+  const invalidate = () => { readToken.current++; setReading(false); setPrepared(null); setAppliedRow(null); setNotice(''); setPage(0) }
   const close = () => {
     if (savingRef.current) return
     readToken.current++
+    setReading(false)
     onClose()
   }
   const readFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -71,7 +75,8 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
     try {
       const value = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())
       if (!mounted.current || token !== readToken.current) return
-      if (useEditorStore.getState().videoItem !== originalVideo.current) throw new Error('工程已切换，请关闭后重新打开预检。')
+      const current = useEditorStore.getState()
+      if ((current.originalBuffer ?? current.videoItem) !== originalSource.current) throw new Error('工程已切换，请重新打开预检。')
       setFormat(/\.json$/i.test(file.name) ? 'json' : 'csv')
       setSource(value)
       setNotice('清单已在本机读取，请核对 Key 后预检。')
@@ -96,7 +101,7 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
     setPrepared(null); setNotice(''); setPage(0)
     try {
       const current = useEditorStore.getState()
-      if (current.videoItem !== originalVideo.current) throw new Error('工程已切换，请重新打开预检。')
+      if ((current.originalBuffer ?? current.videoItem) !== originalSource.current) throw new Error('工程已切换，请重新打开预检。')
       const rows = format === 'csv' ? parseVariantCsv(source) : parseVariantJson(source)
       const template: BatchTemplate = { format: BATCH_TEMPLATE_FORMAT, schemaVersion: 1, name: '当前工程文案预检',
         slotRules: selected.map(key => ({ key, kind: 'text', required: true, maxLength: Number(limit) })) }
@@ -108,22 +113,12 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
   }
   const applyRow = (record: number) => {
     if (!prepared || savingRef.current || changedProject) return
-    const current = useEditorStore.getState()
-    if (!sameExportInputs(prepared.inputs, captureExportInputs(current))) {
-      setNotice('工程内容已变化，请重新预检后应用。'); return
-    }
-    const available = new Set(buildSlotCatalog(current.videoItem, current.layers, current.imageResources, current.slotConfigs)
-      .filter(entry => entry.canSimulateText).map(entry => entry.key))
-    // 对完整清单重检，不能单独校验一行而漏掉重复编号。
-    const report = validateBatchRows(prepared.template, prepared.rows, available)
-    const row = prepared.rows.find(item => item.row === record)
-    if (!row || !report.rows.find(item => item.row === record)?.valid) {
-      setNotice('该记录未通过预检，未修改动画。'); return
-    }
-    const values = Object.fromEntries(Object.entries(row.values).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
-    const result = current.applySlotTextValues(values, prepared.inputs)
-    if (result.error) { setNotice(result.error); return }
-    close()
+    try {
+      setPrepared(applyBatchTextRow(prepared, record))
+      setAppliedRow(record)
+      setNotice('')
+      close()
+    } catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
   }
   const save = async () => {
     if (!prepared || stale || savingRef.current) return
@@ -146,9 +141,26 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
   }
   const reportRows = prepared?.report.rows.filter(row => !onlyIssues || !row.valid) ?? []
   const currentPage = Math.min(page, Math.max(0, Math.ceil(reportRows.length / PAGE_SIZE) - 1))
+  const validRows = prepared?.report.rows.filter(row => row.valid) ?? []
+  const appliedIndex = validRows.findIndex(row => row.row === appliedRow)
+  const previous = appliedIndex > 0 ? validRows[appliedIndex - 1] : undefined
+  const next = validRows[appliedIndex + 1]
+  if (!isOpen) return <section aria-label="批量文案会话" className="rounded border border-border bg-bg-tertiary p-2 space-y-2">
+    <p className="text-xs">清单保留在本次会话 · {prepared ? `${validRows.length} 条可应用` : '尚未预检'}</p>
+    {appliedIndex >= 0 && <p className="break-all text-xs text-text-secondary">上次应用：{validRows[appliedIndex].id} · 记录 {appliedRow}（{appliedIndex + 1}/{validRows.length}）</p>}
+    {(stale || changedProject) && <p role="alert" className="text-xs text-warning">工程已变化，请展开清单重新预检后继续。</p>}
+    <div className="flex flex-wrap gap-1">
+      <Button size="sm" disabled={!previous || stale || changedProject || saving} onClick={() => previous && applyRow(previous.row)}>上一条文案</Button>
+      <Button size="sm" disabled={!next || stale || changedProject || saving} onClick={() => next && applyRow(next.row)}>{appliedIndex < 0 ? '应用首条文案' : '下一条文案'}</Button>
+      <Button size="sm" onClick={onOpen}>展开清单</Button>
+      <Button size="sm" disabled={saving} onClick={onDiscard}>丢弃清单</Button>
+    </div>
+    {notice && <p role="status" className="text-xs text-warning">{notice}</p>}
+    <p className="text-[11px] text-text-muted">只切换通过行；每次应用可撤销。清单未保存到磁盘，刷新或切换工程会丢失；丢弃清单不撤销已应用文案。</p>
+  </section>
   return <Modal isOpen isolateKeyboard onClose={close} title="批量文案预检" className="!max-w-4xl" footer={
     <div className="flex w-full flex-wrap justify-end gap-2">
-      <Button disabled={saving} onClick={close}>关闭预检</Button>
+      <Button disabled={saving} onClick={close}>收起并保留清单</Button>
       <Button disabled={!prepared || stale || saving || changedProject} onClick={() => void save()}>导出预检报告 JSON</Button>
       <Button variant="primary" disabled={!canCheck} onClick={check}>开始预检</Button>
     </div>
@@ -204,7 +216,7 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
               <td className="p-2">{row.valid ? <span className="text-success">规则通过 · 未生成文件</span> :
                 row.issues.map((item, index) => <p key={index} className="mb-1 break-all text-warning">{item.key !== undefined && <code className="whitespace-pre-wrap">{JSON.stringify(item.key)}：</code>}{item.message}</p>)}</td>
               <td className="p-2 align-top"><Button size="sm" disabled={!row.valid || stale || saving || changedProject}
-                aria-label={'应用记录 ' + row.row + ' 到画布并关闭'} onClick={() => applyRow(row.row)}>应用并关闭</Button></td>
+                aria-label={'应用记录 ' + row.row + ' 到画布并收起'} onClick={() => applyRow(row.row)}>应用并收起</Button></td>
             </tr>)}</tbody>
           </table>
         </div>
@@ -214,7 +226,7 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
           <Button size="sm" disabled={(currentPage + 1) * PAGE_SIZE >= reportRows.length} onClick={() => setPage(currentPage + 1)}>下一页</Button>
         </div>}
         <p className="text-[11px] text-text-muted">应用会替换该记录全部 Key 的文案并启用文字显示，保留已有样式、范围、图片与导出模式；没有文字配置时使用默认样式且仅模拟。多个 Key 可一次撤销（Ctrl/Cmd+Z）。要将字形写入 SVGA，需在插槽中明确选择写入模式后导出。</p>
-        <p className="text-[11px] text-text-muted">报告含编号和 Key，不含原始文案或图片。CSV 记录号包含表头，多行单元格算一条；JSON 从第 1 个元素计数。应用并关闭或关闭弹窗都会丢弃本次清单，请先按需保存报告；报告不包含可恢复工程。</p>
+        <p className="text-[11px] text-text-muted">报告含编号和 Key，不含原始文案或图片。CSV 记录号包含表头，多行单元格算一条；JSON 从第 1 个元素计数。收起后可在插槽面板连续切换文案；清单仅在本次会话保留，刷新、切换工程或主动丢弃后丢失，报告不能恢复清单。</p>
       </section>}
     </div>
   </Modal>
