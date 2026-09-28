@@ -39,6 +39,9 @@ import { getCanvasSizeError, replaceCanvasSize } from '@/core/canvas-size'
 import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
 import type { ProjectDocument } from '@/types/project'
 import { previewFileName } from '@/utils/preview-view'
+import { buildSlotCatalog } from '@/utils/slot-catalog'
+import { mergeSlotTextConfig } from '@/utils/slot-config'
+import { normalizeTextConfig } from '@/core/text-preview'
 
 interface EditorSnapshot {
   videoItem: VideoItem | null
@@ -181,6 +184,7 @@ interface EditorStore {
 
   // 插槽操作
   setSlotConfig: (key: string, config: SlotConfig) => void
+  applySlotTextValues: (values: Record<string, string>, expectedInputs: readonly unknown[]) => { changed: boolean; error?: string }
   removeSlotConfig: (key: string) => void
   beginSlotConfigEdit: (key: string) => boolean
   previewSlotConfig: (key: string, config: SlotConfig) => void
@@ -1358,6 +1362,43 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     // 插槽操作
+    applySlotTextValues: (values, expectedInputs) => {
+      const state = get()
+      if (!state.videoItem || !sameExportInputs(expectedInputs, captureExportInputs(state))) {
+        return { changed: false, error: '工程内容已变化，请重新预检后应用。' }
+      }
+      // 不在批量应用时隐式提交其他工具的草稿，避免失败操作也改变历史。
+      if (state.isSlotConfigEditing || state.isCanvasTransforming) {
+        return { changed: false, error: '请先结束文字输入或画布变换，再重新预检。' }
+      }
+      const entries = Object.entries(values)
+      if (!entries.length || entries.length > 128) return { changed: false, error: '请选择 1–128 个文字 Key。' }
+      const eligible = new Set(buildSlotCatalog(state.videoItem, state.layers, state.imageResources, state.slotConfigs)
+        .filter(entry => entry.canSimulateText).map(entry => entry.key))
+      const next = { ...state.slotConfigs }
+      let changed = false
+      try {
+        for (const [key, value] of entries) {
+          if (!eligible.has(key)) throw new Error(`Key ${JSON.stringify(key)} 已不可用于文字模拟。`)
+          if (typeof value !== 'string' || !value.trim() || Array.from(value).length > 500) {
+            throw new Error(`Key ${JSON.stringify(key)} 需要非空且不超过 500 码点的文案。`)
+          }
+          const previous = ownSlotConfig(state.slotConfigs, key)
+          const textConfig = normalizeTextConfig({ ...previous?.textConfig, text: value, enabled: true })
+          const config = mergeSlotTextConfig(previous, key, textConfig)
+          if (slotConfigSignature(previous) !== slotConfigSignature(config)) {
+            // defineProperty 保留 __proto__ 等合法精确 Key，不触发对象原型赋值。
+            Object.defineProperty(next, key, { value: config, enumerable: true, writable: true, configurable: true })
+            changed = true
+          }
+        }
+      } catch (error) {
+        return { changed: false, error: error instanceof Error ? error.message : String(error) }
+      }
+      if (changed) withHistory({ slotConfigs: next, isDirty: true }, `应用清单文案：${entries.length} 个 Key`)
+      return { changed }
+    },
+
     setSlotConfig: (key, config) => {
       withHistory((state) => ({
         slotConfigs: { ...state.slotConfigs, [key]: config },

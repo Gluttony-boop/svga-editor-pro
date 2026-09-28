@@ -7,7 +7,7 @@ import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
 import { createSaveFileTarget } from '@/core/exporter'
 import {
   BATCH_TEMPLATE_FORMAT, MAX_BATCH_JSON_BYTES, parseVariantCsv, parseVariantJson, validateBatchRows,
-  type BatchTemplate, type BatchValidationReport,
+  type BatchTemplate, type BatchValidationReport, type BatchVariantRow,
 } from '@/core/batch-variants'
 
 interface Props { onClose: () => void; initialKey?: string }
@@ -15,6 +15,7 @@ interface Prepared {
   inputs: readonly unknown[]
   report: BatchValidationReport
   template: BatchTemplate
+  rows: BatchVariantRow[]
 }
 const field = 'w-full rounded border border-border bg-bg-primary px-2 py-1.5 text-xs text-text-primary outline-none focus:border-accent'
 const PAGE_SIZE = 50
@@ -102,8 +103,27 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
       const available = new Set(buildSlotCatalog(current.videoItem, current.layers, current.imageResources, current.slotConfigs).filter(entry => entry.canSimulateText).map(entry => entry.key))
       const report = validateBatchRows(template, rows, available)
       if (!rows.length) { setNotice('清单没有数据记录，请在表头后添加文案。'); return }
-      setPrepared({ inputs: captureExportInputs(current), template, report })
+      setPrepared({ inputs: captureExportInputs(current), template, report, rows })
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+  }
+  const applyRow = (record: number) => {
+    if (!prepared || savingRef.current || changedProject) return
+    const current = useEditorStore.getState()
+    if (!sameExportInputs(prepared.inputs, captureExportInputs(current))) {
+      setNotice('工程内容已变化，请重新预检后应用。'); return
+    }
+    const available = new Set(buildSlotCatalog(current.videoItem, current.layers, current.imageResources, current.slotConfigs)
+      .filter(entry => entry.canSimulateText).map(entry => entry.key))
+    // 对完整清单重检，不能单独校验一行而漏掉重复编号。
+    const report = validateBatchRows(prepared.template, prepared.rows, available)
+    const row = prepared.rows.find(item => item.row === record)
+    if (!row || !report.rows.find(item => item.row === record)?.valid) {
+      setNotice('该记录未通过预检，未修改动画。'); return
+    }
+    const values = Object.fromEntries(Object.entries(row.values).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    const result = current.applySlotTextValues(values, prepared.inputs)
+    if (result.error) { setNotice(result.error); return }
+    close()
   }
   const save = async () => {
     if (!prepared || stale || savingRef.current) return
@@ -134,7 +154,7 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
     </div>
   }>
     <div className="space-y-4">
-      <p className="text-xs leading-relaxed text-text-secondary">仅在本机检查清单，不修改动画、不上传素材、不生成 SVGA。通过预检不代表文字不会裁切；字体和实际字宽仍需在画布核对。</p>
+      <p className="text-xs leading-relaxed text-text-secondary">预检不修改动画、不上传素材、不生成 SVGA。通过预检不代表文字不会裁切；可主动将一条通过的记录应用到画布核对。</p>
       {changedProject && <p role="alert" className="text-sm text-warning">工程已切换，请关闭后重新打开预检。</p>}
       <div className="grid gap-4 sm:grid-cols-2">
         <fieldset disabled={saving || changedProject} className="min-w-0 space-y-2">
@@ -178,11 +198,13 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
         <p role="status" className="text-sm">{prepared.report.rows.length} 条记录 · {prepared.report.rows.filter(row => row.valid).length} 条通过 · {prepared.report.rows.filter(row => !row.valid).length} 条有问题（仅规则检查）</p>
         <label className="flex gap-2 text-xs"><input type="checkbox" checked={onlyIssues} onChange={event => { setOnlyIssues(event.target.checked); setPage(0) }} />只看问题行</label>
         <div className="max-h-60 overflow-auto rounded border border-border">
-          <table className="w-full text-left text-xs"><thead className="bg-bg-tertiary"><tr><th className="p-2">记录</th><th className="p-2">编号</th><th className="p-2">结果 / 精确 Key</th></tr></thead>
+          <table className="w-full text-left text-xs"><thead className="bg-bg-tertiary"><tr><th className="p-2">记录</th><th className="p-2">编号</th><th className="p-2">结果 / 精确 Key</th><th className="p-2">画布核对</th></tr></thead>
             <tbody>{reportRows.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE).map(row => <tr key={row.row} className="border-t border-border">
               <td className="p-2 align-top">{row.row}</td><td className="max-w-32 break-all p-2 align-top">{row.id || '（空编号）'}</td>
               <td className="p-2">{row.valid ? <span className="text-success">规则通过 · 未生成文件</span> :
                 row.issues.map((item, index) => <p key={index} className="mb-1 break-all text-warning">{item.key !== undefined && <code className="whitespace-pre-wrap">{JSON.stringify(item.key)}：</code>}{item.message}</p>)}</td>
+              <td className="p-2 align-top"><Button size="sm" disabled={!row.valid || stale || saving || changedProject}
+                aria-label={'应用记录 ' + row.row + ' 到画布并关闭'} onClick={() => applyRow(row.row)}>应用并关闭</Button></td>
             </tr>)}</tbody>
           </table>
         </div>
@@ -191,7 +213,8 @@ export function BatchPreflightDialog({ onClose, initialKey }: Props) {
           <span>第 {currentPage + 1} / {Math.ceil(reportRows.length / PAGE_SIZE)} 页</span>
           <Button size="sm" disabled={(currentPage + 1) * PAGE_SIZE >= reportRows.length} onClick={() => setPage(currentPage + 1)}>下一页</Button>
         </div>}
-        <p className="text-[11px] text-text-muted">报告含编号和 Key，不含原始文案或图片。CSV 记录号包含表头，多行单元格算一条；JSON 从第 1 个元素计数。关闭弹窗会丢弃本次清单，报告不包含可恢复工程。</p>
+        <p className="text-[11px] text-text-muted">应用会替换该记录全部 Key 的文案并启用文字显示，保留已有样式、范围、图片与导出模式；没有文字配置时使用默认样式且仅模拟。多个 Key 可一次撤销（Ctrl/Cmd+Z）。要将字形写入 SVGA，需在插槽中明确选择写入模式后导出。</p>
+        <p className="text-[11px] text-text-muted">报告含编号和 Key，不含原始文案或图片。CSV 记录号包含表头，多行单元格算一条；JSON 从第 1 个元素计数。应用并关闭或关闭弹窗都会丢弃本次清单，请先按需保存报告；报告不包含可恢复工程。</p>
       </section>}
     </div>
   </Modal>
