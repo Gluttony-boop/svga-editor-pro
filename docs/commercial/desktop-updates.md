@@ -92,6 +92,21 @@ R2 的自定义域名可使用缓存；`r2.dev` 属于限速开发端点，不�
 
 这条路径不需要自建服务器，也不需要把 GitHub Token 放进客户端；Actions 使用运行时的 `GITHUB_TOKEN` 上传 Release。它不等于绝对零成本：私有仓库超出免费 Actions 额度、使用大型 runner 或其他 GitHub 计费产品时可能产生费用，正式启用前应设置预算和用量告警。
 
+### 中国大陆网络与备用分发
+
+GitHub 在中国大陆并非所有网络都需要代理才能访问，但仓库页面、Release 大文件和 `github.com`/跳转下载链路可能出现慢、超时或间歇不可达。社区反馈也把这种状态描述为不一致；这不是 GitHub 官方 SLA，不能据此承诺任何运营商都能下载。[GitHub 社区讨论](https://github.com/orgs/community/discussions/169871)
+
+因此当前产品不应对国内客户承诺“直接打开 GitHub 就一定能更新”。上线前至少用目标地区的电信、联通、移动和企业网络分别实测：仓库页、`latest.json`、`.exe`、`.sig`、断点重试和安装器启动。
+
+建议分发策略：
+
+- 全球用户：GitHub Releases 作为公开源；
+- 中国大陆用户：准备一个可控的国内镜像或对象存储域名，镜像同一份 `latest.json`、安装包和 `.sig`，仍使用同一 Tauri 公钥验签；
+- 不使用来路不明的 GitHub 代理或把代理 URL 写进正式安装包；
+- Tauri 多 endpoint 只有在前一个 endpoint 返回非 2xx 时才继续下一个，网络超时不一定会自动切换，因此不能仅靠 endpoint 数组解决跨境超时。[Tauri updater endpoint 行为](https://v2.tauri.app/plugin/updater/)
+
+在没有完成国内镜像和真实网络矩阵前，GitHub 方案应标记为“可用但不保证大陆稳定可达”，而不是“国内无需翻墙”。
+
 只需要 Node.js 20+，无新增依赖。首次先查看帮助：
 
 ```powershell
