@@ -574,7 +574,7 @@ export const App: React.FC = () => {
         const resource = state.imageResources.get(example.nicknameKey)
         if (!resource) throw new Error('示例文字资源未加载，请重新打开。')
         state.setSlotConfig(example.nicknameKey, { type: 'text', name: '示例昵称', value: example.sampleText,
-          textConfig: { text: example.sampleText, fontSize: Math.min(48, Math.round(resource.height * 0.45)), color: '#ffffff', fontFamily: 'sans-serif', textAlign: 'left',
+          textConfig: { text: example.sampleText, fontSize: Math.min(48, Math.round(resource.height * 0.45)), color: example.textColor, fontFamily: 'sans-serif', textAlign: 'left',
             enabled: true, replaceImage: true, exportMode: 'preview', boxWidth: resource.width, boxHeight: resource.height,
             referenceWidth: resource.width, referenceHeight: resource.height } })
         state.selectLayer(state.layers.find(layer => layer.imageKey === example.nicknameKey)?.id ?? null)
