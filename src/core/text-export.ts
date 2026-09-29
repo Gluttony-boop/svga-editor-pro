@@ -88,7 +88,10 @@ export function mapSlotsToSourceImages(
   const result: Record<string, SlotConfig> = Object.assign(Object.create(null), slots)
   const referencedKeys = new Set(sprites?.map(sprite => sprite.imageKey).filter(Boolean))
   sprites?.forEach((sprite, index) => {
-    const layerKey = findOriginalLayer(layers || [], index)?.imageKey
+    const layer = findOriginalLayer(layers || [], index)
+    // 单层换图创建的是独立资源，不是旧共享 Key 的重命名。
+    if (layer?.resourceDetached) return
+    const layerKey = layer?.imageKey
     if (!layerKey || !sprite.imageKey || !slots || !hasOwn(slots, layerKey)) return
     result[sprite.imageKey] = slots[layerKey]
     if (layerKey !== sprite.imageKey && !referencedKeys.has(layerKey)) delete result[layerKey]

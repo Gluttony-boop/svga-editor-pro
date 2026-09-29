@@ -10,6 +10,8 @@ import { CanvasTransformOverlay } from './CanvasTransformOverlay'
 import { PreviewRenderQueue } from '@/core/preview-render-queue'
 import { startPlaybackClock } from '@/core/playback-clock'
 import { hasTextPreview } from '@/core/text-preview'
+import { TaskStarter } from './TaskStarter'
+import type { StarterTask } from '@/core/task-examples'
 
 type PreviewRenderer = HighPerformanceRenderer | OfficialSvgRenderer | SVGAPixiRendererType
 type PreviewState = ReturnType<typeof useEditorStore.getState>
@@ -20,6 +22,7 @@ interface CanvasPreviewProps {
   usePixiRenderer?: boolean // 是否使用 PixiJS 渲染器
   onOpenFile?: () => void
   onSvgaDrop?: (file: File) => void | Promise<void>
+  onStartTask?: (task: StarterTask) => void | Promise<void>
   immersive?: boolean
   onToggleImmersive?: () => void
 }
@@ -56,6 +59,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
   usePixiRenderer = false,
   onOpenFile,
   onSvgaDrop,
+  onStartTask,
   immersive = false,
   onToggleImmersive
 }) => {
@@ -600,7 +604,9 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
           )}
         </div>
       ) : (
-        <div className="absolute inset-0 flex items-center justify-center p-6"><DropZone onOpenFile={onOpenFile} onSvgaDrop={onSvgaDrop} /></div>
+        <div className="absolute inset-0 flex overflow-auto p-4">
+          {onStartTask ? <TaskStarter onStart={onStartTask} onOpenFile={onOpenFile} onSvgaDrop={onSvgaDrop} /> : <div className="m-auto"><DropZone onOpenFile={onOpenFile} onSvgaDrop={onSvgaDrop} /></div>}
+        </div>
       )}
 
       {pixiLoading && (
@@ -622,7 +628,7 @@ export const CanvasPreview: React.FC<CanvasPreviewProps> = ({
       {textPreviewCount > 0 && <div className="pointer-events-none absolute left-3 top-16 z-10 rounded border border-accent/30 bg-bg-secondary/95 px-2 py-1 text-[10px] text-accent">文字预览 · {textPreviewCount} 个 Key · {bakedTextCount > 0 ? `${bakedTextCount} 个转图片写入 SVGA` : '文案仅模拟，不写入 SVGA'}</div>}
 
       {/* 缩放控制 */}
-      <div ref={previewToolsRef} aria-label="画布工具" className="absolute bottom-4 right-4 z-10 flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-end gap-2 bg-bg-secondary/90 backdrop-blur rounded-lg border border-border/60 p-2" onMouseDown={e => e.stopPropagation()}>
+      <div ref={previewToolsRef} aria-label="画布工具" className={cn('absolute bottom-4 right-4 z-10 flex max-w-[calc(100%-2rem)] flex-wrap items-center justify-end gap-2 bg-bg-secondary/90 backdrop-blur rounded-lg border border-border/60 p-2', !videoItem && '!hidden')} onMouseDown={e => e.stopPropagation()}>
         <Button 
           variant="ghost" 
           size="sm"

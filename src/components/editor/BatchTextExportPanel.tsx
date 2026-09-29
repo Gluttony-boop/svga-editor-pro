@@ -21,7 +21,17 @@ export function BatchExportPreview({ result }: { result: BatchTextResult }) {
   </div>
 }
 
-export function BatchTextExportPanel({ controller: c, disabled = false }: { controller: ExportController; disabled?: boolean }) {
+export function BatchOutputModeSelector({ controller: c, disabled = false }: { controller: ExportController; disabled?: boolean }) {
+  return <fieldset disabled={disabled || c.busy || !!c.view} className="space-y-2 text-xs">
+    <legend className="mb-2">明确选择本批所选 Key 的输出方式</legend>
+    <label className="flex gap-2"><input type="radio" name="batch-output-mode" checked={c.mode === 'dynamic'} onChange={() => c.setMode('dynamic')} />动态接入：文案交给开发，SVGA 不写入所选字形</label>
+    <label className="flex gap-2"><input type="radio" name="batch-output-mode" checked={c.mode === 'bake'} onChange={() => c.setMode('bake')} />固定字形：文字写入 SVGA 图片，播放器不可动态改字</label>
+  </fieldset>
+}
+
+export function BatchTextExportPanel({ controller: c, disabled = false, showSetup = true, generationAllowed = true }: {
+  controller: ExportController; disabled?: boolean; showSetup?: boolean; generationAllowed?: boolean
+}) {
   const items = c.view?.queue.items ?? []
   const successes = items.filter(item => item.status === 'succeeded').length
   const failures = items.filter(item => item.status === 'failed').length
@@ -29,24 +39,21 @@ export function BatchTextExportPanel({ controller: c, disabled = false }: { cont
   const queued = items.filter(item => item.status === 'queued').length
   const taskInput = React.useRef<HTMLInputElement>(null)
   return <section aria-label="批量文字交付" className="space-y-3 rounded border border-border p-3" aria-busy={c.busy}>
-    <h3 className="text-sm font-medium">3. 批量文字交付</h3>
-    <p className="text-xs text-text-secondary">最多 100 条，逐条生成实际 SVGA、Key 清单、双预览与检查报告。所有行须通过预检；不修改画布、工程和撤销历史，不上传素材。</p>
+    <h3 className="text-sm font-medium">4. 生成结果</h3>
+    <p className="text-xs text-text-secondary">最多 100 条，逐条生成实际 SVGA、Key 清单、双预览与检查报告。所有行须通过数据检查；不修改画布、工程和撤销历史，不上传素材。</p>
     <div className="flex flex-wrap gap-2">
-      <Button disabled={disabled || c.busy} onClick={() => taskInput.current?.click()}>打开任务文件…</Button>
+      {showSetup && <Button disabled={disabled || c.busy} onClick={() => taskInput.current?.click()}>打开任务文件…</Button>}
       {c.view && <Button disabled={disabled || c.busy} onClick={() => void c.saveTask()}>保存任务文件（可继续）</Button>}
       <input ref={taskInput} type="file" accept=".svgabatch" aria-label="打开批量任务文件" className="hidden" onChange={event => {
         const file = event.target.files?.[0]; event.target.value = ''; if (file) void c.openTask(file)
       }} />
     </div>
     <p className="text-[11px] text-text-muted">任务文件 .svgabatch 包含可编辑源快照、原始文案和成功产物，不是客户交付 ZIP，请勿直接分享。打开任务不需预先导入原 SVGA，续跑不会混入当前画布。</p>
-    <fieldset disabled={disabled || c.busy || !!c.view} className="space-y-2 text-xs">
-      <legend className="mb-2">明确选择本批所选 Key 的输出方式</legend>
-      <label className="flex gap-2"><input type="radio" name="batch-output-mode" checked={c.mode === 'dynamic'} onChange={() => c.setMode('dynamic')} />动态接入：文案交给开发，SVGA 不写入所选字形</label>
-      <label className="flex gap-2"><input type="radio" name="batch-output-mode" checked={c.mode === 'bake'} onChange={() => c.setMode('bake')} />固定字形：文字写入 SVGA 图片，播放器不可动态改字</label>
-    </fieldset>
-    <p className="text-[11px] text-text-muted">{c.view ? '沿用任务快照中的' : '沿用当前'}字体、显示范围、图片和优化设置，关闭跨 Key 去重。其他 Key 保持原设置；长文案仍可能裁切，请抽样核对。</p>
+    {showSetup && <BatchOutputModeSelector controller={c} disabled={disabled} />}
+    {!showSetup && c.mode && <p className="text-xs">本批输出：{c.mode === 'bake' ? '固定字形 · 文字写入 SVGA 图片' : '动态接入 · 文案交给开发，SVGA 不写入所选字形'}</p>}
+    <p className="text-[11px] text-text-muted">沿用{c.view ? '任务' : '所选模板'}快照中的字体、显示范围、图片和优化设置，关闭跨 Key 去重。其他 Key 保持原设置；长文案仍可能裁切，请抽样核对。</p>
     <div className="flex flex-wrap gap-2">
-      {!c.view && <Button disabled={disabled || c.busy || !c.ready || !c.mode} onClick={() => void c.execute('start')}>生成批量交付</Button>}
+      {!c.view && <Button variant="primary" disabled={disabled || c.busy || !c.ready || !c.mode || !generationAllowed} onClick={() => void c.execute('start')}>生成批量交付</Button>}
       {!!failures && <Button disabled={disabled || c.busy} onClick={() => void c.execute('retry-failed')}>仅重试失败项</Button>}
       {!!stopped && <Button disabled={disabled || c.busy} onClick={() => void c.execute('resume-cancelled')}>继续已停止项</Button>}
       {!!queued && !stopped && <Button disabled={disabled || c.busy} onClick={() => void c.execute('start')}>继续待执行项</Button>}
@@ -59,7 +66,7 @@ export function BatchTextExportPanel({ controller: c, disabled = false }: { cont
       <p className="text-xs">{items.length} 条 · {successes} 已生成 · {failures} 失败 · {stopped} 已停止</p>
       <p className="break-all text-[11px] text-text-muted">源快照 SHA-256：{c.view.sourceRevision.slice(0, 16)}… · {c.view.mode === 'bake' ? '固定字形' : '动态接入'} · 重试沿用此快照，不混入后续修改。</p>
       {c.restored && <p className="text-xs text-warning">独立恢复的任务：上方清单输入与当前画布不属于此任务，继续生成使用文件中保存的文案、模式和源工程。字体仍依赖本机安装，跨设备续跑请核对字体。</p>}
-      {c.stale && <p role="alert" className="text-xs text-warning">当前工程或清单已变化，以下结果属于此前快照。可保存旧结果；需要新编辑内容时请释放结果、重新预检并生成。</p>}
+      {c.stale && <p role="alert" className="text-xs text-warning">模板或清单已变化，以下结果属于此前快照。可保存旧结果；需要新内容时请释放结果、重新核对数据与预览后生成。</p>}
       <div className="max-h-56 overflow-auto"><table className="w-full text-left text-xs"><thead><tr><th className="p-1">记录 / 编号</th><th className="p-1">状态</th><th className="p-1">核对</th></tr></thead><tbody>
         {items.map(item => <tr key={item.row.id} className="border-t border-border"><td className="max-w-40 break-all p-1">{item.row.row} / {item.row.id}
           <details><summary className="cursor-pointer text-text-muted">任务文案</summary><dl>{Object.entries(item.row.values).map(([key, value]) => <React.Fragment key={key}><dt className="whitespace-pre-wrap font-mono text-accent">{key}</dt><dd className="whitespace-pre-wrap">{typeof value === 'string' ? value : '（非文字）'}</dd></React.Fragment>)}</dl></details>

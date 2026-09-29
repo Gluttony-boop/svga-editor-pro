@@ -240,6 +240,8 @@ export interface CanvasTransform {
 export interface Layer {
   id: string
   name: string
+  /** 扁平命名编组仅用于组织与选择，不改变渲染顺序或建立父子变换。 */
+  group?: { id: string; name: string }
   type: LayerType
   visible: boolean
   locked: boolean
@@ -258,6 +260,8 @@ export interface Layer {
   // 图片图层特有属性
   imageKey?: string
   imageSource?: ImageSource
+  /** 独立图片绑定保留原 sprite 索引及动画，不把导入层转换为新增层。 */
+  resourceDetached?: boolean
   
   // 音频图层特有属性
   audioKey?: string

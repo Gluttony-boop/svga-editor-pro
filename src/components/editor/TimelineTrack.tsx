@@ -69,9 +69,9 @@ TimelineLayerTrack.displayName = 'TimelineLayerTrack'
 interface TimelinePropertyTrackProps extends CommonTrackProps {
   track: keyof LayerTracks
   currentFrame: number
-  selection: TimelineKeySelection | null
+  selection: readonly TimelineKeySelection[]
   onInsert: (layerId: string, track: keyof LayerTracks) => void
-  onKeySelect: (selection: TimelineKeySelection) => void
+  onKeySelect: (selection: TimelineKeySelection, additive?: boolean, range?: boolean) => void
   onKeyPointerDown: (event: React.PointerEvent<HTMLButtonElement>, selection: TimelineKeySelection) => void
 }
 
@@ -94,12 +94,12 @@ export const TimelinePropertyTrack = React.memo(({
       {keys.filter(key => key.frameIndex + offset >= start && key.frameIndex + offset <= end).map(key => {
         const outputFrame = key.frameIndex + offset
         if (outputFrame < 0 || outputFrame >= totalFrames) return null
-        const isSelected = selection?.layerId === layer.id && selection.track === track && selection.keyId === key.id
+        const isSelected = selection.some(selectedKey => selectedKey.layerId === layer.id && selectedKey.track === track && selectedKey.keyId === key.id)
         return (
           <button key={key.id} type="button" data-timeline-key={key.id} aria-label={`${layer.name} ${TRACK_LABELS[track]} 第 ${outputFrame + 1} 帧关键帧`} aria-pressed={isSelected}
-            title={`第 ${outputFrame + 1} 帧 · ${TRACK_LABELS[track]} · ${layer.locked || !layer.visible ? '只读' : '拖动调整时间，F9 缓入缓出'}`}
+            title={`第 ${outputFrame + 1} 帧 · ${TRACK_LABELS[track]} · ${layer.locked || !layer.visible ? '只读' : '单选拖动调整时间 · Ctrl/Cmd 点选多选 · Shift 同轨区间 · F9 缓入缓出'}`}
             onPointerDown={event => onKeyPointerDown(event, keyRef(key))}
-            onClick={event => { if (event.detail === 0) onKeySelect(keyRef(key)) }}
+            onClick={event => { if (event.detail === 0) onKeySelect(keyRef(key), event.ctrlKey || event.metaKey, event.shiftKey) }}
             className={cn('absolute z-[11] flex h-5 w-4 items-center justify-center rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-accent', isSelected ? 'text-accent' : 'text-slate-400 hover:text-accent', !layer.visible && 'opacity-50', layer.locked || !layer.visible ? 'cursor-default' : 'cursor-ew-resize')}
             style={{ top: (rowHeight - 20) / 2, left: GUTTER + outputFrame * frameWidth - 8 }}>
             <span className={cn('h-2 w-2 border border-current', key.easing !== 'hold' && 'rotate-45', isSelected ? 'bg-accent shadow-[0_0_0_2px_rgba(0,0,0,0.45)]' : 'bg-bg-tertiary')} />

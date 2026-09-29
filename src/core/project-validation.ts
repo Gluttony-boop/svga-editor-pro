@@ -1,6 +1,7 @@
 import type { ProjectDocument } from '@/types/project'
 import { PROJECT_FORMAT } from '@/types/project'
 import { getCanvasSizeError } from './canvas-size'
+import { getGroupNameError } from './layer-groups'
 
 export const MAX_PROJECT_BYTES = 128 * 1024 * 1024
 export const MAX_PROJECT_UNPACKED_BYTES = 256 * 1024 * 1024
@@ -156,7 +157,7 @@ function tracks(value: unknown, path: string, ids: Set<string>, edited: boolean)
 
 function layer(value: unknown, path: string, layerIds: Set<string>, keyframeIds: Set<string>): void {
   const item = record(value, path, ['id', 'name', 'type', 'visible', 'locked', 'expanded', 'opacity', 'blendMode', 'clip', 'tracks'],
-    ['timeOffsetFrames', 'imageKey', 'audioKey', 'audioStartTime', 'audioDuration', 'editableIndex', 'animationTracks', 'canvasTransform', 'sprites', 'isNew'])
+    ['group', 'resourceDetached', 'timeOffsetFrames', 'imageKey', 'audioKey', 'audioStartTime', 'audioDuration', 'editableIndex', 'animationTracks', 'canvasTransform', 'sprites', 'isNew'])
   text(item.id, `${path}.id`, 256, true)
   unique(item.id, layerIds, `${path}.id`)
   text(item.name, `${path}.name`)
@@ -172,6 +173,15 @@ function layer(value: unknown, path: string, layerIds: Set<string>, keyframeIds:
   for (const key of ['audioStartTime', 'audioDuration']) optional(item, key, (v, p) => number(v, p, 0), path)
   optional(item, 'editableIndex', (v, p) => number(v, p, 0, MAX_PROJECT_ENTRIES, true), path)
   optional(item, 'isNew', bool, path)
+  optional(item, 'resourceDetached', bool, path)
+  if (item.resourceDetached && (item.type !== 'image' || typeof item.imageKey !== 'string' || !item.imageKey)) projectError(`${path} 独立资源必须绑定图片图层`)
+  if (item.group !== undefined) {
+    const group = record(item.group, `${path}.group`, ['id', 'name'])
+    text(group.id, `${path}.group.id`, 256, true)
+    text(group.name, `${path}.group.name`, 80, true)
+    const error = getGroupNameError(group.name)
+    if (error || group.name !== group.name.trim()) projectError(`${path}.group ${error ?? '名称不能含首尾空白'}`)
+  }
   tracks(item.tracks, `${path}.tracks`, keyframeIds, false)
   if (item.animationTracks !== undefined) tracks(item.animationTracks, `${path}.animationTracks`, keyframeIds, true)
   if (item.canvasTransform !== undefined) numbers(item.canvasTransform, `${path}.canvasTransform`, ['x', 'y', 'scaleX', 'scaleY', 'rotation'], true)
@@ -295,6 +305,14 @@ export function validateProjectManifest(value: unknown): asserts value is Projec
   })
   const layerIds = new Set<string>(), keyframeIds = new Set<string>()
   array(doc.layers, 'layers').forEach((value, index) => layer(value, `layers[${index}]`, layerIds, keyframeIds))
+  const groupNames = new Map<string, string>()
+  for (const item of doc.layers as JsonRecord[]) {
+    if (!item.group) continue
+    const group = item.group as { id: string; name: string }
+    if (groupNames.has(group.id) && groupNames.get(group.id) !== group.name) projectError('同一编组的名称不一致')
+    groupNames.set(group.id, group.name)
+  }
+  const resourceImageKeys = new Set<string>()
   for (const kind of ['imageResources', 'audioResources']) {
     const keys = new Set<string>()
     array(doc[kind], kind).forEach((value, index) => {
@@ -305,6 +323,7 @@ export function validateProjectManifest(value: unknown): asserts value is Projec
       assetRef(item.data, `${at}.data`, assets, usedAssets)
       optional(item, 'isNew', bool, at)
       if (kind === 'imageResources') {
+        resourceImageKeys.add(item.key)
         number(item.width, `${at}.width`, 1, 100000, true)
         number(item.height, `${at}.height`, 1, 100000, true)
         enumeration(item.mimeType, `${at}.mimeType`, ['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -313,6 +332,9 @@ export function validateProjectManifest(value: unknown): asserts value is Projec
         number(item.duration, `${at}.duration`, 0)
       }
     })
+  }
+  for (const item of doc.layers as JsonRecord[]) {
+    if (item.resourceDetached && !resourceImageKeys.has(item.imageKey as string)) projectError('独立图层缺少图片资源')
   }
   const slotKeys = new Set<string>()
   array(doc.slotConfigs, 'slotConfigs').forEach((value, index) => {

@@ -1,5 +1,5 @@
 import React from 'react'
-import { mergeSlotImageConfig, withoutSlotImageConfig } from '@/utils/slot-config'
+import { withoutSlotImageConfig } from '@/utils/slot-config'
 import { Panel, Icon, Button, Modal } from '@/components/ui'
 import { useEditorStore } from '@/stores'
 import { resourceManager, createSaveFileTarget, saveGeneratedFile } from '@/core'
@@ -9,7 +9,9 @@ import type { ImageResource } from '@/types'
 import { cn } from '@/utils/cn'
 import { fitImageToDataUrl, validateReplacementSize, type ImageFitMode } from '@/core/image-fit'
 import { captureReplacementTarget, isReplacementTargetCurrent } from '@/core/replacement-target'
-import { describeResourceScope, buildResourceUsageIndex } from '@/utils/resource-usage'
+import { buildResourceUsageIndex } from '@/utils/resource-usage'
+import { getCurrentReplacementLayer, type ImageReplacementScope } from '@/core/image-replacement'
+import { ReplacementScopeControls } from './ReplacementScopeControls'
 import { auditResources, RESOURCE_FILTERS, type ResourceFilter } from '@/utils/resource-audit'
 import { requestLayerReveal } from '@/utils/layer-navigation'
 import { ResourceInspector } from '@/components/editor/ResourceInspector'
@@ -24,6 +26,7 @@ interface ReplacementDraft {
   height: number
   mode: ImageFitMode
   target: ReturnType<typeof captureReplacementTarget>
+  layerId: string | null
 }
 
 /**
@@ -72,6 +75,9 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   const setSlotConfig = useEditorStore((s) => s.setSlotConfig)
   const removeSlotConfig = useEditorStore((s) => s.removeSlotConfig)
   const renameImageResourceKey = useEditorStore((s) => s.renameImageResourceKey)
+  const replaceImageResource = useEditorStore((s) => s.replaceImageResource)
+  const selectedLayerId = useEditorStore((s) => s.selectedLayerId)
+  const selectedLayerIds = useEditorStore((s) => s.selectedLayerIds)
 
   const [isLoading, setIsLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
@@ -95,10 +101,13 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   const [pendingReplacement, setPendingReplacement] = React.useState<ReplacementDraft | null>(null)
   const [replacementPreview, setReplacementPreview] = React.useState<{ draft: ReplacementDraft; dataUrl: string } | null>(null)
   const [replacementError, setReplacementError] = React.useState<string | null>(null)
+  const [replacementScope, setReplacementScope] = React.useState<ImageReplacementScope>('all-references')
   const mountedRef = React.useRef(true)
   const selectionIdRef = React.useRef(0)
   const replacementIsCurrent = !!pendingReplacement && isReplacementTargetCurrent(pendingReplacement.target, useEditorStore.getState())
   const replacementIsReady = !!pendingReplacement && replacementPreview?.draft === pendingReplacement
+  const currentReplacementLayer = pendingReplacement ? getCurrentReplacementLayer({ ...useEditorStore.getState(), selectedLayerId, selectedLayerIds }, pendingReplacement.key, pendingReplacement.layerId) : null
+  const replacementScopeIsReady = replacementScope === 'all-references' || !!currentReplacementLayer?.layer
 
   React.useEffect(() => {
     mountedRef.current = true
@@ -211,7 +220,9 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
           mimeType: detectImageMime(resource.data, resource.mimeType),
           isNew: resource.isNew,
           width: resource.width,
-          height: resource.height
+          height: resource.height,
+          // 工程读回及单层拆分只保存字节，不依赖临时 Blob URL。
+          buffer: resource.data.byteLength ? new Uint8Array(resource.data).buffer : undefined
         })
       }
     })
@@ -415,7 +426,9 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
   const handleReplaceImage = (key: string) => {
     const item = allResources.find((resource) => resource.key === key)
     try { validateReplacementSize(item?.width ?? 0, item?.height ?? 0) } catch (err) { setError((err as Error).message); return }
-    const target = captureReplacementTarget(useEditorStore.getState(), key)
+    const state = useEditorStore.getState()
+    const target = captureReplacementTarget(state, key)
+    const layerId = getCurrentReplacementLayer(state, key).layer?.id || null
     const selectionId = ++selectionIdRef.current
     const input = document.createElement('input')
     input.type = 'file'
@@ -428,7 +441,8 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
         if (!file.size || file.size > 32 * 1024 * 1024) { setError('请选择非空且不超过 32 MiB 的图片'); return }
         const url = URL.createObjectURL(file)
         setError(null)
-        setPendingReplacement({ key, url, width: item!.width!, height: item!.height!, mode: 'fit', target })
+        setReplacementScope(layerId ? 'current-layer' : 'all-references')
+        setPendingReplacement({ key, url, width: item!.width!, height: item!.height!, mode: 'fit', target, layerId })
       }
     }
     input.click()
@@ -451,10 +465,9 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
     const current = pendingReplacement
     if (!isReplacementTargetCurrent(current.target, useEditorStore.getState())) { setReplacementError('原素材已变化，请关闭后重新替换'); return }
     const dataUrl = replacementPreview.dataUrl
-    // 拟合已烘焙进 PNG；换图不清除同 Key 的独立文字模拟。
-    const configs = useEditorStore.getState().slotConfigs
-    setSlotConfig(current.key, mergeSlotImageConfig(Object.prototype.hasOwnProperty.call(configs, current.key) ? configs[current.key] : undefined, current.key, dataUrl, 'stretch'))
-    setExtractionStatus(`已应用替换：${current.key}（${current.mode === 'fit' ? '等比适应' : current.mode === 'fill' ? '裁切填充' : '拉伸'}）`)
+    const result = replaceImageResource(current.key, dataUrl, replacementScope, current.layerId, current.target)
+    if (!result.changed) { setReplacementError(result.error || '未应用替换，请重新检查目标'); return }
+    setExtractionStatus(`已应用${replacementScope === 'current-layer' ? '单层替换（独立资源）' : '所有引用替换'}：${result.key || current.key}（${current.mode === 'fit' ? '等比适应' : current.mode === 'fill' ? '裁切填充' : '拉伸'}）`)
     setPendingReplacement(null)
   }
 
@@ -826,12 +839,13 @@ export const ResourcePanel: React.FC<ResourcePanelProps> = ({
         title="预览素材替换"
         footer={<>
           <Button variant="ghost" onClick={cancelReplacement}>取消</Button>
-          <Button variant="primary" disabled={!replacementIsReady || !replacementIsCurrent} onClick={confirmReplacement}>确认替换</Button>
+          <Button variant="primary" disabled={!replacementIsReady || !replacementIsCurrent || !replacementScopeIsReady} onClick={confirmReplacement}>确认替换</Button>
         </>}
       >
         {pendingReplacement && <div className="space-y-3">
           <p className="text-xs text-text-muted">{pendingReplacement.key} · 目标尺寸 {pendingReplacement.width}×{pendingReplacement.height}</p>
-          <p className="rounded bg-warning/10 p-2 text-xs text-warning">{describeResourceScope(pendingReplacement.key, layers, videoItem)}</p>
+          <ReplacementScopeControls scope={replacementScope} onChange={setReplacementScope} currentLayerId={currentReplacementLayer?.layer?.id}
+            currentLayerError={currentReplacementLayer?.error} usages={usageIndex.get(pendingReplacement.key) || []} />
           {!replacementIsCurrent && <p role="alert" className="text-sm text-warning">原素材或替换配置已变化，不能应用旧预览。请取消后重新操作。</p>}
           {replacementError && <p role="alert" className="text-sm text-error">{replacementError}</p>}
           <div className="flex h-56 items-center justify-center overflow-hidden rounded border border-border" style={{ backgroundColor: '#d1d5db', backgroundImage: 'conic-gradient(#f3f4f6 25%, transparent 0 50%, #f3f4f6 0 75%, transparent 0)', backgroundSize: '20px 20px' }}>

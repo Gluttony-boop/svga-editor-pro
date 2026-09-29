@@ -2,9 +2,9 @@ import type { Layer } from '@/types'
 
 export type LayerFilter = 'all' | 'visible' | 'hidden' | 'locked' | 'unlocked'
 
-type SearchableLayer = Pick<Layer, 'name' | 'imageKey' | 'visible' | 'locked'>
+type SearchableLayer = Pick<Layer, 'name' | 'imageKey' | 'visible' | 'locked' | 'group'>
 
-/** Keep source indices so filtering never changes layer numbering or edit targets. */
+/** 保留源索引，搜索编组不会重排图层编号或改变编辑目标。 */
 export function filterLayers<T extends SearchableLayer>(
   layers: readonly T[],
   query: string,
@@ -12,7 +12,7 @@ export function filterLayers<T extends SearchableLayer>(
 ): { layer: T; index: number }[] {
   const keyword = query.trim().toLocaleLowerCase()
   return layers.flatMap((layer, index) => {
-    const matchesName = !keyword || [layer.name, layer.imageKey ?? '']
+    const matchesName = !keyword || [layer.name, layer.imageKey ?? '', layer.group?.name ?? '']
       .some((value) => value.toLocaleLowerCase().includes(keyword))
     const matchesStatus = filter === 'all'
       || (filter === 'visible' && layer.visible)

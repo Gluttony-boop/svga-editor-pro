@@ -5,9 +5,11 @@ import { cn } from '@/utils/cn'
 import { getSelectedLayerIds, selectLayerInList } from '@/utils/layer-selection'
 import { getLayerTimeOffset } from '@/core/layer-time'
 import { EDITABLE_TRACKS, TRACK_LABELS, getKeyframeEditError } from '@/core/keyframe-editing'
-import type { EasingType, LayerTracks } from '@/types'
+import { animationKeyIdentity, copyAnimationKeyframes } from '@/core/keyframe-clipboard'
+import type { KeyframeClipboard } from '@/core/keyframe-clipboard'
+import type { EasingType, LayerTracks, VideoItem } from '@/types'
 import { TIMELINE_GUTTER as GUTTER, clampFrame, frameAtPointer, rulerStep, zoomScroll, fitFrameWidth, timelineRulerFrames } from '@/utils/timeline'
-import { buildTimelineRows, findTimelineKey, keyframeAtDrag, keyframeMoveError, timelineInsertionError } from '@/utils/timeline-keyframes'
+import { buildTimelineRows, findTimelineKey, keyframeAtDrag, keyframeMoveError, selectTimelineKeys, timelineInsertionError } from '@/utils/timeline-keyframes'
 import type { TimelineKeySelection, TimelineTrackFilter } from '@/utils/timeline-keyframes'
 import { TimelineLayerTrack, TimelinePropertyTrack } from './TimelineTrack'
 import { TimelineKeyframeInspector } from './TimelineKeyframeInspector'
@@ -35,6 +37,8 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   const frameRef = useRef(0)
   const dragRef = useRef<{ pointer: number; x: number } | null>(null)
   const selectionAnchor = useRef<string | null>(null)
+  const keySelectionAnchor = useRef<TimelineKeySelection | null>(null)
+  const keyClipboardSource = useRef<VideoItem | null>(null)
   const keyDragRef = useRef<KeyframeDrag | null>(null)
   const pendingZoomRef = useRef<number | null>(null)
   const resizeRef = useRef<{ y:number; height:number } | null>(null)
@@ -50,7 +54,8 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   const [trackFilter, setTrackFilter] = useState<TimelineTrackFilter>('all')
   const [onlySelected, setOnlySelected] = useState(false)
   const [expansion, setExpansion] = useState<Record<string, boolean>>({})
-  const [keySelection, setKeySelection] = useState<TimelineKeySelection | null>(null)
+  const [keySelections, setKeySelections] = useState<TimelineKeySelection[]>([])
+  const [keyClipboard, setKeyClipboard] = useState<KeyframeClipboard | null>(null)
   const [keyPreview, setKeyPreview] = useState<{ selection: TimelineKeySelection; frame: number; error: string | null } | null>(null)
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null)
   const videoItem = useEditorStore(s => s.videoItem)
@@ -63,7 +68,9 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   const selectedIds = React.useMemo(() => getSelectedLayerIds({ layers, selectedLayerId, selectedLayerIds }), [layers, selectedLayerId, selectedLayerIds])
   const selectLayer = useEditorStore(s => s.selectLayer)
   const rows = React.useMemo(() => buildTimelineRows(layers, selectedLayerId, expansion, trackFilter, onlySelected, selectedIds), [layers, selectedLayerId, expansion, trackFilter, onlySelected, selectedIds])
+  const keySelection = keySelections.length === 1 ? keySelections[0] : null
   const selectedKey = findTimelineKey(layers, keySelection)
+  const clipboardLayers = new Set(keyClipboard?.keys.map(key => key.layerId))
   const available = !!videoItem && totalFrames > 0
   const rowHeight = compact ? 24 : 28
   const automaticWidth = fitFrameWidth(viewport.width, totalFrames)
@@ -124,7 +131,8 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
     dragRef.current = null
     cancelKeyDrag()
     setScrubbing(false)
-    setKeySelection(null)
+    setKeySelections([])
+    keySelectionAnchor.current = null
     setExpansion({})
     selectionAnchor.current = null
     setNotice(null)
@@ -160,11 +168,13 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   }, [selectedLayerId, rows, rowHeight, viewport.height, readScroll])
 
   useEffect(() => {
-    if (keySelection && (selectedLayerId !== keySelection.layerId || !findTimelineKey(layers, keySelection))) {
-      setKeySelection(null)
-      cancelKeyDrag()
-    }
-  }, [selectedLayerId, layers, keySelection, cancelKeyDrag])
+    setKeySelections(previous => {
+      const remaining = previous.filter(key => findTimelineKey(layers, key))
+      return remaining.length === previous.length ? previous : remaining
+    })
+    if (keySelectionAnchor.current && !findTimelineKey(layers, keySelectionAnchor.current)) keySelectionAnchor.current = null
+    if (keyDragRef.current && !findTimelineKey(layers, keyDragRef.current.selection)) cancelKeyDrag()
+  }, [layers, cancelKeyDrag])
 
   useEffect(() => {
     const stop = () => { dragRef.current = null; resizeRef.current = null; setScrubbing(false); cancelKeyDrag() }
@@ -186,17 +196,19 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
     if (el) seek(frameAtPointer(clientX, el.getBoundingClientRect().left, el.scrollLeft, frameWidth, totalFrames))
   }, [frameWidth, totalFrames, seek])
 
-  const selectTimelineKey = useCallback((selection: TimelineKeySelection) => {
+  const selectTimelineKey = useCallback((selection: TimelineKeySelection, additive = false, range = false) => {
     const state = useEditorStore.getState()
     const found = findTimelineKey(state.layers, selection)
     if (!found) return
-    state.selectLayer(selection.layerId)
+    const next = selectTimelineKeys(state.layers, keySelections, selection, keySelectionAnchor.current, additive, range)
+    keySelectionAnchor.current = next.anchor
+    if (next.selection.length) state.selectLayers([...new Set(next.selection.map(key => key.layerId))])
     state.setTransformEditMode('keyframe')
-    setKeySelection(selection)
+    setKeySelections(next.selection)
     setNotice(null)
     seek(found.outputFrame)
     revealFrame(found.outputFrame)
-  }, [seek, revealFrame])
+  }, [keySelections, seek, revealFrame])
 
   const insertKeys = (layerIds: string[], tracks: (keyof LayerTracks)[], preserveSelection = false) => {
     // 播放器在暂停回调中同步实际画面帧，不能沿用暂停前的播放头缓存。
@@ -213,7 +225,8 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
     const track = tracks[0]
     if (preserveSelection && ids.length > 1) {
       // 批量插入仍维持图层多选，不将某个关键帧提升为唯一选中图层。
-      setKeySelection(null)
+      setKeySelections([])
+      keySelectionAnchor.current = null
       seek(frame)
     } else {
       const layer = updated.layers.find(item => item.id === ids[0])
@@ -238,16 +251,53 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   }
 
   const deleteSelectedKey = () => {
-    if (!keySelection) { setNotice({ text: '请先选择一个关键帧；此处不会删除图层。', error: false }); return }
-    const result = useEditorStore.getState().deleteAnimationKeyframes(keySelection.layerId, keySelection.track, [keySelection.keyId])
-    setNotice({ text: result.error ?? '已删除关键帧，可撤销', error: !!result.error })
-    if (!result.error) setKeySelection(null)
+    if (!keySelections.length) { setNotice({ text: '请先选择关键帧；此处不会删除图层。', error: false }); return }
+    const result = useEditorStore.getState().deleteSelectedAnimationKeyframes(keySelections)
+    setNotice({ text: result.error ?? `已删除 ${keySelections.length} 个关键帧，可整组撤销`, error: !!result.error })
+    if (!result.error) { setKeySelections([]); keySelectionAnchor.current = null }
   }
 
   const setSelectedEasing = (easing: EasingType) => {
-    if (!keySelection) { setNotice({ text: '请先选择关键帧，再设置缓动。', error: false }); return }
-    const result = useEditorStore.getState().setAnimationEasing(keySelection.layerId, keySelection.track, [keySelection.keyId], easing)
-    setNotice({ text: result.error ?? '已更新关键帧的出段缓动', error: !!result.error })
+    if (!keySelections.length) { setNotice({ text: '请先选择关键帧，再设置缓动。', error: false }); return }
+    const result = useEditorStore.getState().setSelectedAnimationEasing(keySelections, easing)
+    setNotice({ text: result.error ?? `已更新 ${keySelections.length} 个关键帧的出段缓动`, error: !!result.error })
+  }
+
+  const copySelectedKeys = () => {
+    cancelKeyDrag()
+    const state = useEditorStore.getState()
+    const result = copyAnimationKeyframes(state.layers, keySelections, state.playback.totalFrames)
+    if (!result.clipboard) { setNotice({ text: result.error ?? '未复制关键帧。', error: true }); return }
+    keyClipboardSource.current = state.videoItem
+    setKeyClipboard(result.clipboard)
+    setNotice({ text: `已复制 ${result.clipboard.keys.length} 个关键帧；粘贴以播放头为起点，保留间距与缓动。仅存于本机会话。`, error: false })
+  }
+
+  const pasteKeys = (toCurrentLayer = false) => {
+    if (!keyClipboard) { setNotice({ text: '请先复制调整轨道上的关键帧。', error: false }); return }
+    cancelKeyDrag()
+    if (!toCurrentLayer && useEditorStore.getState().videoItem !== keyClipboardSource.current) {
+      setNotice({ text: '来源工程已切换，不会按相同图层编号自动映射；单来源剪贴板可使用“粘贴至当前图层”。', error: true })
+      return
+    }
+    useEditorStore.getState().setPlaying(false)
+    const state = useEditorStore.getState()
+    const selected = getSelectedLayerIds(state)
+    if (toCurrentLayer && selected.length !== 1) { setNotice({ text: '粘贴至当前图层需要只选中一个目标图层。', error: true }); return }
+    const frame = state.playback.currentFrame
+    const result = state.pasteAnimationKeyframes(keyClipboard, frame, toCurrentLayer ? selected[0] : undefined)
+    if (result.error) { setNotice({ text: result.error, error: true }); return }
+    const selection = result.selection ?? []
+    setKeySelections(selection)
+    keySelectionAnchor.current = selection[0] ?? null
+    const ids = [...new Set(selection.map(key => key.layerId))]
+    if (ids.length) state.selectLayers(ids)
+    state.setTransformEditMode('keyframe')
+    setExpansion(previous => ({ ...previous, ...Object.fromEntries(ids.map(id => [id, true])) }))
+    setTrackFilter('all')
+    seek(frame)
+    revealFrame(frame)
+    setNotice({ text: `已粘贴 ${selection.length} 个关键帧，可整组撤销；未覆盖已有关键帧。`, error: false })
   }
 
   const beginKeyDrag = (event: React.PointerEvent<HTMLButtonElement>, selection: TimelineKeySelection) => {
@@ -255,9 +305,17 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
     event.preventDefault()
     event.stopPropagation()
     cancelKeyDrag()
-    selectTimelineKey(selection)
     const el = viewportRef.current
     el?.focus({ preventScroll: true })
+    if (event.ctrlKey || event.metaKey || event.shiftKey) {
+      selectTimelineKey(selection, event.ctrlKey || event.metaKey, event.shiftKey)
+      return
+    }
+    if (keySelections.length > 1 && keySelections.some(key => animationKeyIdentity(key) === animationKeyIdentity(selection))) {
+      setNotice({ text: '多选可复制、粘贴、删除或设置缓动；移动时间请先取消多选，再拖动单个关键帧。', error: false })
+      return
+    }
+    selectTimelineKey(selection)
     const state = useEditorStore.getState()
     const found = findTimelineKey(state.layers, selection)
     if (!el || !found) return
@@ -298,18 +356,22 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
 
   const handleTimelineKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.nativeEvent.isComposing) return
+    if ((event.target as HTMLElement).closest('input,select,textarea,[contenteditable]:not([contenteditable="false"])')) {
+      if (event.key === 'Delete' || event.key === 'Backspace') event.stopPropagation()
+      return
+    }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+      if (event.key.toLowerCase() === 'c') { event.preventDefault(); event.stopPropagation(); copySelectedKeys(); return }
+      if (event.key.toLowerCase() === 'v') { event.preventDefault(); event.stopPropagation(); pasteKeys(); return }
+    }
     if (event.ctrlKey || event.metaKey || event.altKey) return
     if (event.key === 'F9') {
       event.preventDefault(); event.stopPropagation(); cancelKeyDrag(); setSelectedEasing('easeInOut'); return
     }
-    if ((event.target as HTMLElement).closest('input,select,textarea,[contenteditable="true"]')) {
-      if (event.key === 'Delete' || event.key === 'Backspace') event.stopPropagation()
-      return
-    }
     if (event.key === 'Escape') {
       event.preventDefault(); event.stopPropagation()
       if (keyDragRef.current) { cancelKeyDrag(); setNotice({ text: '已取消关键帧移动', error: false }) }
-      else setKeySelection(null)
+      else { setKeySelections([]); keySelectionAnchor.current = null }
       return
     }
     if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -387,7 +449,7 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   const previewRow = keyPreview ? rows.findIndex(row => row.layer.id === keyPreview.selection.layerId && row.track === keyPreview.selection.track) : -1
   const insertionError = timelineInsertionError(layers, selectedIds, frameRef.current, totalFrames)
   const onLayerSelect = (id: string, additive = false, range = false) => {
-    cancelKeyDrag(); setKeySelection(null)
+    cancelKeyDrag(); setKeySelections([]); keySelectionAnchor.current = null
     const next = selectLayerInList(rows.filter(row => !row.track).map(row => row.layer.id), selectedIds, id,
       selectionAnchor.current ?? selectedLayerId, range, additive)
     selectionAnchor.current = next.anchor
@@ -429,6 +491,21 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
           title={insertionError ?? `为选中的 ${selectedIds.length} 个图层在当前帧插入调整关键帧，保留已有值；任一图层不可编辑则整组不变`} className="rounded border border-accent/30 px-1.5 py-0.5 text-accent hover:bg-accent/10 disabled:opacity-30">◆ 插入关键帧</button>
         <span id="timeline-insertion-hint" className={cn('ml-auto truncate', insertionError && selectedIds.length ? 'text-error' : 'text-text-muted')} title={insertionError ?? '调整轨道叠加在原始逐帧动画上；拖动播放头不会自动创建关键帧'}>{selectedIds.length && insertionError ? insertionError : '调整轨道 · 保留原始动画'}</span>
       </div>
+      {available && <div className="flex flex-shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1 text-[11px]" aria-label="关键帧多选与剪贴板">
+        <span className={cn('tabular-nums', keySelections.length ? 'text-accent' : 'text-text-muted')} data-testid="timeline-key-selection-count">已选 {keySelections.length} 个关键帧</span>
+        <button type="button" disabled={!keySelections.length} onClick={copySelectedKeys} title="复制所选调整关键帧（时间轴内 Ctrl/Cmd+C），保留相对时间、属性值和缓动"
+          className="rounded border border-border px-1.5 py-0.5 text-text-secondary hover:bg-bg-tertiary disabled:opacity-30">复制关键帧</button>
+        <button type="button" disabled={!keyClipboard || videoItem !== keyClipboardSource.current} onClick={() => pasteKeys()} title="粘贴回同一工程的来源图层（时间轴内 Ctrl/Cmd+V）；最早关键帧对齐播放头，任意冲突会整组拒绝"
+          className="rounded border border-border px-1.5 py-0.5 text-text-secondary hover:bg-bg-tertiary disabled:opacity-30">粘贴回原图层</button>
+        <button type="button" disabled={!keyClipboard || clipboardLayers.size !== 1 || selectedIds.length !== 1} onClick={() => pasteKeys(true)}
+          title="仅单一来源图层的关键帧可映射到当前选中的一个图层；保留轨道和相对帧，任意冲突会整组拒绝"
+          className="rounded border border-border px-1.5 py-0.5 text-text-secondary hover:bg-bg-tertiary disabled:opacity-30">粘贴至当前图层</button>
+        {keySelections.length > 1 && <>
+          <button type="button" onClick={() => setSelectedEasing('easeInOut')} title="为全部所选关键帧设置出段缓入缓出（F9）；任一图层不可编辑则整组不变" className="rounded px-1.5 py-0.5 text-text-secondary hover:bg-bg-tertiary">F9 缓入缓出</button>
+          <button type="button" onClick={deleteSelectedKey} title="删除全部所选关键帧（Delete），一次撤销恢复整组" className="rounded px-1.5 py-0.5 text-text-muted hover:bg-error/10 hover:text-error">删除所选关键帧</button>
+        </>}
+        <span className="ml-auto text-text-muted" title="Ctrl/Cmd 点选切换；Shift 选择同一轨道内区间；Esc 取消。剪贴板不写入系统，仅当前编辑器会话有效。">{keyClipboard ? `剪贴板 ${keyClipboard.keys.length} 帧 · ${clipboardLayers.size} 层` : 'Ctrl/Cmd 点选 · Shift 同轨区间'}</span>
+      </div>}
       {selectedKey && keySelection && <TimelineKeyframeInspector key={`${keySelection.layerId}:${keySelection.track}:${keySelection.keyId}`} layer={selectedKey.layer} track={keySelection.track} keyframe={selectedKey.keyframe} outputFrame={selectedKey.outputFrame} totalFrames={totalFrames}
         disabled={selectedKey.layer.locked || !selectedKey.layer.visible} onMove={frame => moveKey(keySelection, frame)} onEasing={setSelectedEasing} onDelete={deleteSelectedKey} />}
       <div ref={viewportRef} id="timeline-tracks" data-testid="timeline-scroll" className="relative flex-1 min-h-0 overflow-auto outline-none" tabIndex={0} aria-label="时间轴轨道，左右方向键逐帧，Shift 加速十帧，Home 和 End 跳首尾"
@@ -437,7 +514,7 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
           if(e.button!==0 || !available || (e.target as HTMLElement).closest('[data-layer-label],button,input,select'))return
           const el=e.currentTarget, rect=el.getBoundingClientRect()
           if(e.clientX<rect.left+GUTTER || e.clientX>=rect.left+el.clientWidth || e.clientY>=rect.top+el.clientHeight)return
-          cancelKeyDrag();setKeySelection(null)
+          cancelKeyDrag();setKeySelections([]);keySelectionAnchor.current=null
           e.preventDefault();el.focus({preventScroll:true});el.setPointerCapture(e.pointerId)
           dragRef.current={pointer:e.pointerId,x:e.clientX};setScrubbing(true);seekPointer(e.clientX)
           const layerId=(e.target as HTMLElement).closest<HTMLElement>('[data-track-layer]')?.dataset.trackLayer
@@ -463,7 +540,7 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
           <div className="absolute bottom-0 border-l border-border-light pointer-events-none" style={{top:RULER,left:GUTTER+totalFrames*frameWidth}} />
           {rows.slice(firstRow,lastRow).map((row,offset) => row.track
             ? <TimelinePropertyTrack key={row.key} layer={row.layer} track={row.track} top={RULER+(firstRow+offset)*rowHeight} rowHeight={rowHeight} frameWidth={frameWidth} totalFrames={totalFrames} selected={selectedIds.includes(row.layer.id)} start={start} end={end}
-                currentFrame={frameRef.current} selection={keySelection} onInsert={(id,track) => insertKeys([id],[track])} onKeySelect={selectTimelineKey} onKeyPointerDown={beginKeyDrag} />
+                currentFrame={frameRef.current} selection={keySelections} onInsert={(id,track) => insertKeys([id],[track])} onKeySelect={selectTimelineKey} onKeyPointerDown={beginKeyDrag} />
             : <TimelineLayerTrack key={row.key} layer={row.layer} top={RULER+(firstRow+offset)*rowHeight} rowHeight={rowHeight} frameWidth={frameWidth} totalFrames={totalFrames} selected={selectedIds.includes(row.layer.id)} start={start} end={end}
                 expanded={row.expanded} onExpand={(id,value) => setExpansion(previous => ({ ...previous, [id]:value }))} onSelect={onLayerSelect} />
           )}

@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import type { Layer } from '@/types'
 import { createDefaultTracks } from '@/core/layer-factory'
 import { createAnimationTracks } from '@/core/keyframe-editing'
-import { adjacentKeyframe, buildTimelineRows, findTimelineKey, keyframeAtDrag, keyframeMoveError, timelineInsertionError } from './timeline-keyframes'
+import { adjacentKeyframe, buildTimelineRows, findTimelineKey, keyframeAtDrag, keyframeMoveError, selectTimelineKeys, timelineInsertionError } from './timeline-keyframes'
+import type { TimelineKeySelection } from './timeline-keyframes'
 
 function layer(id: string, overrides: Partial<Layer> = {}): Layer {
   return {
@@ -161,5 +162,46 @@ describe('时间轴拖动安全', () => {
     expect(keyframeMoveError({ ...animated(), locked: true }, 'rotation', 'one', 1, 30)).toContain('解锁')
     expect(keyframeMoveError({ ...animated(), visible: false }, 'rotation', 'one', 1, 30)).toContain('显示')
     expect(keyframeMoveError(animated(), 'rotation', 'missing', 1, 30)).toContain('不存在')
+  })
+})
+
+describe('时间轴关键帧多选', () => {
+  const ref = (keyId: string, layerId = 'a', track: TimelineKeySelection['track'] = 'rotation'): TimelineKeySelection => ({ layerId, track, keyId })
+
+  it('普通点击替换选区，Ctrl/Cmd 跨图层增选和取消，不创建图层或关键帧', () => {
+    const layers = [animated(), animated('b')], before = JSON.stringify(layers)
+    const one = ref('one'), two = ref('two', 'b')
+    expect(selectTimelineKeys(layers, [one], two, one).selection).toEqual([two])
+    const selected = selectTimelineKeys(layers, [one], two, one, true)
+    expect(selected.selection).toEqual([one, two])
+    expect(selected.anchor).toEqual(two)
+    const toggled = selectTimelineKeys(layers, selected.selection, two, selected.anchor, true)
+    expect(toggled.selection).toEqual([one])
+    expect(toggled.anchor).toEqual(one)
+    expect(selectTimelineKeys(layers, [one], one, one, true).selection).toEqual([])
+    expect(JSON.stringify(layers)).toBe(before)
+  })
+
+  it('Shift 在同一轨道按帧区间扩选，倒序点击保留原锚点', () => {
+    const layers = [animated()]
+    const one = ref('one'), three = ref('three')
+    expect(selectTimelineKeys(layers, [one], three, one, false, true)).toEqual({ selection: [one, ref('two'), three], anchor: one })
+    expect(selectTimelineKeys(layers, [three], one, three, false, true)).toEqual({ selection: [one, ref('two'), three], anchor: three })
+  })
+
+  it('Shift 不意外跨层扩选，Ctrl+Shift 保留其他图层的已有选区', () => {
+    const layers = [animated(), animated('b')]
+    const one = ref('one'), other = ref('two', 'b')
+    expect(selectTimelineKeys(layers, [one], other, one, false, true).selection).toEqual([other])
+    expect(selectTimelineKeys(layers, [other, one], ref('three'), one, true, true).selection).toEqual([other, one, ref('two'), ref('three')])
+  })
+
+  it('Shift 不跨属性；失效引用不跳到同名 Key，新选区不修改传入数组', () => {
+    const source = animated()
+    source.animationTracks!.position.keyframes = [{ id: 'one', frameIndex: 0, value: { x: 1, y: 2 }, easing: 'linear' }]
+    const anchor = ref('one'), selection = [anchor], pos = ref('one', 'a', 'position')
+    expect(selectTimelineKeys([source], selection, pos, anchor, false, true).selection).toEqual([pos])
+    expect(selectTimelineKeys([source], selection, ref('missing'), anchor, true)).toEqual({ selection, anchor })
+    expect(selection).toEqual([anchor])
   })
 })

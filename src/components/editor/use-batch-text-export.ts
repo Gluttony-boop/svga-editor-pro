@@ -2,7 +2,7 @@ import React from 'react'
 import { useEditorStore } from '@/stores'
 import { createSaveFileTarget } from '@/core/exporter'
 import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
-import type { BatchTextSession } from '@/core/batch-text-session'
+import { batchTextSessionDocument, isBatchTextSessionCurrent, type BatchTextSession } from '@/core/batch-text-session'
 import { beginBatchExportActivity } from '@/core/batch-export-activity'
 import { createBatchTextExportTask, openBatchTextExportTask, type BatchTextExportTask, type BatchTextExportView, type BatchTextOutputMode } from '@/core/batch-text-export'
 import { MAX_BATCH_TASK_BYTES } from '@/core/batch-task-file'
@@ -39,13 +39,11 @@ export function useBatchTextExport(session: BatchTextSession | null) {
     try {
       if (!task.current) {
         if (!session || !mode) return
-        const current = useEditorStore.getState()
-        if (!sameExportInputs(session.inputs, captureExportInputs(current))) throw new Error('工程已变化，请重新预检。')
-        const document = current.captureProjectRecovery()
-        if (!document) throw new Error('请先结束文字或画布编辑，并打开完整的 SVGA 工程。')
+        if (!isBatchTextSessionCurrent(session)) throw new Error('工程已变化，请重新核对数据。')
+        const document = batchTextSessionDocument(session)
         const created = await createBatchTextExportTask(document, session.template, session.rows, mode, operation.controller.signal)
         if (!mounted.current || operation.controller.signal.aborted) return
-        if (!sameExportInputs(session.inputs, captureExportInputs(useEditorStore.getState()))) throw new Error('冻结期间工程已变化，请重新预检。')
+        if (!isBatchTextSessionCurrent(session)) throw new Error('冻结期间工程已变化，请重新核对数据。')
         task.current = created
         inputs.current = session.inputs
         capturedSession.current = session
@@ -89,24 +87,26 @@ export function useBatchTextExport(session: BatchTextSession | null) {
     } finally { finishActivity(); job.current = null; if (mounted.current) setBusy(false) }
   }
   const openTask = async (file: File) => {
-    if (job.current) return
-    if (!/\.svgabatch$/i.test(file.name) || file.size > MAX_BATCH_TASK_BYTES) { setPhase('请选择大小未超限的 .svgabatch 任务文件；旧任务保留。'); return }
+    if (job.current) return false
+    if (!/\.svgabatch$/i.test(file.name) || file.size > MAX_BATCH_TASK_BYTES) { setPhase('请选择大小未超限的 .svgabatch 任务文件；旧任务保留。'); return false }
     const operation = { controller: new AbortController(), writing: false }
     job.current = operation
     const finishActivity = beginBatchExportActivity()
     setBusy(true); setPhase('正在校验任务文件、源快照和产物摘要；旧任务暂时保留…')
     try {
       const loaded = await openBatchTextExportTask(file, operation.controller.signal)
-      if (!mounted.current || operation.controller.signal.aborted) return
+      if (!mounted.current || operation.controller.signal.aborted) return false
       if (task.current && !window.confirm('文件校验完成。替换当前批量任务？未保存的任务与结果将释放，当前画布不改变。')) {
-        setPhase('已取消替换，原批量任务和结果保留。'); return
+        setPhase('已取消替换，原批量任务和结果保留。'); return false
       }
       task.current = loaded; inputs.current = null; capturedSession.current = null
       unsaved.current = false; checkpointDirty.current = false; restored.current = true
       setMode(loaded.view().mode); setSelectedId(null); setView(loaded.view())
       setPhase('任务已恢复，未改动画布。旧产物仅通过存储完整性校验；继续项沿用任务内源快照，不使用当前工程。')
+      return true
     } catch (error) {
       if (mounted.current) setPhase(operation.controller.signal.aborted ? '已取消读取，原任务保留。' : '任务未打开，原任务保留：' + (error instanceof Error ? error.message : '文件无效。'))
+      return false
     } finally { finishActivity(); job.current = null; if (mounted.current) setBusy(false) }
   }
   const clear = () => {
@@ -121,8 +121,8 @@ export function useBatchTextExport(session: BatchTextSession | null) {
     canDiscard: () => !job.current && (!task.current || window.confirm('丢弃清单也会释放批量任务和内存结果，请确认需要的交付 ZIP 或任务文件已保存。')),
     cancel: () => { if (!job.current?.writing) job.current?.controller.abort() },
     canCancel: !!job.current && !job.current.writing,
-    stale: !!inputs.current && (capturedSession.current !== session || !sameExportInputs(inputs.current, captureExportInputs(current))),
-    ready: !!session?.report.valid && sameExportInputs(session.inputs, captureExportInputs(current)),
+    stale: !!inputs.current && (capturedSession.current !== session || !capturedSession.current?.source && !sameExportInputs(inputs.current, captureExportInputs(current))),
+    ready: !!session?.report.valid && isBatchTextSessionCurrent(session),
     selectedId, select: setSelectedId, selected: selectedId ? task.current?.result(selectedId) : undefined,
   }
 }

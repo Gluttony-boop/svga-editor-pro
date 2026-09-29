@@ -10,6 +10,7 @@ import { SVGAValidator } from '@/utils/svga-validator'
 import { OperationStatus, type OperationStatusValue } from '@/components/ui/OperationStatus'
 import { hasTextPreview } from '@/core/text-preview'
 import { ImageResizeControls } from './ImageResizeControls'
+import { ExportSizeBudget } from './ExportSizeBudget'
 
 interface ExportPanelProps {
   className?: string
@@ -53,6 +54,12 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
   const previewIsCurrent = !!preview && sameExportInputs(preview.inputs, captureExportInputs(useEditorStore.getState()))
 
   React.useEffect(() => {
+    const open = () => { if (useEditorStore.getState().videoItem && !busyRef.current) setShowDelivery(true) }
+    window.addEventListener('svga-open-delivery', open)
+    return () => window.removeEventListener('svga-open-delivery', open)
+  }, [])
+
+  React.useEffect(() => {
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
@@ -80,7 +87,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
       (layer) => !layer.isNew && layer.editableIndex !== undefined
     ).length
     const hasDeletedOriginalLayers = activeOriginalLayerCount < originalLayerCount
-    const hasNewLayers = layers.some(l => l.isNew)
+    const hasNewLayers = layers.some(l => l.isNew || l.resourceDetached)
     const hasNewImages = Array.from(imageResources.values()).some(r => r.isNew)
     const hasAnimations = layers.some(l =>
       [...Object.values(l.tracks), ...Object.values(l.animationTracks || {})].some(track => track.keyframes.length > 0)
@@ -361,6 +368,8 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({ className, collapsible
             onChange={image => setOptimizationConfig({ image })}
           />
         </div>
+
+        <ExportSizeBudget actualBytes={preview?.result.optimized.size} stale={!!preview && !previewIsCurrent} disabled={isExporting} />
 
         {/* 主导出按钮 */}
         <Button

@@ -10,7 +10,7 @@ export function requiresSvgaMerge(document: ProjectDocument): boolean {
   const originalLayerCount = videoItem.movie.sprites?.length ?? 0
   const activeOriginalLayerCount = layers.filter(layer => !layer.isNew && layer.editableIndex !== undefined).length
   const hasDeletedOriginalLayers = activeOriginalLayerCount < originalLayerCount
-  const hasNewLayers = layers.some(layer => layer.isNew)
+  const hasNewLayers = layers.some(layer => layer.isNew || layer.resourceDetached)
   const hasNewImages = Array.from(imageResources.values()).some(resource => resource.isNew)
   const hasAnimations = layers.some(layer =>
     [...Object.values(layer.tracks), ...Object.values(layer.animationTracks || {})].some(track => track.keyframes.length > 0)

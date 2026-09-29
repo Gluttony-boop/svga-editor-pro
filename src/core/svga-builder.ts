@@ -424,7 +424,7 @@ export class SVGABuilder {
     if (originalObj.sprites) {
       originalObj.sprites.forEach((sprite: Sprite, index: number) => {
         const layer = findOriginalLayer(config.layers, index)
-        const sourceKey = sprite.imageKey || layer?.imageKey || ''
+        const sourceKey = layer?.resourceDetached ? layer.imageKey || '' : sprite.imageKey || layer?.imageKey || ''
         if (layer && sourceKey) {
           sourceKeyByLayerId.set(layer.id, sourceKey)
         }

@@ -1,35 +1,38 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { BatchTextExportPanel, BatchExportPreview } from './BatchTextExportPanel'
-import type { useBatchTextExport } from './use-batch-text-export'
 import { BATCH_TEMPLATE_FORMAT, createBatchQueue } from '@/core/batch-variants'
+import { BatchTextExportPanel } from './BatchTextExportPanel'
+import type { useBatchTextExport } from './use-batch-text-export'
 
-const queue = createBatchQueue({ format: BATCH_TEMPLATE_FORMAT, schemaVersion: 1, name: '恢复', slotRules: [{ key: '<key>', kind: 'text' }] },
-  [{ id: '<编号>', row: 1, values: { '<key>': '<script>非 HTML 文案</script>' } }])
-const controller = (): ReturnType<typeof useBatchTextExport> => ({
-  mode: 'bake', setMode: vi.fn(), view: { mode: 'bake', queue, sourceRevision: 'a'.repeat(64), busy: false, bytes: 0 },
-  busy: false, phase: '', execute: vi.fn(), save: vi.fn(), clear: vi.fn(), openTask: vi.fn(), saveTask: vi.fn(), restored: true,
-  isBusy: () => false, canDiscard: () => true, cancel: vi.fn(), canCancel: false, stale: false, ready: false,
-  selectedId: null, select: vi.fn(), selected: undefined,
+type Controller = ReturnType<typeof useBatchTextExport>
+const controller = (overrides: Partial<Controller> = {}): Controller => ({
+  mode: 'bake', setMode: vi.fn(), view: null, busy: false, phase: '', execute: vi.fn(async () => {}), save: vi.fn(async () => {}),
+  clear: vi.fn(), openTask: vi.fn(async () => false), saveTask: vi.fn(async () => {}), restored: false,
+  isBusy: () => false, canDiscard: () => true, cancel: vi.fn(), canCancel: false, stale: false, ready: true,
+  selectedId: null, select: vi.fn(), selected: undefined, ...overrides,
 })
-describe('恢复任务界面边界', () => {
-  it('无当前预检仍可保存和继续恢复的队列，并显示原始任务文案而不执行 HTML', () => {
-    const html = renderToStaticMarkup(<BatchTextExportPanel controller={controller()} />)
-    expect(html).toContain('继续待执行项')
-    expect(html).toContain('保存任务文件（可继续）')
-    expect(html).toContain('独立恢复的任务')
-    expect(html).toContain('字体仍依赖本机安装')
-    expect(html).toContain('&lt;script&gt;非 HTML 文案&lt;/script&gt;')
-    expect(html).not.toContain('<script>')
-    expect(html).not.toContain('生成批量交付</button>')
+const button = (html: string, label: string) => html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g)?.find(value => value.includes(label))
+
+describe('批量生产结果页门槛（SSR）', () => {
+  it('尚未确认真实样本不能直接生成，即使模板数据已经通过', () => {
+    const html = renderToStaticMarkup(<BatchTextExportPanel controller={controller()} showSetup={false} generationAllowed={false} />)
+    expect(button(html, '生成批量交付')).toContain('disabled=""')
+    expect(html).toContain('4. 生成结果')
+    expect(html).toContain('固定字形 · 文字写入 SVGA 图片')
+    expect(html).not.toContain('name="batch-output-mode"')
   })
-  it('恢复的检查元数据不能伪装成本次验证，预览标注为旧图', () => {
-    const preview = new Blob(['png'])
-    const html = renderToStaticMarkup(<BatchExportPreview result={{ blob: new Blob(['zip']), previewFrame: 0,
-      previews: { actual: preview, design: preview }, restored: true,
-      checks: [{ id: 'forged', title: '导入文件自称验证通过', status: 'warning', detail: '不可当作本次证据' }] }} />)
-    expect(html).toContain('保存的实际产物预览')
-    expect(html).toContain('本次未重新渲染、回读 SVGA 或验证内嵌报告')
-    expect(html).not.toContain('导入文件自称验证通过')
+  it('完成核对后允许生成，模式仍明确展示', () => {
+    const html = renderToStaticMarkup(<BatchTextExportPanel controller={controller({ mode: 'dynamic' })} showSetup={false} generationAllowed />)
+    expect(button(html, '生成批量交付')).not.toContain('disabled=""')
+    expect(html).toContain('动态接入 · 文案交给开发，SVGA 不写入所选字形')
+    expect(html).toContain('所选模板')
+  })
+  it('恢复的冻结队列不受当前向导空输入阻塞，仍可继续和保存任务', () => {
+    const queue = createBatchQueue({ format: BATCH_TEMPLATE_FORMAT, schemaVersion: 1, name: '冻结模板', slotRules: [{ key: 'title', kind: 'text' }] }, [{ row: 2, id: '001', values: { title: '保存文案' } }])
+    const html = renderToStaticMarkup(<BatchTextExportPanel controller={controller({ restored: true, ready: false, view: { queue, mode: 'bake', sourceRevision: 'a'.repeat(64), bytes: 0, busy: false } })} showSetup={false} generationAllowed={false} />)
+    expect(button(html, '继续待执行项')).not.toContain('disabled=""')
+    expect(button(html, '保存任务文件（可继续）')).not.toContain('disabled=""')
+    expect(html).toContain('保存文案')
+    expect(html).toContain('当前画布不属于此任务')
   })
 })

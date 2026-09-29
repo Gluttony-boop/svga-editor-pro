@@ -42,6 +42,10 @@ import { previewFileName } from '@/utils/preview-view'
 import { buildSlotCatalog } from '@/utils/slot-catalog'
 import { mergeSlotTextConfig } from '@/utils/slot-config'
 import { normalizeTextConfig } from '@/core/text-preview'
+import { planLayerGrouping, type LayerGroupingAction } from '@/core/layer-groups'
+import { planImageReplacement, type ImageReplacementScope } from '@/core/image-replacement'
+import type { ReplacementTarget } from '@/core/replacement-target'
+import { prepareKeyframePaste, prepareSelectedKeyframeEdit, type AnimationKeyReference, type KeyframeClipboard } from '@/core/keyframe-clipboard'
 
 interface EditorSnapshot {
   videoItem: VideoItem | null
@@ -166,6 +170,7 @@ interface EditorStore {
   deleteLayer: (layerId: string) => void
   operateLayers: (ids: readonly string[], operation: 'delete' | 'show' | 'hide' | 'lock' | 'unlock', expectedInputs?: readonly unknown[]) => { changed: boolean; error?: string }
   duplicateLayer: (layerId: string) => string | null
+  groupLayers: (action: LayerGroupingAction, expectedInputs?: readonly unknown[]) => { changed: boolean; groupId?: string; error?: string }
 
   // 图层轨道默认值操作
   updateLayerTrackDefaultValue: (layerId: string, trackKey: keyof LayerTracks, value: any) => void
@@ -176,6 +181,7 @@ interface EditorStore {
   getImageResource: (key: string) => ImageResource | undefined
   renameImageKey: (layerId: string, newKey: string) => void
   renameImageResourceKey: (oldKey: string, newKey: string) => boolean
+  replaceImageResource: (key: string, dataUrl: string, scope: ImageReplacementScope, layerId?: string | null, expectedTarget?: ReplacementTarget) => { changed: boolean; key?: string; error?: string }
 
   // 音频资源操作
   addAudioResource: (resource: AudioResource) => void
@@ -216,6 +222,9 @@ interface EditorStore {
   moveAnimationKeyframe: (layerId: string, track: keyof LayerTracks, id: string, outputFrame: number) => KeyframeEditResult
   deleteAnimationKeyframes: (layerId: string, track: keyof LayerTracks, ids: string[]) => KeyframeEditResult
   setAnimationEasing: (layerId: string, track: keyof LayerTracks, ids: string[], easing: EasingType) => KeyframeEditResult
+  pasteAnimationKeyframes: (clipboard: KeyframeClipboard, outputFrame?: number, targetLayerId?: string) => KeyframeEditResult & { selection?: AnimationKeyReference[] }
+  deleteSelectedAnimationKeyframes: (refs: readonly AnimationKeyReference[]) => KeyframeEditResult
+  setSelectedAnimationEasing: (refs: readonly AnimationKeyReference[], easing: EasingType) => KeyframeEditResult
 
   // UI 操作
   setZoom: (zoom: number) => void
@@ -276,6 +285,7 @@ const cloneParams = (params: MovieParams | null): MovieParams | null =>
 
 const cloneLayer = (layer: Layer): Layer => ({
   ...layer,
+  group: layer.group ? { ...layer.group } : undefined,
   canvasTransform: layer.canvasTransform ? { ...layer.canvasTransform } : undefined,
   animationTracks: layer.animationTracks ? cloneAnimationTracks(layer.animationTracks) : undefined,
   clip: { ...layer.clip },
@@ -1192,6 +1202,17 @@ export const useEditorStore = create<EditorStore>()(
       return { changed: true }
     },
 
+    groupLayers: (action, expectedInputs) => {
+      const state = get()
+      if (!state.videoItem || expectedInputs && !sameExportInputs(expectedInputs, captureExportInputs(state))) return { changed: false, error: '工程内容已变化，请重新选择编组。' }
+      if (state.isCanvasTransforming || state.isSlotConfigEditing) return { changed: false, error: '请先结束当前编辑，再操作编组。' }
+      const plan = planLayerGrouping(state.layers, action, uuid)
+      if (plan.error || plan.layers === state.layers) return { changed: false, error: plan.error }
+      const labels = { create: '创建命名编组', rename: '重命名编组', dissolve: '解散编组' }
+      withHistory({ layers: plan.layers, isDirty: true }, labels[action.type])
+      return { changed: true, groupId: plan.groupId }
+    },
+
     deleteLayer: (layerId) => {
       withHistory((state) => ({
         layers: state.layers.filter((l) => l.id !== layerId),
@@ -1227,6 +1248,15 @@ export const useEditorStore = create<EditorStore>()(
     },
 
     // 资源操作
+    replaceImageResource: (key, dataUrl, scope, layerId, expectedTarget) => {
+      const state = get()
+      if (state.isCanvasTransforming || state.isSlotConfigEditing) return { changed: false, error: '请先结束当前编辑，再替换图片。' }
+      const plan = planImageReplacement(state, key, dataUrl, scope, layerId, expectedTarget)
+      if (!plan.changed) return plan
+      withHistory(plan.patch, `${scope === 'current-layer' ? '仅当前图层换图' : '所有引用图层换图'}：${key}`)
+      return { changed: true, key: plan.key }
+    },
+
     addImageResource: (resource) => {
       withHistory((state) => {
         const newResources = new Map(state.imageResources)
@@ -1656,6 +1686,39 @@ export const useEditorStore = create<EditorStore>()(
       const keyframes = sourceTrack.keyframes.map(key => selected.has(key.id) ? { ...key, easing } : key)
       const updated = { ...layer, animationTracks: { ...layer.animationTracks!, [track]: { ...sourceTrack, keyframes } } }
       return saveAnimationLayers(state.layers.map(item => item.id === layerId ? updated : item), `调整${TRACK_LABELS[track]}关键帧缓动：${layer.name}`)
+    },
+
+    pasteAnimationKeyframes: (clipboard, outputFrame, targetLayerId) => {
+      const state = get()
+      if (state.isCanvasTransforming || state.isSlotConfigEditing) return { changed: false, error: '请先结束当前编辑，再粘贴关键帧。' }
+      const plan = prepareKeyframePaste(state.layers, clipboard, outputFrame ?? state.playback.currentFrame, state.playback.totalFrames, uuid, targetLayerId)
+      if (plan.error) return { changed: false, error: plan.error }
+      const result = saveAnimationLayers(plan.layers, `粘贴关键帧：${plan.selection.length} 个`)
+      if (result.changed) get().setPlaying(false)
+      return { ...result, selection: plan.selection }
+    },
+
+    deleteSelectedAnimationKeyframes: (refs) => {
+      const state = get()
+      if (state.isCanvasTransforming || state.isSlotConfigEditing) return { changed: false, error: '请先结束当前编辑，再删除关键帧。' }
+      const plan = prepareSelectedKeyframeEdit(state.layers, refs, state.playback.totalFrames, { type: 'delete' })
+      if (plan.error) return { changed: false, error: plan.error }
+      const result = saveAnimationLayers(plan.layers, `删除所选关键帧：${refs.length} 个`)
+      if (result.changed) {
+        const removed = new Set(refs.map(ref => ref.keyId))
+        set({ selectedKeyframeIds: get().selectedKeyframeIds.filter(id => !removed.has(id)), playback: { ...get().playback, isPlaying: false } })
+      }
+      return result
+    },
+
+    setSelectedAnimationEasing: (refs, easing) => {
+      const state = get()
+      if (state.isCanvasTransforming || state.isSlotConfigEditing) return { changed: false, error: '请先结束当前编辑，再调整关键帧。' }
+      const plan = prepareSelectedKeyframeEdit(state.layers, refs, state.playback.totalFrames, { type: 'easing', easing })
+      if (plan.error) return { changed: false, error: plan.error }
+      const result = saveAnimationLayers(plan.layers, `调整所选关键帧缓动：${refs.length} 个`)
+      if (result.changed) get().setPlaying(false)
+      return result
     },
 
     // 图层关键帧操作

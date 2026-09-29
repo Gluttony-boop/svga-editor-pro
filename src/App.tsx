@@ -21,6 +21,8 @@ import { ProjectRecoveryCoordinator, type RecoveryStatus } from '@/core/project-
 import { finishProjectSave } from '@/core/project-save-completion'
 import { registerMcpBridge } from '@/lib/mcp-bridge'
 import type { LocalProjectPreferences, LocalProjectSnapshot, LocalProjectSummary } from '@/types/project-library'
+import { createTaskExample, type StarterTask } from '@/core/task-examples'
+import { StarterTaskGuide } from '@/components/editor/TaskStarter'
 
 const INSPECTOR_TABS = [
   { id: 'properties', label: '属性', icon: 'settings' },
@@ -366,6 +368,9 @@ export const App: React.FC = () => {
   const [showHistory, setShowHistory] = useState(true)
   const [historyCollapsed, setHistoryCollapsed] = useState(false)
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('properties')
+  const [starterTask, setStarterTask] = useState<{ task: StarterTask; buffer: ArrayBuffer } | null>(null)
+  const starterBusyRef = useRef(false)
+  const documentBuffer = useEditorStore(state => state.originalBuffer)
   const [isImmersive, setIsImmersive] = useState(false)
   const previewVideoItem = useEditorStore((s) => s.videoItem)
   const updateDirty = useEditorStore((s) => s.isDirty)
@@ -549,6 +554,39 @@ export const App: React.FC = () => {
       setLoading(false)
     }
   }, [setVideoItem, setSource, setOriginalBuffer, setDetectedSlots, setAudioResources, setRendererMode])
+
+  const openStarterTaskTools = useCallback((task: StarterTask) => {
+    setInspectorTab(task === 'profile' || task === 'batch' ? 'slots' : 'export')
+    if (task === 'batch') window.dispatchEvent(new CustomEvent('svga-open-batch-production'))
+    if (task === 'compress') window.dispatchEvent(new CustomEvent('svga-start-size-budget'))
+    if (task === 'delivery') window.dispatchEvent(new CustomEvent('svga-open-delivery'))
+  }, [])
+
+  const handleStartTask = useCallback(async (task: StarterTask) => {
+    if (starterBusyRef.current || documentBusyRef.current) return
+    starterBusyRef.current = true
+    try {
+      await runWithUnsavedProtection(async () => {
+        const example = createTaskExample(task)
+        await loadSVGA(example.buffer, example.fileName, 'file')
+        const state = useEditorStore.getState()
+        if (state.originalBuffer !== example.buffer) return
+        const resource = state.imageResources.get(example.nicknameKey)
+        if (!resource) throw new Error('示例文字资源未加载，请重新打开。')
+        state.setSlotConfig(example.nicknameKey, { type: 'text', name: '示例昵称', value: example.sampleText,
+          textConfig: { text: example.sampleText, fontSize: Math.min(48, Math.round(resource.height * 0.45)), color: '#ffffff', fontFamily: 'sans-serif', textAlign: 'left',
+            enabled: true, replaceImage: true, exportMode: 'preview', boxWidth: resource.width, boxHeight: resource.height,
+            referenceWidth: resource.width, referenceHeight: resource.height } })
+        state.selectLayer(state.layers.find(layer => layer.imageKey === example.nicknameKey)?.id ?? null)
+        useEditorStore.getState().initializeHistory()
+        useEditorStore.setState({ isDirty: true })
+        setStarterTask({ task, buffer: example.buffer })
+        setProjectNotice('已打开原创 CC0 示例，可自由修改。昵称默认仅模拟，固定写入 SVGA 需选择转图片模式。')
+        openStarterTaskTools(task)
+      })
+    } catch (reason) { setError('示例未打开：' + (reason instanceof Error ? reason.message : String(reason))) }
+    finally { starterBusyRef.current = false }
+  }, [loadSVGA, openStarterTaskTools, runWithUnsavedProtection])
 
   const loadProject = useCallback(async (buffer: ArrayBuffer, displayName: string, filePath: string | null, localCopy = false): Promise<boolean> => {
     documentBusyRef.current = true
@@ -1211,11 +1249,13 @@ export const App: React.FC = () => {
 
         {/* 中间区域 */}
         <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+          {!isImmersive && starterTask?.buffer === documentBuffer && starterTask && <StarterTaskGuide task={starterTask.task} onContinue={() => openStarterTaskTools(starterTask.task)} onClose={() => setStarterTask(null)} />}
           <CanvasPreview
             className="flex-1 min-h-0"
             immersive={isImmersive}
             onToggleImmersive={toggleImmersive}
             onOpenFile={handleOpenFile}
+            onStartTask={handleStartTask}
             onSvgaDrop={async (file) => {
               try {
                 await runWithUnsavedProtection(() => handleSvgaFile(file))
@@ -1224,8 +1264,10 @@ export const App: React.FC = () => {
               }
             }}
           />
-          <PlaybackControls />
-          <Timeline className={cn('flex-shrink-0', isImmersive && '!hidden')} />
+          {previewVideoItem && <>
+            <PlaybackControls />
+            <Timeline className={cn('flex-shrink-0', isImmersive && '!hidden')} />
+          </>}
         </div>
 
         {/* 右侧面板宽度调整手柄 */}

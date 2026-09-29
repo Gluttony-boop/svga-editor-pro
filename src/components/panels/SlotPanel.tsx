@@ -30,6 +30,11 @@ export const SlotPanel: React.FC<SlotPanelProps> = ({ className, collapsible = t
   const filtered = catalog.filter(item => matches(item, filter) && (!search.trim() || item.key.toLowerCase().includes(search.trim().toLowerCase())))
   const selected = catalog.find(item => item.key === activeKey) || filtered.find(item => item.textConfigured) || filtered.find(item => item.textCandidate) || filtered[0]
   React.useEffect(() => { setActiveKey(null); setNotice(''); setSearch(''); setFilter('all') }, [video])
+  React.useEffect(() => {
+    const openProduction = () => { setBatchLoaded(true); setShowBatch(true) }
+    window.addEventListener('svga-open-batch-production', openProduction)
+    return () => window.removeEventListener('svga-open-batch-production', openProduction)
+  }, [])
 
   const exportConfig = async () => {
     useEditorStore.getState().endSlotConfigEdit(true)
@@ -52,8 +57,8 @@ export const SlotPanel: React.FC<SlotPanelProps> = ({ className, collapsible = t
   }
 
   return <><Panel title="插槽与 Key" icon={<Icon name="key" size={16} />} className={className} collapsible={collapsible} defaultCollapsed={defaultCollapsed} contentClassName="p-3">
-    <Button size="sm" className="mb-3 w-full" onClick={() => { setBatchLoaded(true); setShowBatch(true) }}>批量文案预检 / 恢复任务…</Button>
-    {batchLoaded && <React.Suspense fallback={<p role="status">正在加载批量预检…</p>}>
+    <Button size="sm" className="mb-3 w-full" onClick={() => { setBatchLoaded(true); setShowBatch(true) }}>批量生产 / 恢复任务…</Button>
+    {batchLoaded && <React.Suspense fallback={<p role="status">正在加载批量生产…</p>}>
       <BatchPreflightDialog initialKey={selected?.key} isOpen={showBatch} onOpen={() => setShowBatch(true)}
         onClose={() => setShowBatch(false)} onDiscard={() => { setBatchLoaded(false); setShowBatch(false) }} />
     </React.Suspense>}

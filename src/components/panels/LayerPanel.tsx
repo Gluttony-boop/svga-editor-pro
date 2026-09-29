@@ -11,6 +11,7 @@ import { getLayerOutputRange, getLayerSourceFrame, getLayerTimeOffset } from '@/
 import { getSelectedLayerIds, selectLayerInList } from '@/utils/layer-selection'
 import { captureExportInputs } from '@/core/export-preview'
 import { getLayerDuplicateError } from '@/core/keyframe-editing'
+import { LayerGroupControls } from './LayerGroupControls'
 
 const getLayerThumbnail = (
   layer: Layer,
@@ -417,8 +418,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
           <div className="flex flex-shrink-0 items-center gap-1.5 border-b border-border/70 px-2 py-2">
             <input
               type="search"
-              aria-label="搜索图层名称或资源名"
-              placeholder="搜索名称 / 资源名"
+              aria-label="搜索图层名称、资源名或编组名"
+              placeholder="搜索名称 / 资源 / 编组"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -444,16 +445,22 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
               <option value="unlocked">未锁定</option>
             </select>
           </div>
+          <LayerGroupControls />
           <div aria-label="图层批量操作" className="flex flex-wrap flex-shrink-0 gap-1 border-b border-border/70 px-2 py-1">
             <Button size="sm" disabled={!filteredLayers.length} onClick={() => useEditorStore.getState().selectLayers(filteredLayers.map(({ layer }) => layer.id))}>全选当前列表</Button>
             <Button size="sm" disabled={!selection.length} onClick={() => selectLayer(null)}>取消选择</Button>
-            {selection.length > 0 && <>
-              <Button size="sm" onClick={() => operateSelection('show')}>显示所选</Button>
-              <Button size="sm" onClick={() => operateSelection('hide')}>隐藏所选</Button>
-              <Button size="sm" onClick={() => operateSelection('lock')}>锁定所选</Button>
-              <Button size="sm" onClick={() => operateSelection('unlock')}>解锁所选</Button>
-              <Button size="sm" variant="danger" onClick={() => requestDelete(selection)}>删除所选（{selection.length}）</Button>
-            </>}
+            <select aria-label="图层批量操作菜单" disabled={!selection.length} value=""
+              className="h-8 min-w-0 flex-1 rounded border border-border bg-bg-primary px-1 text-xs text-text-secondary disabled:opacity-40"
+              onChange={event => {
+                const operation = event.target.value as 'delete' | 'show' | 'hide' | 'lock' | 'unlock'
+                if (operation === 'delete') requestDelete(selection)
+                else if (['show', 'hide', 'lock', 'unlock'].includes(operation)) operateSelection(operation)
+              }}>
+              <option value="">操作所选（{selection.length}）</option>
+              <option value="show">显示所选</option><option value="hide">隐藏所选</option>
+              <option value="lock">锁定所选</option><option value="unlock">解锁所选</option>
+              <option value="delete">删除所选…</option>
+            </select>
           </div>
           {operationNotice && <p role="status" className="px-2 py-1 text-xs text-warning">{operationNotice}</p>}
           <div className="flex h-10 flex-shrink-0 items-center justify-between border-b border-border/70 px-3 text-xs">
@@ -810,6 +817,7 @@ const LayerItem: React.FC<LayerItemProps> = ({
             <span title="输出时间范围（从第 1 帧开始）">{timeRange.startFrame + 1}–{timeRange.endFrame}</span>
             {getLayerTimeOffset(layer) !== 0 && <span className="text-accent" title="相对源动画的时间偏移">{getLayerTimeOffset(layer) > 0 ? '+' : ''}{getLayerTimeOffset(layer)}F</span>}
             {renamed && <span className="truncate text-accent">已改名</span>}
+            {layer.group && <span className="truncate text-accent" title={`编组：${layer.group.name}`}>{layer.group.name}</span>}
             {!layer.visible && <span>隐藏</span>}
             {layer.locked && <span className="text-warning">锁定</span>}
           </div>

@@ -1,13 +1,39 @@
 import type { Keyframe, Layer, LayerTracks } from '@/types'
 import { EDITABLE_TRACKS, getKeyframeEditError } from '@/core/keyframe-editing'
 import { getLayerTimeOffset } from '@/core/layer-time'
+import { animationKeyIdentity } from '@/core/keyframe-clipboard'
+import type { AnimationKeyReference } from '@/core/keyframe-clipboard'
 
 export type TimelineTrackFilter = 'all' | 'animated' | keyof LayerTracks
 
-export interface TimelineKeySelection {
-  layerId: string
-  track: keyof LayerTracks
-  keyId: string
+export type TimelineKeySelection = AnimationKeyReference
+
+/** Shift 仅扩展同一属性轨道；Ctrl/Cmd 切换单个关键帧，不影响图层数据。 */
+export function selectTimelineKeys(
+  layers: readonly Layer[], selected: readonly TimelineKeySelection[], target: TimelineKeySelection,
+  anchor: TimelineKeySelection | null, additive = false, range = false
+): { selection: TimelineKeySelection[]; anchor: TimelineKeySelection | null } {
+  const found = findTimelineKey(layers, target)
+  if (!found) return { selection: [...selected], anchor }
+  if (range && anchor?.layerId === target.layerId && anchor.track === target.track) {
+    const from = findTimelineKey(layers, anchor)
+    if (from) {
+      const start = Math.min(from.keyframe.frameIndex, found.keyframe.frameIndex)
+      const end = Math.max(from.keyframe.frameIndex, found.keyframe.frameIndex)
+      const interval = found.layer.animationTracks![target.track].keyframes
+        .filter(key => key.frameIndex >= start && key.frameIndex <= end)
+        .sort((a, b) => a.frameIndex - b.frameIndex)
+        .map(key => ({ layerId: target.layerId, track: target.track, keyId: key.id }))
+      const selection = additive ? [...selected] : []
+      const used = new Set(selection.map(animationKeyIdentity))
+      for (const key of interval) if (!used.has(animationKeyIdentity(key))) selection.push(key)
+      return { selection, anchor }
+    }
+  }
+  const identity = animationKeyIdentity(target)
+  const selection = additive ? selected.some(key => animationKeyIdentity(key) === identity)
+    ? selected.filter(key => animationKeyIdentity(key) !== identity) : [...selected, target] : [target]
+  return { selection, anchor: selection.some(key => animationKeyIdentity(key) === identity) ? target : selection[selection.length - 1] ?? null }
 }
 
 export interface TimelineRow {

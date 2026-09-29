@@ -2,16 +2,40 @@ import { useEditorStore } from '@/stores'
 import { buildSlotCatalog } from '@/utils/slot-catalog'
 import { captureExportInputs, sameExportInputs } from './export-preview'
 import { validateBatchRows, type BatchTemplate, type BatchValidationReport, type BatchVariantRow } from './batch-variants'
+import type { ProjectDocument } from '@/types/project'
+
+/** 模板是独立快照；切换画布或工程不会把新内容混入批量生产。 */
+export interface BatchTextSource {
+  document: ProjectDocument
+  name: string
+  origin: 'current' | 'file'
+  sourceRevision: string
+  editorInputs?: readonly unknown[]
+}
 
 export interface BatchTextSession {
   inputs: readonly unknown[]
   report: BatchValidationReport
   template: BatchTemplate
   rows: BatchVariantRow[]
+  source?: BatchTextSource
+}
+
+export function isBatchTextSessionCurrent(session: BatchTextSession): boolean {
+  return !!session.source || sameExportInputs(session.inputs, captureExportInputs(useEditorStore.getState()))
+}
+
+export function batchTextSessionDocument(session: BatchTextSession): ProjectDocument {
+  if (session.source) return session.source.document
+  if (!isBatchTextSessionCurrent(session)) throw new Error('工程已变化，请重新核对数据。')
+  const document = useEditorStore.getState().captureProjectRecovery()
+  if (!document) throw new Error('请先结束文字或画布编辑，并打开完整的 SVGA 工程。')
+  return document
 }
 
 /** 会话只接纳自己的同步写入；撤销、手动编辑等外部变化必须重新预检。 */
 export function applyBatchTextRow(session: BatchTextSession, record: number): BatchTextSession {
+  if (session.source) throw new Error('独立批量模板不能写回当前画布，请在批量生产中核对预览。')
   const current = useEditorStore.getState()
   if (!sameExportInputs(session.inputs, captureExportInputs(current))) {
     throw new Error('工程内容已变化，请重新预检后应用。')
