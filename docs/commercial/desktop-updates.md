@@ -86,6 +86,7 @@ R2 的自定义域名可使用缓存；`r2.dev` 属于限速开发端点，不�
 首次启用需要在仓库设置中配置：
 
 1. 生成一套 Tauri updater 密钥；公钥放到仓库 Variables 的 `TAURI_UPDATER_PUBLIC_KEY`，私钥只放到 Actions Secrets 的 `TAURI_SIGNING_PRIVATE_KEY`，密码放到 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。私钥不要提交、不要放进 `VITE_*`、不要发到聊天中。
+   可选设置仓库 Variable `TAURI_UPDATER_ENDPOINT` 为国内镜像的公开 HTTPS `latest.json` 地址；留空时使用当前 GitHub 仓库的 Releases 地址。端点不能包含 Token、用户名/密码、查询参数或非标准端口；镜像必须提供与签名安装包匹配的清单。
 2. 确认仓库为公开仓库，或接受私有仓库的 Actions 免费额度限制。公开仓库的标准 GitHub-hosted runner 可免费使用；Release 资产不应放入 Git 历史，而应作为 Release 资产。
 3. 手动运行 `Publish signed Windows release`，输入例如 `v2.1.0`。工作流只创建 draft，确认安装包、`.sig` 和 `latest.json` 后再发布。
 4. 真实旧版桌面包执行“检查 → 下载验签 → 安装 → 重启”验收。当前代码没有生产公钥，因此工作流在配置前会安全停止，不能直接生成可更新安装包。
@@ -102,6 +103,7 @@ GitHub 在中国大陆并非所有网络都需要代理才能访问，但仓库�
 
 - 全球用户：GitHub Releases 作为公开源；
 - 中国大陆用户：准备一个可控的国内镜像或对象存储域名，镜像同一份 `latest.json`、安装包和 `.sig`，仍使用同一 Tauri 公钥验签；
+- 已支持通过 `TAURI_UPDATER_ENDPOINT` 选择镜像清单地址；该设置在构建时写入客户端，因此切换源之后需要发布新安装包，不能修改已安装旧版的内置 URL；
 - 不使用来路不明的 GitHub 代理或把代理 URL 写进正式安装包；
 - Tauri 多 endpoint 只有在前一个 endpoint 返回非 2xx 时才继续下一个，网络超时不一定会自动切换，因此不能仅靠 endpoint 数组解决跨境超时。[Tauri updater endpoint 行为](https://v2.tauri.app/plugin/updater/)
 

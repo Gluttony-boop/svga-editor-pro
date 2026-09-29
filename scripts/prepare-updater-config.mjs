@@ -15,15 +15,28 @@ function repository(value) {
   return value
 }
 
-export function createUpdaterOverlay({ publicKey, repositoryName }) {
+function endpoint(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('更新端点必须是非空 HTTPS URL。')
+  const normalized = value.trim()
+  let parsed
+  try { parsed = new URL(normalized) } catch { throw new Error('更新端点不是有效 URL。') }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || /(?:token|password|secret|apikey)/i.test(normalized)) {
+    throw new Error('更新端点必须是无凭据、无查询参数的公开 HTTPS URL。')
+  }
+  return parsed.href
+}
+
+export function createUpdaterOverlay({ publicKey, repositoryName, updateEndpoint }) {
   if (typeof publicKey !== 'string' || !publicKey.trim() || /[\r\n]/.test(publicKey)) throw new Error('更新公钥必须是单行外层 Base64 文本。')
-  const repo = repository(repositoryName)
+  const selectedEndpoint = updateEndpoint?.trim()
+    ? endpoint(updateEndpoint)
+    : `https://github.com/${repository(repositoryName)}/releases/latest/download/latest.json`
   return {
     bundle: { createUpdaterArtifacts: true },
     plugins: {
       updater: {
         pubkey: publicKey,
-        endpoints: [`https://github.com/${repo}/releases/latest/download/latest.json`],
+        endpoints: [selectedEndpoint],
         requireSignedVersion: true,
         allowDowngrades: false,
         dangerousInsecureTransportProtocol: false,
@@ -35,7 +48,7 @@ export function createUpdaterOverlay({ publicKey, repositoryName }) {
 }
 
 export async function main({ env = process.env, output = path.join(root, '.github', 'generated', 'updater-config.json') } = {}) {
-  const overlay = createUpdaterOverlay({ publicKey: env.TAURI_UPDATER_PUBLIC_KEY, repositoryName: env.GITHUB_REPOSITORY })
+  const overlay = createUpdaterOverlay({ publicKey: env.TAURI_UPDATER_PUBLIC_KEY, repositoryName: env.GITHUB_REPOSITORY, updateEndpoint: env.TAURI_UPDATER_ENDPOINT })
   const target = path.resolve(output)
   if (!target.startsWith(`${root}${path.sep}`)) throw new Error('更新配置输出必须位于仓库目录内。')
   await mkdir(path.dirname(target), { recursive: true })

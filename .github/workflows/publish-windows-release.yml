@@ -64,6 +64,7 @@ jobs:
       - name: Generate ephemeral updater configuration
         env:
           TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          TAURI_UPDATER_ENDPOINT: ${{ vars.TAURI_UPDATER_ENDPOINT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node scripts/prepare-updater-config.mjs
 
