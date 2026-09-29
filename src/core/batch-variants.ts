@@ -291,7 +291,7 @@ export function createBatchQueue(template: BatchTemplate, rows: readonly BatchVa
 
 function artifactRecord(raw: unknown): BatchArtifactRecord {
   fields(raw, ['fileName', 'bytes', 'sha256'])
-  if (!text(raw.fileName, 180) || !/\.svga$/i.test(raw.fileName) || /[<>:"/\\|?*\u0000-\u001f]/.test(raw.fileName) ||
+  if (!text(raw.fileName, 180) || !/\.(?:svga|zip)$/i.test(raw.fileName) || /[<>:"/\\|?*\u0000-\u001f]/.test(raw.fileName) ||
     /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(raw.fileName) || raw.fileName.startsWith('.') ||
     raw.fileName !== raw.fileName.trim() || !integer(raw.bytes) || !text(raw.sha256, 64) || !/^[a-f0-9]{64}$/i.test(raw.sha256)) throw new Error('批量产物文件名、大小或摘要无效。')
   return { fileName: raw.fileName, bytes: raw.bytes, sha256: raw.sha256.toLowerCase() }

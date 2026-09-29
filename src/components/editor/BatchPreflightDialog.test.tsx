@@ -25,6 +25,7 @@ describe('批量文案预检入口与只读边界（SSR）', () => {
     const html = render()
     expect(button(html, '开始预检')).toContain('disabled')
     expect(button(html, '导出预检报告 JSON')).toContain('disabled')
+    expect(button(html, '生成批量交付')).toContain('disabled')
     expect(html).toContain('当前没有可用的文字 Key')
   })
   it('展示精确 Key、排除遮罩并支持初始化选中', () => {
@@ -42,6 +43,10 @@ describe('批量文案预检入口与只读边界（SSR）', () => {
     expect(html).toContain('不修改动画、不上传素材、不生成 SVGA')
     expect(html).toContain('通过预检不代表文字不会裁切')
     expect(html).toContain('图片批量处理尚未开放')
+    expect(html).toContain('动态接入：文案交给开发')
+    expect(html).toContain('固定字形：文字写入 SVGA 图片')
+    expect(html).toContain('尚不支持崩溃恢复')
+    expect(html).not.toContain('name="batch-output-mode" checked')
     expect(useEditorStore.getState()).toBe(before)
   })
   it('收起显示会话入口，不留下遮挡画布的模态框', () => {

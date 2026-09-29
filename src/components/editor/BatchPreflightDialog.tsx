@@ -6,6 +6,8 @@ import { buildSlotCatalog } from '@/utils/slot-catalog'
 import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
 import { createSaveFileTarget } from '@/core/exporter'
 import { applyBatchTextRow, type BatchTextSession } from '@/core/batch-text-session'
+import { BatchTextExportPanel } from './BatchTextExportPanel'
+import { useBatchTextExport } from './use-batch-text-export'
 import {
   BATCH_TEMPLATE_FORMAT, MAX_BATCH_JSON_BYTES, parseVariantCsv, parseVariantJson, validateBatchRows,
   type BatchTemplate,
@@ -33,7 +35,9 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
   const [prepared, setPrepared] = React.useState<BatchTextSession | null>(null)
   const [notice, setNotice] = React.useState('')
   const [reading, setReading] = React.useState(false)
-  const [saving, setSaving] = React.useState(false)
+  const [reportSaving, setSaving] = React.useState(false)
+  const batchExport = useBatchTextExport(prepared)
+  const saving = reportSaving || batchExport.busy
   const [page, setPage] = React.useState(0)
   const [onlyIssues, setOnlyIssues] = React.useState(false)
   const [appliedRow, setAppliedRow] = React.useState<number | null>(null)
@@ -58,7 +62,7 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
     Number.isInteger(Number(limit)) && Number(limit) >= 1 && Number(limit) <= 500 && !reading && !saving
   const invalidate = () => { readToken.current++; setReading(false); setPrepared(null); setAppliedRow(null); setNotice(''); setPage(0) }
   const close = () => {
-    if (savingRef.current) return
+    if (savingRef.current || batchExport.isBusy()) return
     readToken.current++
     setReading(false)
     onClose()
@@ -66,7 +70,7 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
   const readFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
-    if (!file || savingRef.current) return
+    if (!file || savingRef.current || batchExport.isBusy()) return
     invalidate()
     const token = ++readToken.current
     if (file.size > MAX_BATCH_JSON_BYTES) { setNotice('文件超过 8 MiB，未读取。'); return }
@@ -112,7 +116,7 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
   }
   const applyRow = (record: number) => {
-    if (!prepared || savingRef.current || changedProject) return
+    if (!prepared || savingRef.current || batchExport.isBusy() || changedProject) return
     try {
       setPrepared(applyBatchTextRow(prepared, record))
       setAppliedRow(record)
@@ -121,7 +125,7 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
     } catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
   }
   const save = async () => {
-    if (!prepared || stale || savingRef.current) return
+    if (!prepared || stale || savingRef.current || batchExport.isBusy()) return
     savingRef.current = true; setSaving(true); setNotice('')
     try {
       const target = await createSaveFileTarget('batch-text-preflight.json')
@@ -153,9 +157,10 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
       <Button size="sm" disabled={!previous || stale || changedProject || saving} onClick={() => previous && applyRow(previous.row)}>上一条文案</Button>
       <Button size="sm" disabled={!next || stale || changedProject || saving} onClick={() => next && applyRow(next.row)}>{appliedIndex < 0 ? '应用首条文案' : '下一条文案'}</Button>
       <Button size="sm" onClick={onOpen}>展开清单</Button>
-      <Button size="sm" disabled={saving} onClick={onDiscard}>丢弃清单</Button>
+      <Button size="sm" disabled={saving} onClick={() => { if (batchExport.canDiscard()) onDiscard?.() }}>丢弃清单</Button>
     </div>
     {notice && <p role="status" className="text-xs text-warning">{notice}</p>}
+    {batchExport.view && <p className="text-xs text-warning">批量结果保留在内存，展开清单可核对并保存 ZIP。</p>}
     <p className="text-[11px] text-text-muted">只切换通过行；每次应用可撤销。清单未保存到磁盘，刷新或切换工程会丢失；丢弃清单不撤销已应用文案。</p>
   </section>
   return <Modal isOpen isolateKeyboard onClose={close} title="批量文案预检" className="!max-w-4xl" footer={
@@ -166,7 +171,7 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
     </div>
   }>
     <div className="space-y-4">
-      <p className="text-xs leading-relaxed text-text-secondary">预检不修改动画、不上传素材、不生成 SVGA。通过预检不代表文字不会裁切；可主动将一条通过的记录应用到画布核对。</p>
+      <p className="text-xs leading-relaxed text-text-secondary">预检不修改动画、不上传素材、不生成 SVGA。通过预检不代表文字不会裁切；可主动将一条通过的记录应用到画布核对，再选择输出方式生成批量交付。</p>
       {changedProject && <p role="alert" className="text-sm text-warning">工程已切换，请关闭后重新打开预检。</p>}
       <div className="grid gap-4 sm:grid-cols-2">
         <fieldset disabled={saving || changedProject} className="min-w-0 space-y-2">
@@ -228,6 +233,7 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
         <p className="text-[11px] text-text-muted">应用会替换该记录全部 Key 的文案并启用文字显示，保留已有样式、范围、图片与导出模式；没有文字配置时使用默认样式且仅模拟。多个 Key 可一次撤销（Ctrl/Cmd+Z）。要将字形写入 SVGA，需在插槽中明确选择写入模式后导出。</p>
         <p className="text-[11px] text-text-muted">报告含编号和 Key，不含原始文案或图片。CSV 记录号包含表头，多行单元格算一条；JSON 从第 1 个元素计数。收起后可在插槽面板连续切换文案；清单仅在本次会话保留，刷新、切换工程或主动丢弃后丢失，报告不能恢复清单。</p>
       </section>}
+      <BatchTextExportPanel controller={batchExport} disabled={reportSaving || changedProject || reading} />
     </div>
   </Modal>
 }

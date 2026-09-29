@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Icon, Button, Modal, PanelSplitter } from '@/components/ui'
 import { CanvasPreview, LicenseDialog, LocalProjectLibraryDialog, PlaybackControls, Timeline, UpdateDialog } from '@/components/editor'
 import { LayerPanel, ResourcePanel, SlotPanel, PropertyPanel, ExportPanel, HistoryPanel } from '@/components/panels'
+import { isBatchExportActive, subscribeBatchExportActivity } from '@/core/batch-export-activity'
 import type { ImageSelectInfo } from '@/components/panels'
 import { useEditorStore } from '@/stores'
 import { svgaParser, LayerFactory } from '@/core'
@@ -331,6 +332,7 @@ export const App: React.FC = () => {
   const [showUpdateModal, setShowUpdateModal] = useState(false)
   const [showLicenseModal, setShowLicenseModal] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const batchExporting = useSyncExternalStore(subscribeBatchExportActivity, isBatchExportActive, () => false)
   const [showUnsavedModal, setShowUnsavedModal] = useState(false)
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
@@ -784,7 +786,7 @@ export const App: React.FC = () => {
         if (disposed) return
         const nativeWindow = getCurrentWebviewWindow()
         closeHandler = createWindowCloseHandler({
-          isBusy: () => documentBusyRef.current,
+          isBusy: () => documentBusyRef.current || isBatchExportActive(),
           isDirty: () => useEditorStore.getState().isDirty,
           confirm: confirmDiscardUnsavedChanges,
           save: async () => await handleSaveRef.current?.() ?? false,
@@ -946,7 +948,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     const beforeUnload = (event: BeforeUnloadEvent) => {
-      if (useEditorStore.getState().isDirty || documentBusyRef.current) { event.preventDefault(); event.returnValue = '' }
+      if (useEditorStore.getState().isDirty || documentBusyRef.current || isBatchExportActive()) { event.preventDefault(); event.returnValue = '' }
     }
     window.addEventListener('beforeunload', beforeUnload)
     return () => {
@@ -1403,12 +1405,12 @@ export const App: React.FC = () => {
         onClose={() => setShowUpdateModal(false)}
         dirty={updateDirty}
         busy={loading || documentBusyRef.current || !!projectLibraryLoading}
-        exporting={exporting}
+        exporting={exporting || batchExporting}
         currentInputs={captureExportInputs(useEditorStore.getState())}
         getGuards={() => ({
           dirty: useEditorStore.getState().isDirty,
           busy: loading || documentBusyRef.current || !!projectLibraryLoading,
-          exporting,
+          exporting: exporting || isBatchExportActive(),
           currentInputs: captureExportInputs(useEditorStore.getState()),
         })}
         beforeInstall={() => {
