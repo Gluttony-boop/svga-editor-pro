@@ -50,6 +50,8 @@ jobs:
         run: npm run build --prefix services/licensing
       - name: Update manifest tests
         run: node --test scripts/release-manifest.node-test.mjs
+      - name: Commercial release preflight
+        run: npm run commercial:preflight
       - name: Editor license policy tests
         run: npx vitest run src/core/license-policy.test.ts src/core/license-client.test.ts
 

@@ -9,6 +9,7 @@
 - [授权设计](licensing-design.md)及 [服务原型](../../services/licensing/README.md)：Cloudflare Workers + D1，小时/天有效期，首次激活起算，单设备，Ed25519 短期签名凭据，绝对到期不被刷新延长，吊销与限流配置保护。本地真实 Miniflare D1/密码学测试通过；未部署生产。[桌面授权策略层](licensing-client.md)固定到期、断网、回拨和成果保护语义；Rust 已有与 Worker 契约对齐的 JWK/JWT 验签、HTTPS 请求与系统 keyring 源码，但本机缺 Windows 链接/SDK 工具，完整原生编译和桌面端到端验收仍未完成。
 - [桌面更新方案](desktop-updates.md)及 `scripts/release-manifest.mjs`：离线生成/检查 Tauri 2 更新清单；当前已接入 updater 插件、最小权限和“检查桌面更新”界面，但未配置生产公钥/端点、未生成签名安装包和 `latest.json`，因此不能生产更新。
 - 商业原型检查工作流仅执行本地测试和构建，不含生产云账号或私钥，不执行远端迁移或发布。
+- 新增 `npm run commercial:preflight` 只读预检：统一检查版本、桌面更新/授权配置形状、CI 与交付脚本、敏感文件名和 Git 工作区；`--strict` 可作为上线前 CI 门禁。它不会读取私钥或代替真实桌面、网络、支付验收。
 
 现有编辑器没有新增付费限制，没有埋点或素材上传，没有更改现有代码的 MIT 声明。所有测试密钥仅在测试进程内临时生成。
 
