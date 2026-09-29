@@ -27,6 +27,7 @@ async function deadline<T>(promise: Promise<T>): Promise<T> {
 afterEach(() => { vi.restoreAllMocks() })
 
 describe('generateZipArchive', () => {
+  // CI 的 Windows runner 在首次压缩大块二进制时可能明显慢于本机，测试超时应覆盖合理冷启动而非偶发抖动。
   it.each(['STORE', 'DEFLATE'] as const)('%s真实生成与generateAsync字节完全一致，CRC可读且本地头不使用data descriptor', async compression => {
     const zip = archive(2)
     const progress: number[] = []
@@ -43,7 +44,7 @@ describe('generateZipArchive', () => {
     expect(progress.length).toBeGreaterThan(2)
     expect(progress.every(percent => percent >= 0 && percent <= 100)).toBe(true)
     expect(progress.at(-1)).toBe(100)
-  })
+  }, 30_000)
 
   it.each(['STORE', 'DEFLATE'] as const)('%s真实流数据回调取消立即reject，无未捕获错误、后续用户进度或第二文件读取', async compression => {
     const zip = archive()
