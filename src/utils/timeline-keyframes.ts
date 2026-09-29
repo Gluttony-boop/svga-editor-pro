@@ -46,7 +46,7 @@ export function buildTimelineRows(
   const rows: TimelineRow[] = []
   for (const layer of layers) {
     if (onlySelected && !selectedIds.includes(layer.id)) continue
-    const expanded = layer.type === 'image' && (expansion[layer.id] ?? layer.id === selectedLayerId)
+    const expanded = layer.type === 'image' && (expansion[layer.id] ?? (filter !== 'all' && layer.id === selectedLayerId))
     rows.push({ key: layer.id, layer, expanded })
     if (!expanded) continue
     for (const track of EDITABLE_TRACKS) {

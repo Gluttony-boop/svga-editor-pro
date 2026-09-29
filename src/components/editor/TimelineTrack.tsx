@@ -22,7 +22,7 @@ interface CommonTrackProps {
 interface TimelineLayerTrackProps extends CommonTrackProps {
   expanded: boolean
   onExpand: (id: string, expanded: boolean) => void
-  onSelect: (id: string, additive?: boolean) => void
+  onSelect: (id: string, additive?: boolean, range?: boolean) => void
 }
 
 export const TimelineLayerTrack = React.memo(({
@@ -56,7 +56,7 @@ export const TimelineLayerTrack = React.memo(({
           <Icon name="chevron-down" size={14} className={cn('transition-transform', !expanded && '-rotate-90')} />
         </button>
         <button type="button" aria-label={`选择时间轴图层：${layer.name}`} aria-pressed={selected} title={layer.name}
-          onClick={event => onSelect(layer.id, event.shiftKey || event.ctrlKey || event.metaKey)} className="flex h-full min-w-0 flex-1 items-center gap-1 text-left text-xs hover:text-accent">
+          onClick={event => onSelect(layer.id, event.ctrlKey || event.metaKey, event.shiftKey)} className="flex h-full min-w-0 flex-1 items-center gap-1 text-left text-xs hover:text-accent">
           <Icon name={layer.locked ? 'lock' : !layer.visible ? 'eye-closed' : 'layer'} size={11} />
           <span className="truncate">{layer.name}</span>
         </button>

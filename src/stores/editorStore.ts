@@ -164,6 +164,7 @@ interface EditorStore {
   reorderLayers: (fromIndex: number, toIndex: number) => void
   addLayer: (layer: Omit<Layer, 'id'>) => string
   deleteLayer: (layerId: string) => void
+  operateLayers: (ids: readonly string[], operation: 'delete' | 'show' | 'hide' | 'lock' | 'unlock', expectedInputs?: readonly unknown[]) => { changed: boolean; error?: string }
   duplicateLayer: (layerId: string) => string | null
 
   // 图层轨道默认值操作
@@ -1154,6 +1155,41 @@ export const useEditorStore = create<EditorStore>()(
         isDirty: true
       }), `新增图层：${layer.name}`)
       return id
+    },
+
+    operateLayers: (ids, operation, expectedInputs) => {
+      const state = get()
+      if (!state.videoItem || expectedInputs && !sameExportInputs(expectedInputs, captureExportInputs(state))) {
+        return { changed: false, error: '工程内容已变化，请重新选择图层后操作。' }
+      }
+      if (state.isCanvasTransforming || state.isSlotConfigEditing) return { changed: false, error: '请先结束当前编辑，再操作图层。' }
+      const targets = new Set(ids)
+      if (!targets.size || [...targets].some(id => !state.layers.some(layer => layer.id === id))) return { changed: false, error: '没有有效的图层选区，请重新选择。' }
+      const chosen = state.layers.filter(layer => targets.has(layer.id))
+      if (operation === 'delete' && chosen.some(layer => layer.locked)) {
+        return { changed: false, error: '选区包含锁定图层，请先解锁；本次未删除任何图层。' }
+      }
+      const labels = { delete: '批量删除', show: '批量显示', hide: '批量隐藏', lock: '批量锁定', unlock: '批量解锁' }
+      if (!Object.prototype.hasOwnProperty.call(labels, operation)) return { changed: false, error: '不支持的图层操作。' }
+      const layers = operation === 'delete' ? state.layers.filter(layer => !targets.has(layer.id)) : state.layers.map(layer => {
+        if (!targets.has(layer.id)) return layer
+        const field = operation === 'lock' || operation === 'unlock' ? 'locked' : 'visible'
+        const value = operation === 'lock' || operation === 'show'
+        return layer[field] === value ? layer : { ...layer, [field]: value }
+      })
+      if (operation === 'delete') {
+        const keyOf = (layer: Layer) => layer.imageKey ?? layer.sprites?.imageKey
+        const removedKeys = new Set(chosen.map(keyOf).filter(Boolean))
+        const keptKeys = new Set(layers.map(keyOf).filter(Boolean))
+        const brokenMatte = layers.some(layer => {
+          const sprite = layer.sprites ?? (!layer.isNew && layer.editableIndex !== undefined ? state.videoItem?.movie.sprites[layer.editableIndex] : undefined)
+          return sprite?.matteKey && removedKeys.has(sprite.matteKey) && !keptKeys.has(sprite.matteKey)
+        })
+        if (brokenMatte) return { changed: false, error: '选区包含其他图层仍在使用的遮罩，请连同依赖图层一起选择；本次未删除。' }
+      }
+      if (layers.length === state.layers.length && layers.every((layer, index) => layer === state.layers[index])) return { changed: false }
+      withHistory({ layers, ...selectionForLayers(getSelectedLayerIds(state), layers), isDirty: true }, `${labels[operation]}：${targets.size} 个图层`)
+      return { changed: true }
     },
 
     deleteLayer: (layerId) => {

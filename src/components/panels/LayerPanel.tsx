@@ -8,7 +8,8 @@ import { filterLayers, type LayerFilter } from '@/utils/layer-filter'
 import { listenForLayerReveal } from '@/utils/layer-navigation'
 import { detectImageMime } from '@/utils/image-mime'
 import { getLayerOutputRange, getLayerSourceFrame, getLayerTimeOffset } from '@/core/layer-time'
-import { getSelectedLayerIds } from '@/utils/layer-selection'
+import { getSelectedLayerIds, selectLayerInList } from '@/utils/layer-selection'
+import { captureExportInputs } from '@/core/export-preview'
 import { getLayerDuplicateError } from '@/core/keyframe-editing'
 
 const getLayerThumbnail = (
@@ -179,7 +180,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   const selectedLayerIds = useEditorStore((s) => s.selectedLayerIds)
   const selectLayer = useEditorStore((s) => s.selectLayer)
   const updateLayer = useEditorStore((s) => s.updateLayer)
-  const deleteLayer = useEditorStore((s) => s.deleteLayer)
+  const operateLayers = useEditorStore((s) => s.operateLayers)
   const duplicateLayer = useEditorStore((s) => s.duplicateLayer)
   const applyAnimationPreset = useEditorStore((s) => s.applyAnimationPreset)
   const reorderLayers = useEditorStore((s) => s.reorderLayers)
@@ -201,7 +202,9 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   const [editingName, setEditingName] = React.useState('')
   const [scrollTop, setScrollTop] = React.useState(0)
   const [viewportHeight, setViewportHeight] = React.useState(0)
-  const [pendingDeleteLayerId, setPendingDeleteLayerId] = React.useState<string | null>(null)
+  const [pendingDelete, setPendingDelete] = React.useState<{ ids: string[]; names: string[]; inputs: readonly unknown[] } | null>(null)
+  const [operationNotice, setOperationNotice] = React.useState('')
+  const selectionAnchor = React.useRef<string | null>(null)
   const [searchQuery, setSearchQuery] = React.useState('')
   const [statusFilter, setStatusFilter] = React.useState<LayerFilter>('all')
   const [revealLayerId, setRevealLayerId] = React.useState<string | null>(null)
@@ -223,6 +226,9 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
     setSearchQuery('')
     setStatusFilter('all')
     setRevealLayerId(null)
+    selectionAnchor.current = null
+    setPendingDelete(null)
+    setOperationNotice('')
   }, [videoItem])
 
   React.useLayoutEffect(() => {
@@ -287,7 +293,6 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   )
   const visibleLayers = filteredLayers.slice(visibleStart, visibleEnd)
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId)
-  const pendingDeleteLayer = layers.find((layer) => layer.id === pendingDeleteLayerId)
   const renamedCount = layers.filter((layer) => {
     const nextName = layer.name.trim()
     return layer.imageKey && nextName.length > 0 && nextName !== layer.imageKey
@@ -302,14 +307,24 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
   }
 
   const handleDeleteLayer = (layerId: string) => {
-    setPendingDeleteLayerId(layerId)
+    requestDelete([layerId])
   }
 
+  const requestDelete = (ids: string[]) => {
+    const state = useEditorStore.getState()
+    if (!ids.length) return
+    setOperationNotice('')
+    setPendingDelete({ ids: [...ids], names: ids.map(id => state.layers.find(layer => layer.id === id)?.name ?? id), inputs: captureExportInputs(state) })
+  }
   const handleConfirmDeleteLayer = () => {
-    if (pendingDeleteLayerId) {
-      deleteLayer(pendingDeleteLayerId)
-    }
-    setPendingDeleteLayerId(null)
+    if (!pendingDelete) return
+    const result = operateLayers(pendingDelete.ids, 'delete', pendingDelete.inputs)
+    setOperationNotice(result.error ?? `已删除 ${pendingDelete.ids.length} 个图层，可一步撤销。`)
+    setPendingDelete(null)
+  }
+  const operateSelection = (operation: 'show' | 'hide' | 'lock' | 'unlock') => {
+    const result = operateLayers(selection, operation)
+    setOperationNotice(result.error ?? (result.changed ? '已更新所选图层，可一步撤销。' : '所选图层已经是该状态。'))
   }
 
   const handleApplyAnimation = (layerId: string, preset: AnimationPreset) => {
@@ -391,7 +406,14 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
           </div>
         }
       >
-        <div className="flex h-full min-h-0 flex-col">
+        <div className="flex h-full min-h-0 flex-col" tabIndex={0} aria-label="图层列表操作区"
+          onKeyDown={event => {
+            if ((event.target as HTMLElement).closest('input, textarea, select, [contenteditable="true"]')) return
+            if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); event.stopPropagation(); requestDelete(selection) }
+            if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+              event.preventDefault(); event.stopPropagation(); useEditorStore.getState().selectLayers(filteredLayers.map(({ layer }) => layer.id))
+            }
+          }}>
           <div className="flex flex-shrink-0 items-center gap-1.5 border-b border-border/70 px-2 py-2">
             <input
               type="search"
@@ -422,6 +444,18 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
               <option value="unlocked">未锁定</option>
             </select>
           </div>
+          <div aria-label="图层批量操作" className="flex flex-wrap flex-shrink-0 gap-1 border-b border-border/70 px-2 py-1">
+            <Button size="sm" disabled={!filteredLayers.length} onClick={() => useEditorStore.getState().selectLayers(filteredLayers.map(({ layer }) => layer.id))}>全选当前列表</Button>
+            <Button size="sm" disabled={!selection.length} onClick={() => selectLayer(null)}>取消选择</Button>
+            {selection.length > 0 && <>
+              <Button size="sm" onClick={() => operateSelection('show')}>显示所选</Button>
+              <Button size="sm" onClick={() => operateSelection('hide')}>隐藏所选</Button>
+              <Button size="sm" onClick={() => operateSelection('lock')}>锁定所选</Button>
+              <Button size="sm" onClick={() => operateSelection('unlock')}>解锁所选</Button>
+              <Button size="sm" variant="danger" onClick={() => requestDelete(selection)}>删除所选（{selection.length}）</Button>
+            </>}
+          </div>
+          {operationNotice && <p role="status" className="px-2 py-1 text-xs text-warning">{operationNotice}</p>}
           <div className="flex h-10 flex-shrink-0 items-center justify-between border-b border-border/70 px-3 text-xs">
             <div className="min-w-0 text-text-muted">
               {selectedLayer ? (
@@ -515,7 +549,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
                         isEditing={editingLayerId === layer.id}
                         editingName={editingName}
                         onClick={(event) => {
-                          selectLayer(layer.id, event.shiftKey || event.ctrlKey || event.metaKey)
+                          const next = selectLayerInList(filteredLayers.map(({ layer: item }) => item.id), selection, layer.id,
+                            selectionAnchor.current ?? selectedLayerId, event.shiftKey, event.ctrlKey || event.metaKey)
+                          selectionAnchor.current = next.anchor
+                          useEditorStore.getState().selectLayers(next.ids)
                           setShowActionMenu(null)
                           setShowAnimationMenu(null)
                         }}
@@ -554,30 +591,32 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({ className }) => {
           </div>
           {layers.length > 1 && (
             <div className="flex-shrink-0 border-t border-border/70 px-3 py-1.5 text-[10px] text-text-muted">
-              Shift / Ctrl / ⌘ 单击多选 · 行内按钮仅操作本层
+              Shift 连选 · Ctrl/⌘ 增减选择 · 行内按钮仅操作本层
+              {selection.some(id => !filteredLayers.some(({ layer }) => layer.id === id)) && <span className="block text-warning">选区包含筛选外图层，批量操作仍作用于全部所选。</span>}
             </div>
           )}
         </div>
       </Panel>
 
       <Modal
-        isOpen={Boolean(pendingDeleteLayer)}
-        onClose={() => setPendingDeleteLayerId(null)}
-        title="删除图层"
+        isOpen={Boolean(pendingDelete)} isolateKeyboard
+        onClose={() => setPendingDelete(null)}
+        title="确认删除图层"
         footer={
           <>
-            <Button variant="ghost" onClick={() => setPendingDeleteLayerId(null)}>
+            <Button variant="ghost" onClick={() => setPendingDelete(null)}>
               取消
             </Button>
             <Button variant="danger" onClick={handleConfirmDeleteLayer}>
-              删除
+              确认删除 {pendingDelete?.ids.length ?? 0} 个图层
             </Button>
           </>
         }
       >
         <p className="text-sm text-text-secondary">
-          确定要删除图层“{pendingDeleteLayer?.name}”吗？此操作会从当前编辑内容中移除该图层。
+          将删除所选 {pendingDelete?.ids.length ?? 0} 个图层（含筛选外选区），不会删除素材库中的原始图片。可一步撤销；锁定图层或仍被引用的遮罩会阻止整组删除。
         </p>
+        <ul className="mt-2 max-h-40 overflow-auto text-xs text-text-secondary">{pendingDelete?.names.map((name, index) => <li key={pendingDelete.ids[index]}>{name}</li>)}</ul>
       </Modal>
     </>
   )

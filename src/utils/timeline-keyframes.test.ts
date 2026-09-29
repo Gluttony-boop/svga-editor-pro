@@ -23,10 +23,10 @@ function animated(id = 'a', offset = 0): Layer {
 }
 
 describe('时间轴属性虚拟行', () => {
-  it('只自动展开主选中图层，其他图层保持一行', () => {
+  it('普通多选不自动增加属性行，更不创建图层', () => {
     const rows = buildTimelineRows([layer('a'), layer('b'), layer('c')], 'b', {}, 'all', false, ['a', 'b'])
-    expect(rows.map(row => row.key)).toEqual(['a', 'b', 'b:position', 'b:scale', 'b:rotation', 'b:alpha', 'c'])
-    expect(rows.findIndex(row => row.key === 'c')).toBe(6)
+    expect(rows.map(row => row.key)).toEqual(['a', 'b', 'c'])
+    expect(rows.findIndex(row => row.key === 'c')).toBe(2)
   })
 
   it('显式展开与收起优先于默认选中状态', () => {
@@ -37,7 +37,7 @@ describe('时间轴属性虚拟行', () => {
   it('非图片图层不出现无效属性，锁定或隐藏图层仍可查看轨道', () => {
     const rows = buildTimelineRows([layer('audio', { type: 'audio' }), animated('locked')], 'locked', { audio: true }, 'rotation', false, ['locked'])
     expect(rows.map(row => row.key)).toEqual(['audio', 'locked', 'locked:rotation'])
-    const readonly = buildTimelineRows([layer('a', { locked: true, visible: false })], 'a', {}, 'all', false, ['a'])
+    const readonly = buildTimelineRows([layer('a', { locked: true, visible: false })], 'a', { a: true }, 'all', false, ['a'])
     expect(readonly).toHaveLength(5)
   })
 

@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect, useCallback, useLayoutEffect } from
 import { Icon, Button } from '@/components/ui'
 import { useEditorStore } from '@/stores'
 import { cn } from '@/utils/cn'
-import { getSelectedLayerIds } from '@/utils/layer-selection'
+import { getSelectedLayerIds, selectLayerInList } from '@/utils/layer-selection'
 import { getLayerTimeOffset } from '@/core/layer-time'
 import { EDITABLE_TRACKS, TRACK_LABELS, getKeyframeEditError } from '@/core/keyframe-editing'
 import type { EasingType, LayerTracks } from '@/types'
@@ -34,6 +34,7 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   const currentColumnRef = useRef<HTMLDivElement>(null)
   const frameRef = useRef(0)
   const dragRef = useRef<{ pointer: number; x: number } | null>(null)
+  const selectionAnchor = useRef<string | null>(null)
   const keyDragRef = useRef<KeyframeDrag | null>(null)
   const pendingZoomRef = useRef<number | null>(null)
   const resizeRef = useRef<{ y:number; height:number } | null>(null)
@@ -125,6 +126,7 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
     setScrubbing(false)
     setKeySelection(null)
     setExpansion({})
+    selectionAnchor.current = null
     setNotice(null)
     pendingZoomRef.current = null
     const el = viewportRef.current
@@ -384,7 +386,13 @@ export const Timeline: React.FC<TimelineProps> = ({ className }) => {
   const contentHeight = RULER + Math.max(viewport.height - RULER, rows.length * rowHeight)
   const previewRow = keyPreview ? rows.findIndex(row => row.layer.id === keyPreview.selection.layerId && row.track === keyPreview.selection.track) : -1
   const insertionError = timelineInsertionError(layers, selectedIds, frameRef.current, totalFrames)
-  const onLayerSelect = (id: string, additive?: boolean) => { cancelKeyDrag(); setKeySelection(null); selectLayer(id, additive) }
+  const onLayerSelect = (id: string, additive = false, range = false) => {
+    cancelKeyDrag(); setKeySelection(null)
+    const next = selectLayerInList(rows.filter(row => !row.track).map(row => row.layer.id), selectedIds, id,
+      selectionAnchor.current ?? selectedLayerId, range, additive)
+    selectionAnchor.current = next.anchor
+    useEditorStore.getState().selectLayers(next.ids)
+  }
 
   return (
     <section aria-label="时间轴" onKeyDown={handleTimelineKeyDown} className={cn('flex flex-col flex-shrink-0 min-h-[160px] bg-bg-secondary border-t border-border', className)} style={{height:displayedHeight}}>
