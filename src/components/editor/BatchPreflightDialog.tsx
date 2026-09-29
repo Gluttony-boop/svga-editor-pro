@@ -152,7 +152,7 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
   if (!isOpen) return <section aria-label="批量文案会话" className="rounded border border-border bg-bg-tertiary p-2 space-y-2">
     <p className="text-xs">清单保留在本次会话 · {prepared ? `${validRows.length} 条可应用` : '尚未预检'}</p>
     {appliedIndex >= 0 && <p className="break-all text-xs text-text-secondary">上次应用：{validRows[appliedIndex].id} · 记录 {appliedRow}（{appliedIndex + 1}/{validRows.length}）</p>}
-    {(stale || changedProject) && <p role="alert" className="text-xs text-warning">工程已变化，请展开清单重新预检后继续。</p>}
+    {(stale || changedProject) && <p role="alert" className="text-xs text-warning">工程已变化；已冻结任务可独立继续，新预检请{changedProject ? '丢弃清单后重新打开' : '展开清单重新预检'}。</p>}
     <div className="flex flex-wrap gap-1">
       <Button size="sm" disabled={!previous || stale || changedProject || saving} onClick={() => previous && applyRow(previous.row)}>上一条文案</Button>
       <Button size="sm" disabled={!next || stale || changedProject || saving} onClick={() => next && applyRow(next.row)}>{appliedIndex < 0 ? '应用首条文案' : '下一条文案'}</Button>
@@ -160,8 +160,8 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
       <Button size="sm" disabled={saving} onClick={() => { if (batchExport.canDiscard()) onDiscard?.() }}>丢弃清单</Button>
     </div>
     {notice && <p role="status" className="text-xs text-warning">{notice}</p>}
-    {batchExport.view && <p className="text-xs text-warning">批量结果保留在内存，展开清单可核对并保存 ZIP。</p>}
-    <p className="text-[11px] text-text-muted">只切换通过行；每次应用可撤销。清单未保存到磁盘，刷新或切换工程会丢失；丢弃清单不撤销已应用文案。</p>
+    {batchExport.view && <p className="text-xs text-warning">批量结果保留在内存，展开可保存交付 ZIP 或可继续执行的任务文件。</p>}
+    <p className="text-[11px] text-text-muted">只切换通过行；每次应用可撤销。当前输入清单未保存到磁盘，刷新会丢失；任务文件另存冻结的执行清单。丢弃清单不撤销已应用文案。</p>
   </section>
   return <Modal isOpen isolateKeyboard onClose={close} title="批量文案预检" className="!max-w-4xl" footer={
     <div className="flex w-full flex-wrap justify-end gap-2">
@@ -172,7 +172,7 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
   }>
     <div className="space-y-4">
       <p className="text-xs leading-relaxed text-text-secondary">预检不修改动画、不上传素材、不生成 SVGA。通过预检不代表文字不会裁切；可主动将一条通过的记录应用到画布核对，再选择输出方式生成批量交付。</p>
-      {changedProject && <p role="alert" className="text-sm text-warning">工程已切换，请关闭后重新打开预检。</p>}
+      {changedProject && <p role="alert" className="text-sm text-warning">工程已切换，新文案预检请丢弃清单后重新打开；已冻结的批量任务仍可独立保存和继续。</p>}
       <div className="grid gap-4 sm:grid-cols-2">
         <fieldset disabled={saving || changedProject} className="min-w-0 space-y-2">
           <legend className="mb-2 text-sm">1. 选择要替换的文字 Key（最多 128 个）</legend>
@@ -231,9 +231,9 @@ export function BatchPreflightDialog({ onClose, initialKey, isOpen = true, onOpe
           <Button size="sm" disabled={(currentPage + 1) * PAGE_SIZE >= reportRows.length} onClick={() => setPage(currentPage + 1)}>下一页</Button>
         </div>}
         <p className="text-[11px] text-text-muted">应用会替换该记录全部 Key 的文案并启用文字显示，保留已有样式、范围、图片与导出模式；没有文字配置时使用默认样式且仅模拟。多个 Key 可一次撤销（Ctrl/Cmd+Z）。要将字形写入 SVGA，需在插槽中明确选择写入模式后导出。</p>
-        <p className="text-[11px] text-text-muted">报告含编号和 Key，不含原始文案或图片。CSV 记录号包含表头，多行单元格算一条；JSON 从第 1 个元素计数。收起后可在插槽面板连续切换文案；清单仅在本次会话保留，刷新、切换工程或主动丢弃后丢失，报告不能恢复清单。</p>
+        <p className="text-[11px] text-text-muted">报告含编号和 Key，不含原始文案或图片。CSV 记录号包含表头，多行单元格算一条；JSON 从第 1 个元素计数。收起后可在插槽面板连续切换文案；当前输入清单仅在本次会话保留，刷新或主动丢弃后丢失，切换工程后不能直接应用旧预检。报告不能恢复清单，任务文件仅保存冻结后的执行清单。</p>
       </section>}
-      <BatchTextExportPanel controller={batchExport} disabled={reportSaving || changedProject || reading} />
+      <BatchTextExportPanel controller={batchExport} disabled={reportSaving || reading} />
     </div>
   </Modal>
 }

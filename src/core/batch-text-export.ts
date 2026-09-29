@@ -1,11 +1,13 @@
 import JSZip from 'jszip'
 import type { ProjectDocument } from '@/types/project'
-import type { DeliveryBundleResult } from '@/types/delivery'
+import type { DeliveryCheck } from '@/types/delivery'
 import { buildSlotCatalog } from '@/utils/slot-catalog'
 import { mergeSlotTextConfig } from '@/utils/slot-config'
 import { normalizeTextConfig } from './text-preview'
 import { generateDeliveryBundle } from './delivery'
-import { prepareDeliverySnapshot, assertDeliveryActive } from './project-revision'
+import { prepareDeliverySnapshot, restoreDeliverySnapshot, assertDeliveryActive } from './project-revision'
+import { MAX_BATCH_EXPORT_BYTES, MAX_BATCH_EXPORT_ITEMS, readBatchTaskFile, writeBatchTaskFile, validateSavedPreview,
+  type BatchTextOutputMode, type SavedBatchResult } from './batch-task-file'
 import { sha256Bytes } from './content-hash'
 import { generateZipArchive } from './zip-generation'
 import {
@@ -14,9 +16,7 @@ import {
   type BatchTemplate, type BatchVariantRow, type BatchQueueState,
 } from './batch-variants'
 
-export type BatchTextOutputMode = 'dynamic' | 'bake'
-export const MAX_BATCH_EXPORT_ITEMS = 100
-export const MAX_BATCH_EXPORT_BYTES = 256 * 1024 * 1024
+export { MAX_BATCH_EXPORT_BYTES, MAX_BATCH_EXPORT_ITEMS, type BatchTextOutputMode } from './batch-task-file'
 const ZIP_DATE = new Date('2000-01-01T00:00:00Z')
 const ownSlot = (source: ProjectDocument, key: string) => Object.prototype.hasOwnProperty.call(source.slotConfigs, key) ? source.slotConfigs[key] : undefined
 
@@ -43,8 +43,12 @@ export function batchTextDocument(source: ProjectDocument, row: BatchVariantRow,
   return { ...source, slotConfigs: slots }
 }
 
+export interface BatchTextResult extends SavedBatchResult {
+  checks: DeliveryCheck[]
+  restored: boolean
+}
 interface StoredResult {
-  result: DeliveryBundleResult
+  result: BatchTextResult
   sha256: string
   fileName: string
 }
@@ -61,9 +65,19 @@ export interface BatchTextExportJob {
 }
 export interface BatchTextExportTask {
   view: () => BatchTextExportView
-  result: (id: string) => DeliveryBundleResult | undefined
+  result: (id: string) => BatchTextResult | undefined
   run: (action: 'start' | 'retry-failed' | 'resume-cancelled', job?: BatchTextExportJob) => Promise<void>
   archive: (signal?: AbortSignal) => Promise<Blob>
+  saveTask: (signal?: AbortSignal) => Promise<Blob>
+}
+
+function checkInputs(document: ProjectDocument, template: BatchTemplate, rows: readonly BatchVariantRow[], mode: BatchTextOutputMode) {
+  if (mode !== 'dynamic' && mode !== 'bake') throw new Error('请明确选择动态接入或固定字形写入。')
+  if (rows.length > MAX_BATCH_EXPORT_ITEMS) throw new Error('单次最多导出 100 条，请拆分清单。')
+  if (template.slotRules.some(rule => rule.kind !== 'text' || rule.required === false)) throw new Error('当前批量导出只支持必填文字 Key。')
+  const keys = new Set(buildSlotCatalog(document.videoItem, document.layers, document.imageResources, document.slotConfigs)
+    .filter(entry => entry.canSimulateText).map(entry => entry.key))
+  return createBatchQueue(template, rows, keys)
 }
 
 /** 一次冻结，串行执行；成功字节与队列同时保留，重试不重新读取当前编辑器。 */
@@ -72,22 +86,40 @@ export async function createBatchTextExportTask(
   mode: BatchTextOutputMode, signal?: AbortSignal,
 ): Promise<BatchTextExportTask> {
   assertDeliveryActive(signal)
-  if (mode !== 'dynamic' && mode !== 'bake') throw new Error('请明确选择动态接入或固定字形写入。')
-  if (rows.length > MAX_BATCH_EXPORT_ITEMS) throw new Error('单次最多导出 100 条，请拆分清单。')
-  if (template.slotRules.some(rule => rule.kind !== 'text' || rule.required === false)) throw new Error('当前批量导出只支持必填文字 Key。')
-  const keys = new Set(buildSlotCatalog(document.videoItem, document.layers, document.imageResources, document.slotConfigs)
-    .filter(entry => entry.canSimulateText).map(entry => entry.key))
-  let queue = createBatchQueue(template, rows, keys)
+  const queue = checkInputs(document, template, rows, mode)
   const snapshot = await prepareDeliverySnapshot(document, signal)
   assertDeliveryActive(signal)
+  return buildTask(snapshot, queue, mode, new Map())
+}
+
+/** 完整验证结束前不暴露新任务；不会读取或替换当前编辑器工程。 */
+export async function openBatchTextExportTask(file: Blob, signal?: AbortSignal): Promise<BatchTextExportTask> {
+  const data = await readBatchTaskFile(file, signal)
+  const snapshot = await restoreDeliverySnapshot(data.sourceArchive, signal)
+  if (snapshot.sourceRevision !== data.sourceRevision) throw new Error('任务源工程修订不匹配，未恢复。')
+  checkInputs(snapshot.document, data.queue.template, data.queue.items.map(item => item.row), data.mode)
   const results = new Map<string, StoredResult>()
-  let bytes = 0
+  for (const item of data.queue.items) {
+    const stored = data.results.get(item.row.id)
+    if (!stored) continue
+    if (stored.previewFrame !== snapshot.document.currentFrame) throw new Error('任务预览帧与源工程不一致。')
+    await validateSavedPreview(stored, snapshot.document.params.viewBoxWidth, snapshot.document.params.viewBoxHeight, signal)
+    results.set(item.row.id, { result: { ...stored, checks: [], restored: true }, sha256: item.artifact!.sha256, fileName: item.artifact!.fileName })
+  }
+  assertDeliveryActive(signal)
+  return buildTask(snapshot, data.queue, data.mode, results)
+}
+
+function buildTask(snapshot: Awaited<ReturnType<typeof prepareDeliverySnapshot>>, initialQueue: BatchQueueState,
+  mode: BatchTextOutputMode, results: Map<string, StoredResult>): BatchTextExportTask {
+  let queue = initialQueue
+  let bytes = [...results.values()].reduce((sum, { result }) => sum + result.blob.size + result.previews.actual.size + result.previews.design.size, 0)
   let busy = false
   const view = (): BatchTextExportView => ({ queue: structuredClone(queue), mode, sourceRevision: snapshot.sourceRevision, bytes, busy })
   const result = (id: string) => {
     const value = results.get(id)?.result
     // Blob 不可变；元数据返回副本，避免界面或调用方篡改用于打包的证据。
-    return value ? { ...value, manifest: structuredClone(value.manifest), report: structuredClone(value.report), slots: structuredClone(value.slots), previews: { ...value.previews } } : undefined
+    return value ? { ...value, checks: structuredClone(value.checks), previews: { ...value.previews } } : undefined
   }
   const run: BatchTextExportTask['run'] = async (action, job = {}) => {
     if (busy) throw new Error('批量任务正在生成或打包，请稍候。')
@@ -125,7 +157,8 @@ export async function createBatchTextExportTask(
           assertDeliveryActive(job.signal)
           const fileName = `${String(index + 1).padStart(5, '0')}.zip`
           const next = succeedBatchItem(queue, item.row.id, { fileName, bytes: generated.blob.size, sha256 })
-          results.set(item.row.id, { result: generated, sha256, fileName })
+          results.set(item.row.id, { result: { blob: generated.blob, previews: generated.previews,
+            previewFrame: generated.manifest.previewFrame, checks: structuredClone(generated.report.checks), restored: false }, sha256, fileName })
           bytes += retainedBytes
           queue = next
         } catch (error) {
@@ -166,7 +199,8 @@ export async function createBatchTextExportTask(
       const manifest = { format: 'svga-editor-batch-delivery', schemaVersion: 1, mode, sourceRevision: snapshot.sourceRevision,
         complete: queue.items.every(item => item.status === 'succeeded'), includesProject: false,
         rows: queue.items.map(item => ({ record: item.row.row, id: item.row.id, status: item.status, attempts: item.attempts,
-          ...(item.artifact ? { file: { path: `variants/${item.artifact.fileName}`, bytes: item.artifact.bytes, sha256: item.artifact.sha256 } } : {}),
+          ...(item.artifact ? { verification: results.get(item.row.id)?.result.restored ? 'restored-integrity-only' : 'generated-in-session',
+            file: { path: `variants/${item.artifact.fileName}`, bytes: item.artifact.bytes, sha256: item.artifact.sha256 } } : {}),
           // 汇总只保存失败类别，不把异常中可能带出的本地地址或文案传播到分享报告。
           ...(item.issues ? { issues: item.issues.map(issue => ({ code: issue.code, row: issue.row })) } : {}) })) }
       await add('manifest.json', new TextEncoder().encode(JSON.stringify(manifest, null, 2)))
@@ -180,10 +214,19 @@ export async function createBatchTextExportTask(
         '预览是导出时当前帧，不证明全帧、字体裁剪或 Android/iOS SDK 已通过；目标设备仍须验收。',
         '包内含编号、Key、文案及可能未引用的原始资源，请确认可以分享。未附源工程、清单恢复数据或字体文件。',
         'SHA-256 只用于比对内容，不是数字签名。此 ZIP 不能用于恢复编辑工程或批量执行任务。',
+        'verification=restored-integrity-only 表示从任务文件恢复的旧产物，仅核对存储摘要；本次没有重新回读 SVGA、渲染预览或验证内嵌报告。仅打开可信任务文件。',
       ].join('\n')))
       zip.file('checksums.sha256', hashes.join('\n') + '\n', { date: ZIP_DATE, createFolders: false })
       return await generateZipArchive(zip, { compression: 'STORE', maxBytes: MAX_BATCH_EXPORT_BYTES + 4 * 1024 * 1024, signal: archiveSignal })
     } finally { busy = false }
   }
-  return { view, result, run, archive }
+  const saveTask = async (signal?: AbortSignal) => {
+    if (busy) throw new Error('批量任务正在生成或打包，请稍候。')
+    busy = true
+    try {
+      return await writeBatchTaskFile({ mode, sourceRevision: snapshot.sourceRevision, sourceArchive: snapshot.archive, queue,
+        results: new Map([...results].map(([id, stored]) => [id, stored.result])) }, signal)
+    } finally { busy = false }
+  }
+  return { view, result, run, archive, saveTask }
 }

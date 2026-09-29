@@ -85,8 +85,8 @@ describe('批量文字任务：串行与隔离（实际编解码在交付测试�
     await task.run('start')
     expect(mock.generate.mock.calls[0][0].layers[0].name).toBe('title')
     expect(task.view().queue.items[0].row.values.title).toBe('设计师1')
-    task.result('1')!.slots[0].sources[0].textEffect = 'none'
-    expect(task.result('1')!.slots[0].sources[0].textEffect).toBe('dynamic')
+    task.result('1')!.checks.push({ id: 'external', title: '外部修改', detail: '不应进入任务', status: 'failed' })
+    expect(task.result('1')!.checks).toEqual([])
   })
   it('失败不会回滚其他结果，仅重试失败项保持成功 Blob 与次数', async () => {
     mock.generate.mockImplementation(async (doc: ProjectDocument) => { if (doc.slotConfigs.title.value === '设计师2') throw new Error('编码失败'); return output(doc) })

@@ -88,13 +88,13 @@ function text(value: unknown, max = 4096): value is string {
 function rowCount(rows: readonly unknown[]): void {
   if (rows.length > MAX_BATCH_ROWS) throw new Error('批量清单最多支持 10000 行。')
 }
-function sourceSize(source: string): void {
-  if (typeof source !== 'string' || source.length > MAX_BATCH_JSON_BYTES || bytes(source) > MAX_BATCH_JSON_BYTES) throw new Error('批量清单超过 8 MiB。')
+function sourceSize(source: string, maxBytes = MAX_BATCH_JSON_BYTES): void {
+  if (typeof source !== 'string' || source.length > maxBytes || bytes(source) > maxBytes) throw new Error(`批量清单超过 ${maxBytes / 1024 / 1024} MiB。`)
 }
 
 /** 在 JSON.parse 分配大对象之前限制嵌套、字段数量并拒绝重复 Key，避免静默覆盖文案。 */
-function parseJson(source: string): unknown {
-  sourceSize(source)
+export function parseBatchJson(source: string, maxBytes = MAX_BATCH_JSON_BYTES): unknown {
+  sourceSize(source, maxBytes)
   source = source.replace(/^\uFEFF/, '')
   const stack: Array<Set<string>> = []
   let nodes = 0
@@ -180,7 +180,7 @@ function parseValues(value: unknown): Record<string, BatchValue> {
 
 /** 推荐 {id, values}；嵌套 values 中的 id/name/values 均是合法的精确资源 Key。 */
 export function parseVariantJson(source: string): BatchVariantRow[] {
-  const parsed = parseJson(source)
+  const parsed = parseBatchJson(source)
   if (!Array.isArray(parsed)) fields(parsed, ['rows'])
   const rows = Array.isArray(parsed) ? parsed : parsed.rows
   if (!Array.isArray(rows)) throw new Error('JSON 清单必须是数组或包含 rows 数组的对象。')
@@ -389,7 +389,7 @@ export function serializeBatchQueue(state: BatchQueueState): string {
 }
 /** 只恢复任务记录；上层仍须校验真实产物文件和源工程修订，不能凭 JSON 宣称文件存在。 */
 export function parseBatchQueue(source: string, template?: BatchTemplate): BatchQueueState {
-  const state = checkedQueue(parseJson(source))
+  const state = checkedQueue(parseBatchJson(source))
   if (template && templateSignature(checkedTemplate(template)) !== state.templateSignature) throw new Error('批量队列使用的模板与当前模板不一致。')
   return recoverBatchQueue(state)
 }

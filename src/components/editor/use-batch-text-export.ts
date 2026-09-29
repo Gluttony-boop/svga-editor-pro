@@ -4,7 +4,8 @@ import { createSaveFileTarget } from '@/core/exporter'
 import { captureExportInputs, sameExportInputs } from '@/core/export-preview'
 import type { BatchTextSession } from '@/core/batch-text-session'
 import { beginBatchExportActivity } from '@/core/batch-export-activity'
-import { createBatchTextExportTask, type BatchTextExportTask, type BatchTextExportView, type BatchTextOutputMode } from '@/core/batch-text-export'
+import { createBatchTextExportTask, openBatchTextExportTask, type BatchTextExportTask, type BatchTextExportView, type BatchTextOutputMode } from '@/core/batch-text-export'
+import { MAX_BATCH_TASK_BYTES } from '@/core/batch-task-file'
 
 export function useBatchTextExport(session: BatchTextSession | null) {
   const [mode, setMode] = React.useState<BatchTextOutputMode | ''>('')
@@ -18,10 +19,12 @@ export function useBatchTextExport(session: BatchTextSession | null) {
   const job = React.useRef<{ controller: AbortController; writing: boolean } | null>(null)
   const mounted = React.useRef(true)
   const unsaved = React.useRef(false)
+  const checkpointDirty = React.useRef(false)
+  const restored = React.useRef(false)
   React.useEffect(() => {
     mounted.current = true
     const onUnload = (event: BeforeUnloadEvent) => {
-      if (job.current || unsaved.current) { event.preventDefault(); event.returnValue = '' }
+      if (job.current || unsaved.current || checkpointDirty.current) { event.preventDefault(); event.returnValue = '' }
     }
     window.addEventListener('beforeunload', onUnload)
     return () => { mounted.current = false; job.current?.controller.abort(); window.removeEventListener('beforeunload', onUnload) }
@@ -47,10 +50,11 @@ export function useBatchTextExport(session: BatchTextSession | null) {
         inputs.current = session.inputs
         capturedSession.current = session
       }
+      checkpointDirty.current = true
       await task.current.run(action, { signal: operation.controller.signal,
         onChange: (next, message) => { if (mounted.current) { setView(next); setPhase(message); unsaved.current ||= next.queue.items.some(item => item.status === 'succeeded') } } })
       if (mounted.current) setPhase(task.current.view().queue.items.some(item => item.status === 'succeeded')
-        ? '本轮生成结束；结果仅保存在内存，请核对后保存 ZIP。'
+        ? '本轮生成结束；请核对后保存交付 ZIP。需下次继续时，另存任务文件。'
         : '本轮没有成功产物，请检查下方失败原因；修改工程后需新建任务。')
     } catch (error) {
       if (mounted.current) setPhase(operation.controller.signal.aborted ? '已停止后续生成，已完成结果保留，可保存或继续未完成项。' : error instanceof Error ? error.message : '批量生成失败。')
@@ -60,7 +64,7 @@ export function useBatchTextExport(session: BatchTextSession | null) {
       if (mounted.current) { setBusy(false); setView(task.current?.view() ?? null) }
     }
   }
-  const save = async (id?: string) => {
+  const save = async (id?: string, checkpoint = false) => {
     if (job.current || !task.current) return
     const operation = { controller: new AbortController(), writing: true }
     job.current = operation
@@ -69,30 +73,52 @@ export function useBatchTextExport(session: BatchTextSession | null) {
     try {
       const artifact = id ? task.current.result(id) : null
       if (id && !artifact) throw new Error('该记录没有成功结果。')
-      const target = await createSaveFileTarget(artifact ? `variant-${String((view?.queue.items.findIndex(item => item.row.id === id) ?? 0) + 1).padStart(5, '0')}.zip` : 'batch-text-delivery.zip')
+      const target = await createSaveFileTarget(checkpoint ? 'batch-text-task.svgabatch' : artifact ? `variant-${String((view?.queue.items.findIndex(item => item.row.id === id) ?? 0) + 1).padStart(5, '0')}.zip` : 'batch-text-delivery.zip')
       if (!target) { if (mounted.current) setPhase('已取消保存；结果仍保留。'); return }
       if (!mounted.current || operation.controller.signal.aborted) return
-      const blob = artifact?.blob ?? await task.current.archive(operation.controller.signal)
+      const blob = checkpoint ? await task.current.saveTask(operation.controller.signal) : artifact?.blob ?? await task.current.archive(operation.controller.signal)
       if (!mounted.current || operation.controller.signal.aborted) return
       await target(blob)
       if (mounted.current) {
         if (!id) unsaved.current = false
-        setPhase('ZIP 已交给保存接口，请核对下载列表或目标位置；工程未保存状态不变。')
+        if (checkpoint) checkpointDirty.current = false
+        setPhase(checkpoint ? '任务文件已交给保存接口，请确认下载完成。包含源工程和原始文案，请勿直接发给客户。' : 'ZIP 已交给保存接口，请核对下载列表或目标位置；工程未保存状态不变。')
       }
     } catch (error) {
       if (mounted.current) setPhase('保存未完成，结果仍保留：' + (error instanceof Error ? error.message : '请重试。'))
     } finally { finishActivity(); job.current = null; if (mounted.current) setBusy(false) }
   }
+  const openTask = async (file: File) => {
+    if (job.current) return
+    if (!/\.svgabatch$/i.test(file.name) || file.size > MAX_BATCH_TASK_BYTES) { setPhase('请选择大小未超限的 .svgabatch 任务文件；旧任务保留。'); return }
+    const operation = { controller: new AbortController(), writing: false }
+    job.current = operation
+    const finishActivity = beginBatchExportActivity()
+    setBusy(true); setPhase('正在校验任务文件、源快照和产物摘要；旧任务暂时保留…')
+    try {
+      const loaded = await openBatchTextExportTask(file, operation.controller.signal)
+      if (!mounted.current || operation.controller.signal.aborted) return
+      if (task.current && !window.confirm('文件校验完成。替换当前批量任务？未保存的任务与结果将释放，当前画布不改变。')) {
+        setPhase('已取消替换，原批量任务和结果保留。'); return
+      }
+      task.current = loaded; inputs.current = null; capturedSession.current = null
+      unsaved.current = false; checkpointDirty.current = false; restored.current = true
+      setMode(loaded.view().mode); setSelectedId(null); setView(loaded.view())
+      setPhase('任务已恢复，未改动画布。旧产物仅通过存储完整性校验；继续项沿用任务内源快照，不使用当前工程。')
+    } catch (error) {
+      if (mounted.current) setPhase(operation.controller.signal.aborted ? '已取消读取，原任务保留。' : '任务未打开，原任务保留：' + (error instanceof Error ? error.message : '文件无效。'))
+    } finally { finishActivity(); job.current = null; if (mounted.current) setBusy(false) }
+  }
   const clear = () => {
-    if (job.current || task.current && !window.confirm('释放本次批量任务和内存中的结果？请先保存需要的 ZIP；编辑工程不会改变。')) return
-    task.current = null; inputs.current = null; capturedSession.current = null; unsaved.current = false
+    if (job.current || task.current && !window.confirm('释放本次批量任务和内存中的结果？请先保存需要的交付 ZIP 或任务文件；编辑工程不会改变。')) return
+    task.current = null; inputs.current = null; capturedSession.current = null; unsaved.current = false; checkpointDirty.current = false; restored.current = false
     setView(null); setPhase(''); setSelectedId(null)
   }
   const current = useEditorStore.getState()
   return {
-    mode, setMode, view, busy, phase, execute, save, clear,
+    mode, setMode, view, busy, phase, execute, save, clear, openTask, saveTask: () => save(undefined, true), restored: restored.current,
     isBusy: () => !!job.current,
-    canDiscard: () => !job.current && (!task.current || window.confirm('丢弃清单也会释放批量任务和内存结果，请确认需要的 ZIP 已保存。')),
+    canDiscard: () => !job.current && (!task.current || window.confirm('丢弃清单也会释放批量任务和内存结果，请确认需要的交付 ZIP 或任务文件已保存。')),
     cancel: () => { if (!job.current?.writing) job.current?.controller.abort() },
     canCancel: !!job.current && !job.current.writing,
     stale: !!inputs.current && (capturedSession.current !== session || !sameExportInputs(inputs.current, captureExportInputs(current))),

@@ -1,6 +1,6 @@
 import JSZip from 'jszip'
 import type { ProjectDocument } from '@/types/project'
-import { createProjectArchive, readProjectArchive } from './project-archive'
+import { createProjectArchive, readProjectArchive, MAX_PROJECT_BYTES } from './project-archive'
 import { validateProjectManifest, type ProjectManifest } from './project-validation'
 import { sha256Bytes } from './content-hash'
 
@@ -60,7 +60,13 @@ export async function prepareDeliverySnapshot(document: ProjectDocument, signal?
 }> {
   assertDeliveryActive(signal)
   const archive = await createProjectArchive(document, { signal })
+  return restoreDeliverySnapshot(archive, signal)
+}
+
+/** 导入快照必须先经过工程归档的完整边界检查，之后才允许读取已验证的清单。 */
+export async function restoreDeliverySnapshot(archive: Blob, signal?: AbortSignal) {
   assertDeliveryActive(signal)
+  if (!archive.size || archive.size > MAX_PROJECT_BYTES) throw new Error('工程快照为空或超过 128 MiB。')
   const bytes = await archive.arrayBuffer()
   const restored = await readProjectArchive(bytes)
   assertDeliveryActive(signal)

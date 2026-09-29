@@ -769,6 +769,8 @@ function getPickerTypes(defaultName: string) {
   const extension = defaultName.match(/\.[^.]+$/)?.[0]?.toLowerCase()
 
   switch (extension) {
+    case '.svgabatch':
+      return [{ description: 'SVGA 批量任务（包含源快照）', accept: { 'application/octet-stream': ['.svgabatch'] } }]
     case '.svga':
       return [{ description: 'SVGA File', accept: { 'application/octet-stream': ['.svga'] } }]
     case '.zip':

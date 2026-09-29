@@ -10,6 +10,16 @@ vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }))
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.clearAllMocks() })
 
 describe('save result reporting', () => {
+  it('任务文件使用独立扩展名与保存类型，不混作客户交付 ZIP', async () => {
+    const write = vi.fn(), close = vi.fn(), picker = vi.fn(async () => ({ createWritable: async () => ({ write, close }) }))
+    vi.stubGlobal('window', { showSaveFilePicker: picker })
+    expect(await saveGeneratedFile(new Blob(['task']), 'batch.svgabatch')).toBe(true)
+    expect(picker).toHaveBeenCalledWith({ suggestedName: 'batch.svgabatch', types: [
+      { description: 'SVGA 批量任务（包含源快照）', accept: { 'application/octet-stream': ['.svgabatch'] } },
+    ] })
+    expect(write).toHaveBeenCalledOnce()
+    expect(close).toHaveBeenCalledOnce()
+  })
   it('does not report success when the native save dialog is cancelled', async () => {
     vi.mocked(dialogSave).mockResolvedValue(null)
     vi.stubGlobal('window', { __TAURI_INTERNALS__: {}, nativeAPI: createNativeAPI() })
