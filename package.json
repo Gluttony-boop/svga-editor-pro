@@ -17,6 +17,8 @@
     "test:packaging": "node --test scripts/package-github.node-test.mjs scripts/publish-workspace.node-test.mjs",
     "test:licensing": "npm test --prefix services/licensing",
     "build:licensing": "npm run build --prefix services/licensing",
+    "prepare:updater-config": "node scripts/prepare-updater-config.mjs",
+    "test:updater-config": "node --test scripts/prepare-updater-config.node-test.mjs",
     "commercial:preflight": "node scripts/commercial-preflight.mjs",
     "test:commercial-preflight": "node --test scripts/commercial-preflight.node-test.mjs",
     "release:manifest": "node scripts/release-manifest.mjs",

@@ -9,9 +9,11 @@
 - 现有 `npm run package:github` 是“提交 → 云端构建 → 下载安装包”，不是客户端自动更新。不能把 Actions artifact 链接直接当作稳定、公开的生产更新源。
 - 本文的签名发布流程尚未启用：当前没有生产更新公钥、公开下载端点、签名 Secrets 或已发布的签名更新包。不能把“未配置”“断网”显示成“已是最新版”。
 - 当前已接入 Tauri updater 的 npm/Rust 插件、最小 capability、前端“检查桌面更新”入口和可测试更新策略；由于生产公钥、HTTPS endpoint、签名安装包和 `latest.json` 尚未配置，桌面检查在正式环境仍会安全地显示“未配置”，不会假报最新版或安装未签名文件。
+- 新增手动 `.github/workflows/publish-windows-release.yml`：使用 GitHub Releases 作为静态分发端点，先创建 draft Release，再由负责人确认发布；工作流通过临时 overlay 注入 updater 公钥和 GitHub `latest.json` 地址，不把公钥/私钥写进源码。没有配置仓库变量 `TAURI_UPDATER_PUBLIC_KEY` 与两个签名 Secrets 时，工作流会在构建前停止。
 - 原生启动门卫已接入：`src-tauri/src/app_updates.rs` 只在编译进 `plugins.updater` 的配置同时满足静态 HTTPS 端点、minisign 公钥、`requireSignedVersion: true` 且所有危险开关关闭时注册 updater。当前 `tauri.conf.json` 没有 updater 配置，因此桌面仍正常启动但更新保持禁用。
 - 原生 `get_update_configuration` 命令只返回 `{ configured, reason, currentVersion }`，不接受前端传入公钥/端点，也不回传配置内容。缺字段、空对象、非 HTTPS、URL 凭据/查询参数、危险 TLS、降级开关和无效公钥都会 fail-closed；网页没有 updater 插件时保持 disabled。
 - capability 只授予 `updater:allow-check`、`updater:allow-download` 和 `updater:allow-install`；不授予组合式 `download_and_install`，下载与安装在界面中保持分离。
+- 更新界面已将句柄释放做成幂等清理：检查结果在窗口关闭或请求过期时会释放，安装不会重复关闭同一句柄；交付包生成/保存也会阻止安装。工程有未保存修改时，默认要求保存，另提供带确认的“放弃修改并安装”路径。
 
 本轮没有生成生产密钥、改变仓库可见性、上传文件或发布版本。
 
@@ -75,6 +77,20 @@ R2 的自定义域名可使用缓存；`r2.dev` 属于限速开发端点，不�
 验收至少包含：清单 404/断网、空签名、包被篡改、缺当前平台、旧版本/相同版本、不完整配置、下载过程中修改工程、保存取消/失败、导出进行中、安装失败后可继续编辑。
 
 ## 本地清单工具
+
+## GitHub 免费发布路径
+
+本项目提供手动工作流 `.github/workflows/publish-windows-release.yml`。它不在每次提交时发布，只在 GitHub Actions 中手动输入版本 Tag 和更新说明后运行：先跑检查、测试和签名构建，再创建 draft Release。负责人检查资产后点击 Publish，客户端从固定的
+`https://github.com/<owner>/<repo>/releases/latest/download/latest.json` 读取清单。
+
+首次启用需要在仓库设置中配置：
+
+1. 生成一套 Tauri updater 密钥；公钥放到仓库 Variables 的 `TAURI_UPDATER_PUBLIC_KEY`，私钥只放到 Actions Secrets 的 `TAURI_SIGNING_PRIVATE_KEY`，密码放到 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。私钥不要提交、不要放进 `VITE_*`、不要发到聊天中。
+2. 确认仓库为公开仓库，或接受私有仓库的 Actions 免费额度限制。公开仓库的标准 GitHub-hosted runner 可免费使用；Release 资产不应放入 Git 历史，而应作为 Release 资产。
+3. 手动运行 `Publish signed Windows release`，输入例如 `v2.1.0`。工作流只创建 draft，确认安装包、`.sig` 和 `latest.json` 后再发布。
+4. 真实旧版桌面包执行“检查 → 下载验签 → 安装 → 重启”验收。当前代码没有生产公钥，因此工作流在配置前会安全停止，不能直接生成可更新安装包。
+
+这条路径不需要自建服务器，也不需要把 GitHub Token 放进客户端；Actions 使用运行时的 `GITHUB_TOKEN` 上传 Release。它不等于绝对零成本：私有仓库超出免费 Actions 额度、使用大型 runner 或其他 GitHub 计费产品时可能产生费用，正式启用前应设置预算和用量告警。
 
 只需要 Node.js 20+，无新增依赖。首次先查看帮助：
 

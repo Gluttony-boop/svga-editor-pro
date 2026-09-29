@@ -13,7 +13,7 @@ async function fixture({ updater, license, dirty = false } = {}) {
   await mkdir(path.join(root, 'docs/commercial'), { recursive: true })
   const packageJson = {
     version: '2.0.0',
-    scripts: { 'package:github': 'node scripts/package-github.mjs', 'release:manifest': 'node scripts/release-manifest.mjs', 'test:licensing': 'npm test', 'test:release-manifest': 'node --test' },
+    scripts: { 'package:github': 'node scripts/package-github.mjs', 'release:manifest': 'node scripts/release-manifest.mjs', 'test:licensing': 'npm test', 'test:release-manifest': 'node --test', 'prepare:updater-config': 'node scripts/prepare-updater-config.mjs', 'test:updater-config': 'node --test' },
   }
   const tauri = { version: '2.0.0', bundle: { targets: ['nsis'] }, plugins: {} }
   if (updater !== undefined) tauri.plugins.updater = updater
@@ -21,7 +21,7 @@ async function fixture({ updater, license, dirty = false } = {}) {
   await writeFile(path.join(root, 'package.json'), JSON.stringify(packageJson))
   await writeFile(path.join(root, 'src-tauri/tauri.conf.json'), JSON.stringify(tauri))
   await writeFile(path.join(root, 'src-tauri/Cargo.toml'), '[package]\nversion = "2.0.0"\n')
-  for (const file of ['.github/workflows/package-windows.yml', '.github/workflows/commercial-foundations.yml', 'scripts/package-github.mjs', 'scripts/release-manifest.mjs', 'docs/commercial/STATUS.md']) await writeFile(path.join(root, file), 'placeholder')
+  for (const file of ['.github/workflows/package-windows.yml', '.github/workflows/publish-windows-release.yml', '.github/workflows/commercial-foundations.yml', 'scripts/package-github.mjs', 'scripts/release-manifest.mjs', 'scripts/prepare-updater-config.mjs', 'docs/commercial/STATUS.md']) await writeFile(path.join(root, file), 'placeholder')
   await writeFile(path.join(root, 'src-tauri/resources/README.md'), '不得放入授权私钥或更新私钥。').catch(async () => {
     await mkdir(path.join(root, 'src-tauri/resources'), { recursive: true })
     await writeFile(path.join(root, 'src-tauri/resources/README.md'), '不得放入授权私钥或更新私钥。')

@@ -1,0 +1,82 @@
+name: Publish signed Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Git tag for the draft release, for example v2.1.0
+        required: true
+        type: string
+      release_notes:
+        description: Short release note shown in GitHub Releases and the updater
+        required: true
+        type: string
+
+# 只允许手动发布。公开仓库使用标准 runner 时不收 Actions 分钟费；
+# release 仍先创建为 draft，负责人确认后再 Publish。
+permissions:
+  contents: write
+
+jobs:
+  publish-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check release credentials without printing them
+        shell: pwsh
+        env:
+          UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          UPDATER_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          UPDATER_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:UPDATER_PUBLIC_KEY)) { throw '仓库变量 TAURI_UPDATER_PUBLIC_KEY 未配置。' }
+          if ([string]::IsNullOrWhiteSpace($env:UPDATER_PRIVATE_KEY)) { throw '仓库 Secret TAURI_SIGNING_PRIVATE_KEY 未配置。' }
+          if ($null -eq $env:UPDATER_PRIVATE_KEY_PASSWORD) { throw '仓库 Secret TAURI_SIGNING_PRIVATE_KEY_PASSWORD 未配置。' }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        run: npm ci --include=optional
+
+      - name: Verify editor before release
+        run: |
+          npm run typecheck
+          npm run lint
+          npm run test:run
+          npm run test:release-manifest
+
+      - name: Generate ephemeral updater configuration
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/prepare-updater-config.mjs
+
+      - name: Build and create draft GitHub Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ inputs.release_tag }}
+          releaseName: SVGA Editor Pro ${{ inputs.release_tag }}
+          releaseBody: ${{ inputs.release_notes }}
+          releaseDraft: true
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc --config .github/generated/updater-config.json

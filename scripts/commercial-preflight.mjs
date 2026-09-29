@@ -158,15 +158,17 @@ export async function collectChecks(root = DEFAULT_ROOT, { git = true } = {}) {
   const licenseError = validateLicenseConfig(tauri.plugins?.license)
   checks.push(licenseError ? result('license', 'warn', '桌面授权尚未接通', licenseError) : result('license', 'pass', '桌面授权配置形状通过', '授权端点、公钥和固定身份字段满足本地门卫。'))
 
-  const requiredScripts = ['package:github', 'release:manifest', 'test:licensing', 'test:release-manifest']
+  const requiredScripts = ['package:github', 'release:manifest', 'test:licensing', 'test:release-manifest', 'prepare:updater-config', 'test:updater-config']
   const missingScripts = requiredScripts.filter(name => typeof packageJson.scripts?.[name] !== 'string')
   checks.push(missingScripts.length ? result('scripts', 'block', '发布脚本不完整', `缺少 npm 脚本：${missingScripts.join('、')}。`) : result('scripts', 'pass', '发布脚本齐全', '一键打包、清单校验和授权原型检查入口均存在。'))
 
   const requiredFiles = [
     '.github/workflows/package-windows.yml',
+    '.github/workflows/publish-windows-release.yml',
     '.github/workflows/commercial-foundations.yml',
     'scripts/package-github.mjs',
     'scripts/release-manifest.mjs',
+    'scripts/prepare-updater-config.mjs',
     'docs/commercial/STATUS.md',
   ]
   const missingFiles = []
