@@ -4,21 +4,26 @@
 //! lease/refresh token 写入操作系统 keyring，不回传给前端；前端只得到粗粒度状态。
 
 use crate::license_config::{client_config, LicenseClientConfig};
+#[path = "license_clock.rs"]
+mod license_clock;
+
 use crate::license_verify::{
     parse_ed25519_public_jwk, verify_lease, verify_lease_for_status, LeaseClaims, LeaseExpectation,
 };
+use license_clock::{checkpoint, observe, validate_checkpoint, ClockCheckpoint, ClockState, MonotonicAnchor};
 use keyring::Entry;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const SERVICE: &str = "com.svga.editor.pro.license";
 const STATE_KEY: &str = "lease-state-v2";
 const LEGACY_STATE_KEY: &str = "lease-state-v1";
+const CLOCK_KEY: &str = "lease-clock-v1";
 const DEVICE_KEY: &str = "device-id-v1";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -54,6 +59,11 @@ fn operation_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
+fn monotonic_anchor() -> &'static Mutex<Option<MonotonicAnchor>> {
+    static ANCHOR: OnceLock<Mutex<Option<MonotonicAnchor>>> = OnceLock::new();
+    ANCHOR.get_or_init(|| Mutex::new(None))
+}
+
 fn load_state() -> Result<Option<StoredLease>, String> {
     match entry(STATE_KEY)?.get_password() {
         Ok(value) => {
@@ -80,6 +90,52 @@ fn save_state(value: &StoredLease) -> Result<(), String> {
         .map_err(|_| "无法写入系统授权状态。".to_string())
 }
 
+fn load_clock() -> Result<Option<ClockCheckpoint>, String> {
+    match entry(CLOCK_KEY)?.get_password() {
+        Ok(value) => {
+            let checkpoint: ClockCheckpoint = serde_json::from_str(&value)
+                .map_err(|_| "本机授权时间锚损坏，请联网刷新。".to_string())?;
+            Ok(Some(checkpoint))
+        }
+        Err(error) if is_missing(&error) => Ok(None),
+        Err(_) => Err("无法读取本机授权时间锚。".to_string()),
+    }
+}
+
+fn save_clock(value: &ClockCheckpoint) -> Result<(), String> {
+    let json = serde_json::to_string(value).map_err(|_| "无法序列化本机授权时间锚。".to_string())?;
+    entry(CLOCK_KEY)?
+        .set_password(&json)
+        .map_err(|_| "无法写入本机授权时间锚。".to_string())
+}
+
+fn clear_monotonic_anchor() {
+    if let Ok(mut anchor) = monotonic_anchor().lock() {
+        *anchor = None;
+    }
+}
+
+fn save_state_with_clock(value: &StoredLease, claims: &LeaseClaims) -> Result<(), String> {
+    let wall = now_utc().unwrap_or(claims.iat);
+    let checkpoint = checkpoint(&value.license_id, claims.iat, wall.max(claims.iat))
+        .map_err(str::to_owned)?;
+    save_state(value)?;
+    if let Err(error) = save_clock(&checkpoint) {
+        // 没有时间锚时离线状态无法安全计算，宁可清掉新 lease 也不把它当作有效授权。
+        let _ = delete_entry(STATE_KEY);
+        clear_monotonic_anchor();
+        return Err(error);
+    }
+    if let Ok(mut anchor) = monotonic_anchor().lock() {
+        *anchor = Some(MonotonicAnchor::new(
+            &value.license_id,
+            claims.iat,
+            checkpoint.last_wall_utc.max(claims.iat),
+        ));
+    }
+    Ok(())
+}
+
 fn delete_entry(key: &str) -> Result<(), String> {
     match entry(key)?.delete_credential() {
         Ok(()) => Ok(()),
@@ -90,7 +146,9 @@ fn delete_entry(key: &str) -> Result<(), String> {
 
 fn delete_state() -> Result<(), String> {
     delete_entry(STATE_KEY)?;
-    delete_entry(LEGACY_STATE_KEY)
+    delete_entry(LEGACY_STATE_KEY)?;
+    clear_monotonic_anchor();
+    delete_entry(CLOCK_KEY)
 }
 
 fn load_device_id(create_if_missing: bool) -> Result<String, String> {
@@ -316,11 +374,48 @@ pub fn current_status(config: &tauri::AppHandle) -> NativeLicenseStatus {
     // 旧版本把 keyring 中的 claims 当作事实；这些字段可被复制或篡改，
     // 所有状态元数据必须来自本次验签后的 JWT。离线状态不要求历史 nonce，
     // 但仍验证设备摘要、issuer、audience、kid 和完整时间范围。
-    let claims = match verify_stored_claims(&config, stored_ref, &device_hash, Some(now)) {
+    // 先只验证签名和 claims，再由时间门卫判断墙上时钟；若把回拨后的 now
+    // 直接传入验签器，合法但“尚未生效”的 lease 会被误报为签名损坏。
+    let claims = match verify_stored_claims(&config, stored_ref, &device_hash, None) {
         Ok(value) => value,
         Err(reason) => return status(true, "signature-invalid", &reason, None),
     };
-    if now < claims.iat.saturating_sub(300) {
+    let mut checkpoint = match load_clock() {
+        Ok(Some(value)) => value,
+        Ok(None) => return status(true, "clock-suspect", "本机授权时间锚缺失，请联网刷新。", Some(&claims)),
+        Err(reason) => return status(true, "storage-error", &reason, Some(&claims)),
+    };
+    if let Err(reason) = validate_checkpoint(&checkpoint, &stored_ref.license_id, claims.iat) {
+        return status(true, "clock-suspect", reason, Some(&claims));
+    }
+    let monotonic = {
+        let mut anchor = match monotonic_anchor().lock() {
+            Ok(value) => value,
+            Err(_) => return status(true, "clock-suspect", "本机授权时间锚不可用，请联网刷新。", Some(&claims)),
+        };
+        if anchor
+            .as_ref()
+            .map_or(true, |value| !value.matches(&stored_ref.license_id, claims.iat))
+        {
+            *anchor = Some(MonotonicAnchor::new(
+                &stored_ref.license_id,
+                claims.iat,
+                checkpoint.last_wall_utc.max(claims.iat),
+            ));
+        }
+        anchor.as_ref().map_or(claims.iat, MonotonicAnchor::monotonic_utc)
+    };
+    let observation = match observe(&checkpoint, now, monotonic) {
+        Ok(value) => value,
+        Err(reason) => return status(true, "clock-suspect", reason, Some(&claims)),
+    };
+    if observation.next_last_wall_utc > checkpoint.last_wall_utc {
+        checkpoint.last_wall_utc = observation.next_last_wall_utc;
+        if let Err(reason) = save_clock(&checkpoint) {
+            return status(true, "storage-error", &reason, Some(&claims));
+        }
+    }
+    if observation.state == ClockState::Suspect {
         return status(
             true,
             "clock-suspect",
@@ -328,10 +423,10 @@ pub fn current_status(config: &tauri::AppHandle) -> NativeLicenseStatus {
             Some(&claims),
         );
     }
-    if now >= claims.license_expires_at {
+    if observation.logical_now >= claims.license_expires_at {
         return status(true, "expired", "授权已到绝对截止时间。", Some(&claims));
     }
-    if now >= claims.exp {
+    if observation.logical_now >= claims.exp {
         return status(
             true,
             "expired",
@@ -339,7 +434,7 @@ pub fn current_status(config: &tauri::AppHandle) -> NativeLicenseStatus {
             Some(&claims),
         );
     }
-    let state = if claims.exp - now <= 300 {
+    let state = if claims.exp - observation.logical_now <= 300 {
         "near-expiry"
     } else {
         "offline"
@@ -382,7 +477,7 @@ pub async fn activate(
         refresh_token,
         lease_token: string_field(&body, "lease")?,
     };
-    save_state(&stored)?;
+    save_state_with_clock(&stored, &claims)?;
     Ok(status(true, "active", "授权已激活。", Some(&claims)))
 }
 
@@ -405,7 +500,7 @@ pub async fn refresh(config: &tauri::AppHandle) -> Result<NativeLicenseStatus, S
     }
     stored.refresh_token = refresh_token;
     stored.lease_token = string_field(&body, "lease")?;
-    save_state(&stored)?;
+    save_state_with_clock(&stored, &claims)?;
     Ok(status(true, "active", "授权已刷新。", Some(&claims)))
 }
 

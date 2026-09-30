@@ -142,6 +142,36 @@ test('即使合法签名也拒绝越过绝对期限、超长lease及非整数时
       .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: context.kid }).setIssuer(ISSUER).setAudience(AUDIENCE).sign(privateKey)
     await assert.rejects(verifyLease(token, publicJwk, context))
   }
+  })
+
+test('协议校验器与原生边界一致拒绝非UUID主体、负时间和不可能的绝对期限', async () => {
+  const context = { now, deviceHash: await sha256(deviceId), nonce, kid: 'test-key-1' }
+  for (const patch of [
+    { sub: 'not-a-license-id' },
+    { iat: -1, nbf: -1, exp: 900, licenseExpiresAt: 2000 },
+    { iat: now, nbf: now, exp: now + 900, licenseExpiresAt: now },
+  ]) {
+    const token = await new SignJWT({ sub: crypto.randomUUID(), iat: now, nbf: now, exp: now + 900, licenseExpiresAt: now + 7200, plan: 'pro', deviceHash: context.deviceHash, nonce, ...patch })
+      .setProtectedHeader({ alg: 'EdDSA', typ: 'JWT', kid: context.kid }).setIssuer(ISSUER).setAudience(AUDIENCE).sign(privateKey)
+    await assert.rejects(verifyLease(token, publicJwk, context))
+  }
+})
+
+test('协议校验器拒绝重复、未知或缺失的 JWT 字段以及超长绝对授权时长', async () => {
+  const context = { now, deviceHash: await sha256(deviceId), nonce, kid: 'test-key-1' }
+  const sign = async (payload, header = { alg: 'EdDSA', typ: 'JWT', kid: context.kid }) => new SignJWT(payload)
+    .setProtectedHeader(header).setIssuer(ISSUER).setAudience(AUDIENCE).setSubject('00000000-0000-4000-8000-000000000007')
+    .setIssuedAt(now).setNotBefore(now).setExpirationTime(now + 900).sign(privateKey)
+  await assert.rejects(verifyLease(await sign({ plan: 'pro', deviceHash: context.deviceHash, nonce, licenseExpiresAt: now + 7200, extra: true }), publicJwk, context))
+  await assert.rejects(verifyLease(await sign({ deviceHash: context.deviceHash, nonce, licenseExpiresAt: now + 7200 }), publicJwk, context))
+  await assert.rejects(verifyLease(await sign({ plan: 'pro', deviceHash: context.deviceHash, nonce, licenseExpiresAt: now + 367 * 86400 }), publicJwk, context))
+  const valid = await sign({ plan: 'pro', deviceHash: context.deviceHash, nonce, licenseExpiresAt: now + 7200 })
+  const [header, , signature] = valid.split('.')
+  const duplicatePayload = Buffer.from(`{"iss":"${ISSUER}","iss":"${ISSUER}","aud":"${AUDIENCE}","sub":"00000000-0000-4000-8000-000000000007","iat":${now},"nbf":${now},"exp":${now + 900},"licenseExpiresAt":${now + 7200},"deviceHash":"${context.deviceHash}","nonce":"${nonce}","plan":"pro"}`).toString('base64url')
+  await assert.rejects(verifyLease(`${header}.${duplicatePayload}.${signature}`, publicJwk, context))
+  const extraHeader = await sign({ plan: 'pro', deviceHash: context.deviceHash, nonce, licenseExpiresAt: now + 7200 }, { alg: 'EdDSA', typ: 'JWT', kid: context.kid, extra: 'x' })
+  await assert.rejects(verifyLease(extraHeader, publicJwk, context))
+  await assert.rejects(verifyLease(valid, { ...publicJwk, extra: true }, context))
 })
 
 test('未配置、错误管理员凭据、限流都失败关闭且不泄露信息', async () => {
