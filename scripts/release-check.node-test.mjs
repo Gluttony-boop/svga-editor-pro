@@ -87,7 +87,7 @@ test('发布上下文拒绝不安全端点、错误版本 Tag 和无效公钥', 
   for (const endpoint of ['http://updates.example.com/latest.json', 'https://updates.example.com/latest.json?token=x']) {
     assert.throws(() => contextFixture({ endpoint }), /更新端点|HTTPS/)
   }
-  assert.throws(() => contextFixture({ tag: 'v2.0.0-beta.1' }), /Tag/) 
+  assert.throws(() => contextFixture({ tag: 'v2.0.0-beta.1' }), /Tag/)
   assert.throws(() => contextFixture({ publicKey: 'not-a-key' }), /公钥/)
   assert.throws(() => contextFixture({ tauriConfig: { version: VERSION, bundle: { active: true, targets: ['dmg'] } } }), /NSIS/)
 })
