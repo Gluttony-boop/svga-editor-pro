@@ -80,7 +80,7 @@ R2 的自定义域名可使用缓存；`r2.dev` 属于限速开发端点，不�
 
 ## GitHub 免费发布路径
 
-本项目提供手动工作流 `.github/workflows/publish-windows-release.yml`。它不在每次提交时发布，只在 GitHub Actions 中手动输入版本 Tag 和更新说明后运行：先跑检查、测试和签名构建，再创建 draft Release。负责人检查资产后点击 Publish，客户端从固定的
+本项目提供手动工作流 `.github/workflows/publish-windows-release.yml`。它不在每次提交或旧 `v*` Tag 推送时发布，只在 GitHub Actions 中手动输入版本 Tag、默认分支上的完整 `expected_sha` 和更新说明后运行：先核对默认分支、三处版本号、Tag 未被占用和提交 SHA，再构建并使用真实安装包字节验签；只有验收通过后才创建 draft Release。负责人检查资产后点击 Publish，客户端从固定的
 `https://github.com/<owner>/<repo>/releases/latest/download/latest.json` 读取清单。
 
 首次启用需要在仓库设置中配置：
@@ -88,7 +88,7 @@ R2 的自定义域名可使用缓存；`r2.dev` 属于限速开发端点，不�
 1. 生成一套 Tauri updater 密钥；公钥放到仓库 Variables 的 `TAURI_UPDATER_PUBLIC_KEY`，私钥只放到 Actions Secrets 的 `TAURI_SIGNING_PRIVATE_KEY`，密码放到 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。私钥不要提交、不要放进 `VITE_*`、不要发到聊天中。
    可选设置仓库 Variable `TAURI_UPDATER_ENDPOINT` 为国内镜像的公开 HTTPS `latest.json` 地址；留空时使用当前 GitHub 仓库的 Releases 地址。端点不能包含 Token、用户名/密码、查询参数或非标准端口；镜像必须提供与签名安装包匹配的清单。
 2. 确认仓库为公开仓库，或接受私有仓库的 Actions 免费额度限制。公开仓库的标准 GitHub-hosted runner 可免费使用；Release 资产不应放入 Git 历史，而应作为 Release 资产。
-3. 手动运行 `Publish signed Windows release`，输入例如 `v2.1.0`。工作流只创建 draft，确认安装包、`.sig` 和 `latest.json` 后再发布。
+3. 在 `master` 上取得要发布提交的完整 SHA，手动运行 `Publish signed Windows release`，填写例如 `v2.1.0`、该 SHA 和更新说明。工作流只创建 draft；资产包含安装包、同名 `.sig`、`latest.json`、`release-receipt.json` 和 `SHA256SUMS.txt`，确认它们后再 Publish。旧的 `build.yml` 只保留 CI artifact，不会因旧 Tag 自动创建无签名公开 Release。
 4. 真实旧版桌面包执行“检查 → 下载验签 → 安装 → 重启”验收。当前代码没有生产公钥，因此工作流在配置前会安全停止，不能直接生成可更新安装包。
 
 这条路径不需要自建服务器，也不需要把 GitHub Token 放进客户端；Actions 使用运行时的 `GITHUB_TOKEN` 上传 Release。它不等于绝对零成本：私有仓库超出免费 Actions 额度、使用大型 runner 或其他 GitHub 计费产品时可能产生费用，正式启用前应设置预算和用量告警。

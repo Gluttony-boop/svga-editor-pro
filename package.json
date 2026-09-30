@@ -23,6 +23,8 @@
     "test:commercial-preflight": "node --test scripts/commercial-preflight.node-test.mjs",
     "release:manifest": "node scripts/release-manifest.mjs",
     "test:release-manifest": "node --test scripts/release-manifest.node-test.mjs",
+    "release:check": "node scripts/release-check.mjs",
+    "test:release-check": "node --test scripts/release-check.node-test.mjs",
     "build:mac": "tauri build --target universal-apple-darwin",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
